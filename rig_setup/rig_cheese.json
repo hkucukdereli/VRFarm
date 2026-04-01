@@ -1,0 +1,81 @@
+{
+  "camera": {
+    "fps": 50,
+    "resolution": [
+      1280,
+      720
+    ]
+  },
+  "data": {
+    "behavior_dir": "/Users/hakan/VRFarm/data",
+    "stim_dir": "/home/vruser/stims",
+    "video_dir": "/media/vruser/ssd/video"
+  },
+  "lick": {
+    "electrode": 4,
+    "i2c_address": "0x5A"
+  },
+  "name": "cheese",
+  "network": {
+    "camera_port": 5001,
+    "control_port": 5572,
+    "flask_port": 5000,
+    "monitor_port": 5571,
+    "worker_port": 5570
+  },
+  "photodiode": {
+    "gpio": 24
+  },
+  "pis": [
+    {
+      "deployed": true,
+      "deployed_at": "2026-04-01 13:48",
+      "installed": true,
+      "installed_at": "pre-existing",
+      "ip": "192.168.10.102",
+      "name": "mozzarella",
+      "role": "stim",
+      "status": "busy",
+      "user": "vruser"
+    },
+    {
+      "deployed": true,
+      "deployed_at": "2026-04-01 13:48",
+      "installed": true,
+      "installed_at": "pre-existing",
+      "ip": "192.168.10.101",
+      "name": "cheddar",
+      "role": "control",
+      "status": "busy",
+      "user": "vruser"
+    }
+  ],
+  "reward": {
+    "calibration": {
+      "main": [
+        [
+          10,
+          2.1
+        ],
+        [
+          20,
+          4.3
+        ],
+        [
+          30,
+          6.8
+        ],
+        [
+          50,
+          11.2
+        ]
+      ]
+    },
+    "pins": {
+      "main": {
+        "gpio": 18,
+        "label": "reward"
+      }
+    }
+  }
+}

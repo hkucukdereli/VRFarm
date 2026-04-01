@@ -1,0 +1,50 @@
+# rig_geometry.yaml
+# Physical measurements of the screen/projector setup.
+# Edit this file when the rig changes, then re-run compute_warp_map.py.
+# All linear dimensions in inches unless noted.
+
+screen:
+  # Parabola equation (top/horizontal view): y = A - B*x²
+  # Mouse eye at origin, y = depth (forward), x = lateral
+  parabola_A: 5.0        # vertex distance (screen depth at 0° azimuth)
+  parabola_B: 0.125      # curvature coefficient
+  azimuth_max_deg: 105.0 # screen spans ±105° azimuth
+
+  # Vertical extent of screen (from side view)
+  # Screen bottom and top as seen from mouse eye
+  altitude_min_deg: 25.0  # bottom edge elevation from mouse eye (degrees)
+  altitude_max_deg: 74.0  # top edge elevation from mouse eye (degrees)
+  height_inches: 5.67     # physical screen height
+
+projector:
+  resolution: [1920, 1080]
+  throw_ratio: 1.2
+  throw_distance_cm: 48.0   # lens to screen center distance
+
+  # Projector optical axis elevation (degrees above horizontal)
+  # From side view: projector beam center hits screen at ~49° elevation
+  optical_axis_elevation_deg: 49.0
+
+  # Projector is centered horizontally (azimuth 0°)
+  # Lateral offset from mouse eye (inches) - 0 = perfectly centered
+  lateral_offset_inches: 0.0
+
+mouse:
+  # Mouse eye height above ball center (inches)
+  eye_height_above_ball: 1.0
+  # Ball diameter (inches)
+  ball_diameter: 8.0
+
+# Luminance correction baseline
+# These are theoretical cosine falloff estimates.
+# Replace with measured values after running display_test_patches.py
+# Format: list of [azimuth_deg, relative_luminance] pairs
+# relative_luminance = 1.0 at 0° (screen center)
+luminance_reference:
+  - [0,   1.000]
+  - [20,  0.960]
+  - [40,  0.870]
+  - [60,  0.720]
+  - [80,  0.540]
+  - [100, 0.350]
+  - [105, 0.300]

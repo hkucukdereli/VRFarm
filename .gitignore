@@ -205,3 +205,26 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# --- VRFarm project ---
+
+# Experiment data (subject histories, HDF5 trials, video, thumbnails)
+data/
+*.h5
+*.hdf5
+
+# Docs
+docs/
+
+# Generated calibration / stimulus artifacts
+*.npz
+warp_map.npz
+
+# Claude Code (keep CLAUDE.md tracked; ignore local state & settings)
+.claude/
+CLAUDE.local.md
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride

@@ -1,0 +1,1245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VRFarm Experiment</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: #1a1a2e; color: #e0e0e0; padding: 12px; font-size: 13px; }
+  h1 { font-size: 18px; margin-bottom: 8px; color: #fff; }
+  h3 { font-size: 13px; margin-bottom: 6px; color: #aaa; text-transform: uppercase; letter-spacing: 1px; }
+
+  .grid { display: grid; grid-template-columns: 500px 1fr; gap: 12px; }
+  .sidebar { display: flex; flex-direction: column; gap: 10px; }
+
+  .card { background: #16213e; border-radius: 8px; padding: 12px; }
+
+  label { display: block; font-size: 11px; color: #888; margin-bottom: 2px; margin-top: 6px; }
+  select, input[type=text], input[type=number] {
+    width: 100%; padding: 5px 8px; border: 1px solid #333; border-radius: 4px;
+    background: #0f3460; color: #e0e0e0; font-size: 13px; }
+  textarea { width: 100%; padding: 5px 8px; border: 1px solid #333; border-radius: 4px;
+             background: #0f3460; color: #e0e0e0; font-size: 12px; resize: vertical; height: 40px; }
+
+  .btn { padding: 6px 14px; border: none; border-radius: 4px; cursor: pointer;
+         font-size: 12px; font-weight: 600; transition: opacity 0.2s; }
+  .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .btn-blue { background: #1a73e8; color: #fff; }
+  .btn-green { background: #2e7d32; color: #fff; }
+  .btn-red { background: #c62828; color: #fff; }
+  .btn-orange { background: #e65100; color: #fff; }
+  .btn-teal { background: #00796b; color: #fff; }
+  .btn-sm { padding: 3px 10px; font-size: 11px; }
+  .btn:hover:not(:disabled) { opacity: 0.85; }
+  .btn-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+  .dot-green { background: #4caf50; }
+  .dot-red { background: #f44336; }
+  .dot-gray { background: #666; }
+
+  .pi-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 12px; }
+  .pi-role { color: #888; font-size: 11px; }
+
+  /* Session monitor */
+  .session-bar { background: #16213e; border-radius: 8px; padding: 10px 14px;
+                 display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin-bottom: 10px; }
+  .session-bar .label { font-size: 11px; color: #888; }
+  .session-bar .value { font-size: 16px; font-weight: 700; color: #fff; }
+  .session-bar .clock { font-size: 18px; font-weight: 700; font-family: monospace; color: #1a73e8; }
+  .session-bar .trial-clock { font-size: 16px; font-weight: 600; font-family: monospace; color: #ff9800; }
+
+  /* Video / Stim row */
+  .video-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+  .video-box { background: #0a0a1a; border-radius: 8px; overflow: hidden; position: relative; min-height: 320px; }
+  .video-box .box-header { display: flex; justify-content: space-between; align-items: center;
+                            padding: 6px 10px; background: #16213e; }
+  .video-box .box-header h3 { margin: 0; }
+  .video-box .box-content { display: flex; align-items: center; justify-content: center;
+                             min-height: 300px; background: #0a0a1a; }
+  .video-box img { max-width: 100%; max-height: 480px; display: block; }
+  .video-box .placeholder { color: #444; font-size: 12px; }
+
+  /* Raster panels */
+  .raster-panel { background: #16213e; border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
+  .raster-header { display: flex; justify-content: space-between; align-items: center;
+                    padding: 6px 10px; }
+  .raster-header h3 { margin: 0; }
+  .raster-header .info { font-size: 11px; color: #888; font-family: monospace; }
+  .raster-canvas { width: 100%; height: 50px; display: block; background: #0a0a1a; }
+
+  /* Trial table */
+  .trial-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  .trial-table th { text-align: left; padding: 4px 6px; color: #888; border-bottom: 1px solid #333; }
+  .trial-table td { padding: 3px 6px; border-bottom: 1px solid #1a1a2e; }
+  .trial-table tr:hover { background: #0f3460; }
+  .outcome-hit { color: #4caf50; }
+  .outcome-miss { color: #f44336; }
+
+  /* Log */
+  #log { background: #0a0a1a; border-radius: 4px; padding: 8px; font-family: monospace;
+         font-size: 11px; max-height: 150px; overflow-y: auto; margin-top: 8px; color: #888; }
+
+  /* Phase indicator */
+  .phase-bar { display: flex; gap: 4px; margin-bottom: 12px; }
+  .phase-step { padding: 4px 10px; border-radius: 12px; font-size: 11px;
+                background: #333; color: #888; }
+  .phase-step.active { background: #1a73e8; color: #fff; }
+  .phase-step.done { background: #2e7d32; color: #fff; }
+
+  .notes-wrap { position: relative; }
+  .notes-wrap textarea {
+    width: 100%; padding: 5px 8px; border: 1px solid #333; border-radius: 4px;
+    background: #0f3460; color: #e0e0e0; font-size: 13px; font-family: inherit;
+    height: 28px; resize: none; overflow: hidden;
+    transition: height 0.15s;
+  }
+  .notes-wrap textarea:focus {
+    height: 120px; position: absolute; z-index: 10; width: 100%;
+    resize: vertical; overflow: auto;
+  }
+
+  .quit-btn { position: fixed; top: 12px; right: 12px; width: 32px; height: 32px;
+              border-radius: 50%; border: none; background: #c62828; color: #fff;
+              font-size: 14px; font-weight: 700; cursor: pointer; opacity: 0.5;
+              transition: opacity 0.2s; z-index: 999; line-height: 32px; text-align: center; }
+  .quit-btn:hover { opacity: 1; }
+</style>
+</head>
+<body>
+
+<button class="quit-btn" onclick="quitApp()" title="Quit server">&times;</button>
+<h1>VRFarm Experiment</h1>
+
+<div class="phase-bar" id="phase-bar">
+  <span class="phase-step active" data-phase="setup">Rig Setup</span>
+  <span class="phase-step" data-phase="connected">Connected</span>
+  <span class="phase-step" data-phase="deployed">Experiment Deployed</span>
+  <span class="phase-step" data-phase="running">Running</span>
+  <span class="phase-step" data-phase="ended">Ended</span>
+</div>
+
+<div class="grid">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="card">
+      <h3>Rig</h3>
+      <select id="rig-select">
+        {% for r in rigs %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+      </select>
+      <div class="btn-row">
+        <button class="btn btn-blue" id="btn-load-rig" onclick="loadRig()">Load Rig</button>
+      </div>
+      <div id="pi-status"></div>
+      <label>Grace Period (sec)</label>
+      <input type="number" id="grace-period" value="10" min="0" max="60" step="1">
+    </div>
+
+    <div class="card">
+      <h3>Experiment</h3>
+      <select id="task-select">
+        {% for t in tasks %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+      </select>
+      <div id="task-last-saved" style="font-size:11px; color:#666; margin-top:4px;">Last saved: --</div>
+      <div class="btn-row">
+        <button class="btn btn-blue" id="btn-load-task" onclick="loadTask()" disabled>Load Experiment</button>
+        <button class="btn" id="btn-save-task" onclick="saveTask()" disabled style="background:#555">Save</button>
+        <button class="btn" id="btn-save-task-as" onclick="saveTaskAs()" disabled style="background:#555">Save As</button>
+      </div>
+    </div>
+
+    <div class="card" id="card-session">
+      <h3>Session</h3>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:0 10px;">
+        <div><label>Subject ID</label><input type="text" id="subject-id" value="HK001"></div>
+        <div><label>Date</label><input type="text" id="session-date" value=""></div>
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:0 10px;">
+        <div><label>Session #</label><input type="number" id="session-num" value="1" min="1"></div>
+        <div class="notes-wrap"><label>Notes</label><textarea id="session-notes"></textarea></div>
+      </div>
+
+      <div id="experiment-subsections" style="display:none;">
+        <h3 style="font-size:11px; color:#888; margin:10px 0 6px;">STIMULUS</h3>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0 8px;">
+          <div><label>Size (deg)</label><input type="number" id="p-size_deg" step="0.5" min="0.5" class="task-param"></div>
+          <div><label>Duration (s)</label><input type="number" id="p-duration_s" step="0.1" min="0.1" class="task-param"></div>
+          <div><label>Altitude (deg)</label><input type="number" id="p-altitude_deg" step="1" class="task-param"></div>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0 8px;">
+          <div><label>Contrast</label><input type="text" id="p-contrast_values" class="task-param" title="e.g. [0.25, 0.15, 0.125]"></div>
+          <div><label>Proportions</label><input type="text" id="p-contrast_proportions" class="task-param" title="e.g. [0.34, 0.33, 0.33]"></div>
+          <div><label>Background</label><input type="number" id="p-background_gray" step="0.1" min="0" max="1" class="task-param"></div>
+        </div>
+        <div id="photodiode-sync-row" style="display:none; align-items:center; gap:12px; margin-top:4px;">
+          <label style="margin:0; display:inline-flex; align-items:center; gap:4px; cursor:pointer;">
+            <input type="checkbox" id="p-photodiode_sync_enabled" class="task-param"> Photodiode stim sync
+          </label>
+          <div style="display:inline-flex; align-items:center; gap:4px;">
+            <label style="margin:0;">every</label>
+            <input type="number" id="p-photodiode_sync_every_n" step="1" min="1" max="60" class="task-param" style="width:50px;">
+            <label style="margin:0;">frames</label>
+          </div>
+        </div>
+
+        <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">REWARD</h3>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr 1fr 1fr; gap:0 8px;">
+          <div><label>Level</label><select id="p-level" class="task-param"><option value="1">1</option><option value="2">2</option><option value="2.5">2.5</option><option value="3">3</option></select></div>
+          <div><label>Amount (uL)</label><input type="number" id="p-amount_ul" step="0.5" min="0" class="task-param"></div>
+          <div><label>Delay (s)</label><input type="number" id="p-reward_delay_s" step="0.1" min="0" class="task-param"></div>
+          <div><label>Resp win (s)</label><input type="number" id="p-response_window" step="0.1" min="0" class="task-param" title="Response window duration after delay"></div>
+          <div><label>Timeout</label><select id="p-timeout_rule" class="task-param"><option value="none">None</option><option value="rate">Rate</option><option value="count">Count</option></select></div>
+          <div><label>Max lick/s</label><input type="number" id="p-max_lick_rate" step="0.05" min="0" class="task-param" title="Max lick rate for timeout rule"></div>
+        </div>
+
+        <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">TRIAL STRUCTURE</h3>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0 8px;">
+          <div><label>N blocks</label><input type="number" id="p-n_blocks" min="1" class="task-param" oninput="_updateNTrials()"></div>
+          <div><label>Block size</label><input type="number" id="p-block_size" min="1" class="task-param" oninput="_updateNTrials()"></div>
+          <div><label>N trials</label><input type="number" id="p-n_trials" readonly style="background:#2a2a2a; color:#888"></div>
+          <div><label>Block sequence (deg)</label><input type="text" id="p-block_sequence" class="task-param" title="e.g. [80, -40, 40]"></div>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0 8px;">
+          <div><label>Pre-stim (s)</label><input type="text" id="p-prestim_duration" class="task-param" title="number or [min, max]"></div>
+          <div><label>Post-stim (s)</label><input type="text" id="p-poststim_duration" class="task-param" title="number or [min, max]"></div>
+          <div><label>ITI (s)</label><input type="text" id="p-iti" class="task-param" title="number or [min, max]"></div>
+          <div><label>Go rule</label><select id="p-go_rule" class="task-param"><option value="all">all</option><option value="left">left</option><option value="right">right</option></select></div>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0 8px;">
+          <div><label>Global delay (s)</label><input type="text" id="p-global_delay" class="task-param" title="number or [min, max]"></div>
+          <div><label>Block delay (s)</label><input type="text" id="p-block_delay" class="task-param" title="number or [min, max]"></div>
+          <div style="display:flex; align-items:flex-end; padding-bottom:6px;">
+            <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:#aaa; cursor:pointer;">
+              <input type="checkbox" id="p-block_delay_skip_first" class="task-param"> Skip 1st block delay
+            </label>
+          </div>
+          <div style="display:flex; align-items:flex-end; padding-bottom:6px;">
+            <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:#aaa; cursor:pointer;">
+              <input type="checkbox" id="p-randomize_blocks" class="task-param"> Randomize blocks
+            </label>
+          </div>
+        </div>
+
+        <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">ADAPTIVE</h3>
+        <div style="display:grid; grid-template-columns:auto 1fr 1fr 1fr; gap:0 8px; align-items:end;">
+          <div style="display:flex; align-items:flex-end; padding-bottom:6px;">
+            <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:#aaa; cursor:pointer;">
+              <input type="checkbox" id="p-adaptive_enabled" class="task-param"> Enabled
+            </label>
+          </div>
+          <div><label>Initial</label><input type="number" id="p-adaptive_initial" step="0.1" min="0" max="1" class="task-param"></div>
+          <div><label>Step up</label><input type="number" id="p-adaptive_step_up" step="0.05" min="0" class="task-param"></div>
+          <div><label>Step down</label><input type="number" id="p-adaptive_step_down" step="0.05" min="0" class="task-param"></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Main area: Experiment Monitor -->
+  <div>
+    <!-- Session bar -->
+    <div class="session-bar">
+      <div>
+        <span class="label">Session</span><br>
+        <span class="value" id="mv-session-id">--</span>
+        <span id="session-start-time" style="font-size:11px; color:#888; margin-left:6px"></span>
+      </div>
+      <div>
+        <span class="label">Elapsed</span><br>
+        <span class="clock" id="session-clock">00:00:00</span>
+      </div>
+      <div>
+        <span class="label">Trial</span><br>
+        <span class="value" id="trial-num">--</span>
+      </div>
+      <div>
+        <span class="label">Trial Timer</span><br>
+        <span class="trial-clock" id="trial-clock">--:--</span>
+      </div>
+      <div>
+        <span class="label">ITI Timer</span><br>
+        <span class="trial-clock" id="iti-clock" style="color:#888;">--:--</span>
+      </div>
+    </div>
+
+    <!-- Actions -->
+    <div class="card" style="margin-bottom: 10px;">
+      <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+        <h3 style="margin:0;">Actions</h3>
+        <button class="btn btn-green" id="btn-deploy" onclick="deployExperiment()" disabled>Deploy</button>
+        <button class="btn btn-green" id="btn-go" onclick="startSession()" disabled>GO</button>
+        <button class="btn btn-red" id="btn-stop" onclick="stopSession()" disabled>STOP</button>
+        <button class="btn btn-teal" id="btn-transfer" onclick="transferData()" disabled>Transfer</button>
+        <span style="flex:1;"></span>
+        <button class="btn btn-sm btn-blue" id="btn-live" onclick="toggleLive()" disabled>Live</button>
+      </div>
+    </div>
+
+    <!-- Camera + Stimulus -->
+    <div class="video-row">
+      <div class="video-box" id="panel-camera">
+        <div class="box-header">
+          <h3><label style="margin:0; display:inline-flex; align-items:center; gap:4px; cursor:pointer;"><input type="checkbox" id="cb-camera" checked> Camera</label></h3>
+        </div>
+        <div class="box-content" id="camera-content">
+          <span class="placeholder">Camera off</span>
+        </div>
+      </div>
+      <div class="video-box" id="panel-stim">
+        <div class="box-header">
+          <h3><label style="margin:0; display:inline-flex; align-items:center; gap:4px; cursor:pointer;"><input type="checkbox" id="cb-stim" checked> Stimulus</label></h3>
+        </div>
+        <div class="box-content" id="stim-content">
+          <span class="placeholder">No stimulus</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Unified Raster -->
+    <div class="raster-panel" id="panel-raster">
+      <div class="raster-header">
+        <div style="display:flex; align-items:center; gap:12px;">
+          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#4caf50;">
+            <input type="checkbox" id="cb-lick" checked> Licks
+          </label>
+          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#2196f3;">
+            <input type="checkbox" id="cb-reward" checked> Rewards
+          </label>
+          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#ff5722;">
+            <input type="checkbox" id="cb-photodiode" checked> Photodiode
+          </label>
+        </div>
+        <span class="info" id="raster-info"></span>
+      </div>
+      <canvas class="raster-canvas" id="canvas-raster" style="height:80px;"></canvas>
+    </div>
+
+    <!-- Trial table -->
+    <div class="card" style="margin-top: 10px">
+      <h3>Trials</h3>
+      <div style="max-height: 200px; overflow-y: auto;">
+        <table class="trial-table">
+          <thead><tr>
+            <th>#</th><th>Az</th><th>Contrast</th><th>Type</th><th>Outcome</th><th>RT (ms)</th>
+          </tr></thead>
+          <tbody id="trial-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Log -->
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+// ── State ──
+let config = null;
+let phase = 'setup';
+let uiBusy = false;
+let eventSource = null;
+let sessionStartTime = null;
+let trialStartTime = null;
+let itiStartTime = null;
+let currentTrialNum = 0;
+let clockInterval = null;
+
+// Live data
+let cameraLive = false;
+let lickEvents = [], lickOffset = null;  // lickOffset is the shared Pi→browser time offset
+let _offsetSamples = [];  // collect first N offsets, use median
+let photodiodeEvents = [];
+let rewardEvents = [];
+let rasterLive = false, rasterAnimFrame = null;
+
+// Stim events from SSE
+let stimEvents = [];  // [{trial, t_on, t_off}]
+let trialTable = [];  // populated from /api/trial_table after deploy
+const RASTER_WINDOW = 30;  // seconds
+const STIM_COLOR = 'rgba(33, 150, 243, 0.15)';  // blue translucent
+
+document.getElementById('session-date').value =
+  new Date().toISOString().slice(0,10).replace(/-/g, '');
+
+// ── Config loading ──
+
+async function loadRig() {
+  _lockUI();
+  const btn = document.getElementById('btn-load-rig');
+  btn.textContent = 'Loading...';
+  const rig = document.getElementById('rig-select').value;
+  log('Loading rig ' + rig + '...');
+  try {
+    const r = await fetch('/api/load_rig', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({rig})
+    });
+    const data = await r.json();
+    if (data.error) { log('Error: ' + data.error); return; }
+
+    config = {rig: data.rig, task: null};
+    document.getElementById('grace-period').value = data.rig.grace_period_s || 10;
+    updateDevicePanels();
+    buildPiStatus();
+    for (const [name, res] of Object.entries(data.pi_results)) {
+      const dot = document.getElementById('dot-' + name);
+      if (dot) dot.className = 'status-dot ' + (res.ok ? 'dot-green' : 'dot-red');
+      log(`  ${name}: ${res.ok ? 'OK' : res.error}`);
+    }
+
+    if (data.all_pis_ok) {
+      setPhase('connected');
+      log('All Pis connected. Devices initialized.');
+    } else {
+      log('Some Pis or devices failed.');
+    }
+  } finally {
+    btn.textContent = 'Load Rig';
+    _unlockUI();
+  }
+}
+
+function _updateNTrials() {
+  const nb = parseInt(document.getElementById('p-n_blocks').value) || 0;
+  const bs = parseInt(document.getElementById('p-block_size').value) || 0;
+  document.getElementById('p-n_trials').value = nb * bs;
+}
+
+// Format/parse duration fields (scalar or [min, max])
+function _fmtDur(v) {
+  if (v == null) return '0';
+  return Array.isArray(v) ? JSON.stringify(v) : String(v);
+}
+function _parseDur(id) {
+  const s = document.getElementById(id).value.trim();
+  try { const v = JSON.parse(s); return v; } catch(e) { return parseFloat(s) || 0; }
+}
+
+async function loadTask() {
+  _lockUI();
+  const btn = document.getElementById('btn-load-task');
+  btn.textContent = 'Loading...';
+  const task = document.getElementById('task-select').value;
+  log('Loading experiment ' + task + '...');
+  try {
+    const r = await fetch('/api/load_task', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({task})
+    });
+    const data = await r.json();
+    if (data.error) { log('Error: ' + data.error); return; }
+    config.task = data.task;
+    populateTaskFields(data.task);
+    document.getElementById('experiment-subsections').style.display = '';
+    document.getElementById('task-last-saved').textContent = 'Last saved: ' + (data.task.last_saved || '--');
+    log('Loaded experiment: ' + task);
+  } finally {
+    btn.textContent = 'Load Experiment';
+    _unlockUI();
+  }
+}
+
+function populateTaskFields(t) {
+  const stim = t.stimulus || {};
+  const rew = t.reward || {};
+  const sess = t.session || {};
+  const adp = t.adaptive || {};
+
+  // Stimulus
+  document.getElementById('p-size_deg').value = stim.size_deg ?? '';
+  document.getElementById('p-duration_s').value = stim.duration_s ?? '';
+  document.getElementById('p-altitude_deg').value = stim.altitude_deg ?? '';
+  document.getElementById('p-go_rule').value = stim.go_rule || 'all';
+  document.getElementById('p-background_gray').value = stim.background_gray ?? 0;
+  // Contrast: always dict with values + proportions
+  const c = stim.contrast || {};
+  document.getElementById('p-contrast_values').value = JSON.stringify(c.values || [1.0]);
+  document.getElementById('p-contrast_proportions').value = JSON.stringify(c.proportions || [1]);
+  document.getElementById('p-photodiode_sync_enabled').checked = !!stim.photodiode_sync_enabled;
+  document.getElementById('p-photodiode_sync_every_n').value = stim.photodiode_sync_every_n ?? 5;
+
+  // Reward
+  document.getElementById('p-level').value = String(rew.level ?? 1);
+  document.getElementById('p-amount_ul').value = rew.amount_ul ?? '';
+  document.getElementById('p-reward_delay_s').value = rew.reward_delay_s ?? '';
+  document.getElementById('p-response_window').value = rew.response_window ?? 1.4;
+  document.getElementById('p-timeout_rule').value = rew.timeout_rule || 'none';
+  document.getElementById('p-max_lick_rate').value = rew.max_lick_rate ?? 0;
+
+  // Session
+  document.getElementById('p-block_size').value = sess.block_size ?? 25;
+  document.getElementById('p-n_blocks').value = sess.n_blocks ?? '';
+  const iti = sess.iti;
+  document.getElementById('p-iti').value = Array.isArray(iti) ? JSON.stringify(iti) : (iti ?? '');
+  document.getElementById('p-block_sequence').value = JSON.stringify(sess.block_sequence || []);
+  document.getElementById('p-randomize_blocks').checked = !!sess.randomize_blocks;
+  document.getElementById('p-prestim_duration').value = _fmtDur(sess.prestim_duration);
+  document.getElementById('p-poststim_duration').value = _fmtDur(sess.poststim_duration);
+  document.getElementById('p-global_delay').value = _fmtDur(sess.global_delay);
+  document.getElementById('p-block_delay').value = _fmtDur(sess.block_delay);
+  document.getElementById('p-block_delay_skip_first').checked = !!sess.block_delay_skip_first;
+  _updateNTrials();
+
+  // Adaptive
+  document.getElementById('p-adaptive_enabled').checked = !!adp.enabled;
+  document.getElementById('p-adaptive_initial').value = adp.initial_state ?? 0;
+  document.getElementById('p-adaptive_step_up').value = adp.step_up ?? 0.2;
+  document.getElementById('p-adaptive_step_down').value = adp.step_down ?? 0.2;
+}
+
+function collectTaskFields() {
+  // Parse contrast values + proportions
+  let contrastValues, contrastProportions;
+  try { contrastValues = JSON.parse(document.getElementById('p-contrast_values').value); } catch(e) { contrastValues = [1.0]; }
+  try { contrastProportions = JSON.parse(document.getElementById('p-contrast_proportions').value); } catch(e) { contrastProportions = [1]; }
+
+  // Parse ITI: try JSON array, then number
+  let iti;
+  const iStr = document.getElementById('p-iti').value.trim();
+  try { iti = JSON.parse(iStr); } catch(e) { iti = parseFloat(iStr) || 8; }
+
+  // Parse block_sequence
+  let blockSeq;
+  try { blockSeq = JSON.parse(document.getElementById('p-block_sequence').value); } catch(e) { blockSeq = [0]; }
+
+  return {
+    stimulus: {
+      background_gray: parseFloat(document.getElementById('p-background_gray').value) || 0,
+      size_deg: parseFloat(document.getElementById('p-size_deg').value) || 8,
+      duration_s: parseFloat(document.getElementById('p-duration_s').value) || 2,
+      altitude_deg: parseFloat(document.getElementById('p-altitude_deg').value) || 10,
+      go_rule: document.getElementById('p-go_rule').value,
+      contrast: { values: contrastValues, proportions: contrastProportions },
+      photodiode_sync_enabled: document.getElementById('p-photodiode_sync_enabled').checked,
+      photodiode_sync_every_n: parseInt(document.getElementById('p-photodiode_sync_every_n').value) || 5,
+    },
+    reward: {
+      amount_ul: parseFloat(document.getElementById('p-amount_ul').value) || 4,
+      level: parseFloat(document.getElementById('p-level').value) || 1,
+      reward_delay_s: parseFloat(document.getElementById('p-reward_delay_s').value) || 0.6,
+      response_window: parseFloat(document.getElementById('p-response_window').value) || 1.4,
+      timeout_rule: document.getElementById('p-timeout_rule').value,
+      max_lick_rate: parseFloat(document.getElementById('p-max_lick_rate').value) || 0,
+    },
+    session: {
+      n_blocks: parseInt(document.getElementById('p-n_blocks').value) || 6,
+      block_size: parseInt(document.getElementById('p-block_size').value) || 25,
+      block_sequence: blockSeq,
+      iti: iti,
+      prestim_duration: _parseDur('p-prestim_duration'),
+      poststim_duration: _parseDur('p-poststim_duration'),
+      global_delay: _parseDur('p-global_delay'),
+      block_delay: _parseDur('p-block_delay'),
+      block_delay_skip_first: document.getElementById('p-block_delay_skip_first').checked,
+      randomize_blocks: document.getElementById('p-randomize_blocks').checked,
+    },
+    adaptive: {
+      enabled: document.getElementById('p-adaptive_enabled').checked,
+      initial_state: parseFloat(document.getElementById('p-adaptive_initial').value) || 0,
+      step_up: parseFloat(document.getElementById('p-adaptive_step_up').value) || 0.2,
+      step_down: parseFloat(document.getElementById('p-adaptive_step_down').value) || 0.2,
+    },
+  };
+}
+
+async function saveTask() {
+  const fields = collectTaskFields();
+  // Update server-side config
+  await fetch('/api/update_task', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(fields)
+  });
+  // Save to YAML file
+  const r = await fetch('/api/save_task', {method: 'POST'});
+  const data = await r.json();
+  if (data.ok) {
+    document.getElementById('task-last-saved').textContent = 'Last saved: ' + (data.last_saved || '--');
+    log('Experiment saved.');
+  } else {
+    log('Save failed: ' + (data.error || ''));
+  }
+  updateButtons();
+}
+
+async function saveTaskAs() {
+  const current = document.getElementById('task-select').value;
+  const name = prompt('Save experiment as:', current + '_copy');
+  if (!name) return;
+  const fields = collectTaskFields();
+  await fetch('/api/update_task', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(fields)
+  });
+  const r = await fetch('/api/save_task_as', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name})
+  });
+  const data = await r.json();
+  if (data.ok) {
+    document.getElementById('task-last-saved').textContent = 'Last saved: ' + (data.last_saved || '--');
+    // Add to dropdown if new, and select it
+    const sel = document.getElementById('task-select');
+    let found = false;
+    for (const opt of sel.options) { if (opt.value === data.name) { found = true; break; } }
+    if (!found) { const opt = document.createElement('option'); opt.value = data.name; opt.text = data.name; sel.add(opt); }
+    sel.value = data.name;
+    log('Experiment saved as: ' + data.name);
+  } else {
+    log('Save As failed: ' + (data.error || ''));
+  }
+  updateButtons();
+}
+
+// ── Session ──
+
+function getSession() {
+  return {
+    subject_id: document.getElementById('subject-id').value,
+    date: document.getElementById('session-date').value,
+    session_num: parseInt(document.getElementById('session-num').value),
+    notes: document.getElementById('session-notes').value,
+    grace_period_s: parseInt(document.getElementById('grace-period').value) || 10,
+  };
+}
+
+async function updateSession() {
+  const r = await fetch('/api/update_session', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(getSession())
+  });
+  return (await r.json()).session_id;
+}
+
+// ── Device panel visibility ──
+
+function updateDevicePanels() {
+  if (!config || !config.rig) return;
+  const devs = config.rig.devices || {};
+  // Show/hide camera and stimulus panels
+  const panels = {'camera': 'panel-camera', 'display': 'panel-stim'};
+  for (const [devName, panelId] of Object.entries(panels)) {
+    const el = document.getElementById(panelId);
+    if (el) el.style.display = (devs[devName] && devs[devName].enabled) ? '' : 'none';
+  }
+  // Show/hide raster checkboxes based on enabled devices
+  const cbMap = {'lick_sensor': 'cb-lick', 'reward': 'cb-reward', 'photodiode': 'cb-photodiode'};
+  for (const [devName, cbId] of Object.entries(cbMap)) {
+    const label = document.getElementById(cbId)?.parentElement;
+    if (label) label.style.display = (devs[devName] && devs[devName].enabled) ? '' : 'none';
+  }
+  // Photodiode stim-sync controls only available when the rig has a photodiode
+  const pdOn = !!(devs['photodiode'] && devs['photodiode'].enabled);
+  const syncRow = document.getElementById('photodiode-sync-row');
+  if (syncRow) syncRow.style.display = pdOn ? 'flex' : 'none';
+}
+
+// ── Pi status ──
+
+function buildPiStatus() {
+  const el = document.getElementById('pi-status');
+  if (!config || !config.rig) { el.innerHTML = ''; return; }
+  el.innerHTML = config.rig.pis.map(pi =>
+    `<div class="pi-row">
+       <span class="status-dot dot-gray" id="dot-${pi.name}"></span>
+       <strong>${pi.name}</strong>
+       <span class="pi-role">${pi.role} (${pi.ip})</span>
+     </div>`
+  ).join('');
+}
+
+// ── Deploy ──
+
+async function deployExperiment() {
+  _lockUI();
+  const btn = document.getElementById('btn-deploy');
+  btn.textContent = 'Deploying...';
+  try {
+    // Save task params to YAML before deploy
+    const fields = collectTaskFields();
+    await fetch('/api/update_task', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(fields)
+    });
+    const saveR = await fetch('/api/save_task', {method: 'POST'});
+    const saveData = await saveR.json();
+    if (saveData.ok) {
+      document.getElementById('task-last-saved').textContent = 'Last saved: ' + (saveData.last_saved || '--');
+    }
+    await updateSession();
+    log('Deploying...');
+    const r = await fetch('/api/deploy', {method: 'POST'});
+    const data = await r.json();
+    (data.steps || []).forEach(s => log('  ' + s));
+    if (data.ok) {
+      try {
+        const tt = await fetch('/api/trial_table');
+        const ttData = await tt.json();
+        trialTable = ttData.trials || [];
+      } catch(e) { trialTable = []; }
+      log('Deploy complete.');
+      setPhase('deployed');
+      initStimCanvas();
+    } else {
+      log('Deploy failed: ' + (data.error || ''));
+    }
+  } finally {
+    btn.textContent = 'Deploy';
+    _unlockUI();
+  }
+}
+
+// ── Go / Stop ──
+
+async function startSession() {
+  _lockUI();
+  const btn = document.getElementById('btn-go');
+  btn.textContent = 'Starting...';
+  log('Starting session...');
+  lickEvents = []; photodiodeEvents = []; rewardEvents = []; stimEvents = [];
+  lickOffset = null;
+  currentTrialNum = 0;
+  sessionStartTime = null;
+  trialStartTime = null;
+  itiStartTime = null;
+  document.getElementById('trial-tbody').innerHTML = '';
+  clearAllCanvases();
+  currentStimAz = null;
+  drawStimScene();
+
+  try {
+    const r = await fetch('/api/go', {method: 'POST'});
+    const data = await r.json();
+    (data.steps || []).forEach(s => log('  ' + s));
+    if (data.ok) {
+      setPhase('running');
+      startClock();
+      startSSE();
+      const sid = document.getElementById('subject-id').value;
+      const snum = document.getElementById('session-num').value;
+      document.getElementById('mv-session-id').textContent = `${sid} #${snum}`;
+      document.getElementById('session-start-time').textContent = 'started ' + new Date().toLocaleTimeString();
+    } else {
+      log('Start failed: ' + (data.error || ''));
+    }
+  } catch (e) {
+    log('Start error: ' + e.message);
+  }
+  btn.textContent = 'GO';
+  _unlockUI();
+}
+
+async function stopSession() {
+  _lockUI();
+  const btn = document.getElementById('btn-stop');
+  btn.textContent = 'Stopping...';
+  log('Stopping session...');
+  try { await fetch('/api/stop', {method: 'POST'}); } catch(e) {}
+  setPhase('ended');
+  stopClock();
+  stopAllLive();
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  btn.textContent = 'STOP';
+  _unlockUI();
+  log('Session stopped.');
+}
+
+let transferring = false;
+
+async function transferData() {
+  transferring = true;
+  _lockUI();
+  const btn = document.getElementById('btn-transfer');
+  btn.textContent = 'Transferring...';
+  log('Transferring data...');
+  try {
+    const r = await fetch('/api/transfer', {method: 'POST'});
+    const data = await r.json();
+    if (data.ok) {
+      log(`Transferred ${data.files.length} files.`);
+      data.files.forEach(f => log('  ' + f));
+    } else {
+      log('Transfer failed.');
+    }
+  } catch (e) {
+    log('Transfer error: ' + e.message);
+  }
+  transferring = false;
+  btn.textContent = 'Transfer';
+  _unlockUI();
+}
+
+// ── SSE events ──
+
+function startSSE() {
+  if (eventSource) eventSource.close();
+  eventSource = new EventSource('/api/events');
+  eventSource.onmessage = function(e) {
+    handleEvent(JSON.parse(e.data));
+  };
+}
+
+function handleEvent(evt) {
+  // Build time offset from median of first 10 events (robust to outliers)
+  if (rasterLive && evt.t && lickOffset === null) {
+    _offsetSamples.push(Date.now() / 1000 - evt.t);
+    if (_offsetSamples.length >= 10) {
+      const sorted = [..._offsetSamples].sort((a, b) => a - b);
+      lickOffset = sorted[Math.floor(sorted.length / 2)];
+    }
+  }
+
+  switch (evt.type) {
+    case 'lick':
+      if (rasterLive) { lickEvents.push({t: evt.t}); updateRasterInfo(); }
+      break;
+    case 'reward':
+      if (rasterLive) { rewardEvents.push({t: evt.t, duration_ms: evt.pulse_ms || 0}); updateRasterInfo(); }
+      break;
+    case 'stim':
+      if (evt.on) {
+        const dur = trialTable[evt.trial] ? trialTable[evt.trial].duration_s : 2.0;
+        if (rasterLive) stimEvents.push({trial: evt.trial, t_on: evt.t, t_off: evt.t + dur});
+        showStimThumb(evt.trial, evt.az);
+      } else {
+        // Stim off from leader — don't override t_off: leader fires this after
+        // reward_delay_s but the Follower renders for the full duration_s.
+        // The trialTable-based t_off set on stim ON is the ground truth.
+        clearStimThumb();
+      }
+      break;
+    case 'stim_onset':
+      // Follower ack — ignore for raster (leader's stim on already handled)
+      break;
+    case 'grace_period':
+      log('Grace period: ' + evt.duration + 's');
+      break;
+    case 'experiment_start':
+      sessionStartTime = Date.now();
+      trialStartTime = null;
+      itiStartTime = null;
+      log('Experiment started.');
+      const sid = document.getElementById('subject-id').value;
+      const snum = document.getElementById('session-num').value;
+      document.getElementById('mv-session-id').textContent = `${sid} #${snum}`;
+      document.getElementById('session-start-time').textContent = 'started ' + new Date().toLocaleTimeString();
+      break;
+    case 'trial_start':
+      currentTrialNum = evt.trial + 1;
+      trialStartTime = Date.now();
+      itiStartTime = null;
+      break;
+    case 'trial':
+      addTrialRow(evt);
+      trialStartTime = null;
+      break;
+    case 'iti_start':
+      itiStartTime = Date.now();
+      trialStartTime = null;
+      break;
+    case 'sync_pulse':
+      if (rasterLive) { photodiodeEvents.push({t: evt.t}); updateRasterInfo(); }
+      break;
+    case 'countdown':
+      break;
+    case 'iti_restart':
+      itiStartTime = Date.now();
+      log('ITI restarted (excess licking)');
+      break;
+    case 'session_end':
+      log(`Session ended (${evt.n_completed}/${evt.n_planned} trials).`);
+      setPhase('ended');
+      stopClock();
+      stopAllLive();
+      if (eventSource) { eventSource.close(); eventSource = null; }
+      updateButtons();
+      break;
+  }
+}
+
+// ── Camera helpers ──
+
+let stimLive = false;
+
+async function _startCamera() {
+  if (cameraLive) return;
+  const r = await fetch('/api/camera_start', {method: 'POST'});
+  const data = await r.json();
+  if (!data.ok) { log('Camera start failed: ' + (data.error || '')); return; }
+  cameraLive = true;
+  document.getElementById('camera-content').innerHTML =
+    '<img src="/api/camera_feed" alt="Camera" style="max-width:100%; max-height:480px; filter:grayscale(1)">';
+}
+
+async function _stopCamera() {
+  if (!cameraLive) return;
+  await fetch('/api/camera_stop', {method: 'POST'});
+  cameraLive = false;
+  document.getElementById('camera-content').innerHTML = '<span class="placeholder">Camera off</span>';
+}
+
+// ── Stim canvas visualization ──
+
+let currentStimAz = null;
+const SCREEN_AZ_HALF = 105;
+const SCREEN_ALT_CENTER = 49.5; // midpoint of screen altitude range (25-74°)
+
+function initStimCanvas() {
+  const el = document.getElementById('stim-content');
+  el.innerHTML = '';
+  const canvas = document.createElement('canvas');
+  canvas.id = 'stim-canvas';
+  canvas.style.display = 'block';
+  el.appendChild(canvas);
+  const w = el.clientWidth || 400;
+  const h = Math.round(w * 9 / 16);
+  canvas.width = w;
+  canvas.height = h;
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  currentStimAz = null;
+  drawStimScene();
+}
+
+function drawStimScene() {
+  const canvas = document.getElementById('stim-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  if (w === 0 || h === 0) return;
+  const ppd = w / (2 * SCREEN_AZ_HALF);
+
+  // Grey background
+  const bg = parseFloat(document.getElementById('p-background_gray')?.value) || 0;
+  const v = Math.round(bg * 255);
+  ctx.fillStyle = `rgb(${v},${v},${v})`;
+  ctx.fillRect(0, 0, w, h);
+
+  // Stim square
+  if (currentStimAz !== null) {
+    const alt = parseFloat(document.getElementById('p-altitude_deg')?.value) || SCREEN_ALT_CENTER;
+    const sz = parseFloat(document.getElementById('p-size_deg')?.value) || 8;
+    const cx = w / 2 + currentStimAz * ppd;
+    const cy = h / 2 - (alt - SCREEN_ALT_CENTER) * ppd;
+    const side = sz * ppd;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(cx - side / 2, cy - side / 2, side, side);
+  }
+
+  // Rulers on top
+  _drawStimRulers(ctx, w, h, ppd);
+}
+
+function _drawStimRulers(ctx, w, h, ppd) {
+  let azAngles = [];
+  try { azAngles = [...new Set(JSON.parse(document.getElementById('p-block_sequence').value))]; } catch (e) {}
+  const alt = parseFloat(document.getElementById('p-altitude_deg')?.value) || SCREEN_ALT_CENTER;
+  ctx.font = '12px monospace';
+  ctx.textBaseline = 'middle';
+  const rH = 20;
+
+  // ── Azimuth ruler (bottom) ──
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, h - rH, w, rH);
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, h - rH); ctx.lineTo(w, h - rH); ctx.stroke();
+
+  // 0° reference
+  const x0 = w / 2;
+  ctx.strokeStyle = '#555';
+  ctx.beginPath(); ctx.moveTo(x0, h - rH); ctx.lineTo(x0, h - rH + 6); ctx.stroke();
+  ctx.fillStyle = '#555';
+  ctx.textAlign = 'center';
+  ctx.fillText('0\u00b0', x0, h - rH / 2);
+
+  // Experiment angle ticks
+  for (const az of azAngles) {
+    const x = w / 2 + az * ppd;
+    ctx.strokeStyle = '#ddd';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, h - rH); ctx.lineTo(x, h - rH + 6); ctx.stroke();
+    ctx.fillStyle = '#ddd';
+    ctx.fillText(az + '\u00b0', x, h - rH / 2);
+  }
+
+  // ── Altitude ruler (center vertical, forms upside-down T with azimuth ruler) ──
+  const cx = w / 2;
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, h - rH); ctx.stroke();
+
+  // Altitude tick
+  const yAlt = h / 2 - (alt - SCREEN_ALT_CENTER) * ppd;
+  ctx.strokeStyle = '#ddd';
+  ctx.beginPath(); ctx.moveTo(cx - 6, yAlt); ctx.lineTo(cx + 6, yAlt); ctx.stroke();
+  ctx.fillStyle = '#ddd';
+  ctx.textAlign = 'left';
+  ctx.fillText(alt + '\u00b0', cx + 8, yAlt);
+}
+
+function showStimThumb(trialNum, az) {
+  if (!stimLive) return;
+  currentStimAz = az;
+  drawStimScene();
+}
+
+function clearStimThumb() {
+  if (!stimLive) return;
+  currentStimAz = null;
+  drawStimScene();
+}
+
+// ── Unified Live toggle ──
+
+function toggleLive() {
+  if (rasterLive) stopLive(); else startLive();
+}
+
+async function startLive() {
+  // Clear all event arrays — only show data from now on
+  lickEvents = []; rewardEvents = []; photodiodeEvents = []; stimEvents = [];
+  lickOffset = null;
+  _offsetSamples = [];
+  // Flush server-side event queue so we only see new events
+  await fetch('/api/drain_events', {method: 'POST'}).catch(() => {});
+  rasterLive = true;
+  document.getElementById('btn-live').textContent = 'Stop';
+  document.getElementById('btn-live').className = 'btn btn-sm btn-red';
+  // Raster
+  if (!rasterAnimFrame) {
+    (function frame() { drawUnifiedRaster(); rasterAnimFrame = requestAnimationFrame(frame); })();
+  }
+  // Camera (if checked)
+  if (document.getElementById('cb-camera').checked) await _startCamera();
+  // Stimulus (if checked)
+  if (document.getElementById('cb-stim').checked) stimLive = true;
+}
+
+async function stopLive() {
+  rasterLive = false;
+  document.getElementById('btn-live').textContent = 'Live';
+  document.getElementById('btn-live').className = 'btn btn-sm btn-blue';
+  if (rasterAnimFrame) { cancelAnimationFrame(rasterAnimFrame); rasterAnimFrame = null; }
+  // Camera
+  await _stopCamera();
+  // Stimulus
+  stimLive = false;
+  currentStimAz = null;
+  drawStimScene();
+}
+
+// ── Unified raster drawing ──
+
+function drawUnifiedRaster() {
+  const canvas = document.getElementById('canvas-raster');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
+    canvas.width = canvas.clientWidth;
+    canvas.height = canvas.clientHeight;
+  }
+  const w = canvas.width, h = canvas.height;
+  ctx.fillStyle = '#0a0a1a';
+  ctx.fillRect(0, 0, w, h);
+
+  // Don't draw until we have a time sync
+  if (lickOffset === null) return;
+  const now = Date.now() / 1000 - lickOffset;
+
+  // Draw stim windows (blue shading)
+  for (const stim of stimEvents) {
+    const onAge = now - stim.t_on;
+    const offAge = now - stim.t_off;
+    if (onAge > RASTER_WINDOW || offAge < 0) continue;
+    const x1 = Math.max(0, ((RASTER_WINDOW - onAge) / RASTER_WINDOW) * w);
+    const x2 = Math.min(w, ((RASTER_WINDOW - offAge) / RASTER_WINDOW) * w);
+    ctx.fillStyle = STIM_COLOR;
+    ctx.fillRect(x1, 0, x2 - x1, h - 12);
+  }
+
+  // Time axis labels
+  ctx.fillStyle = '#444';
+  ctx.font = '9px monospace';
+  for (let s = 0; s <= RASTER_WINDOW; s += 5) {
+    const x = ((RASTER_WINDOW - s) / RASTER_WINDOW) * w;
+    ctx.fillText('-' + s + 's', x, h - 2);
+  }
+
+  // Draw each enabled trace
+  const traces = [
+    {cb: 'cb-lick', events: lickEvents, color: '#4caf50'},
+    {cb: 'cb-reward', events: rewardEvents, color: '#2196f3'},
+    {cb: 'cb-photodiode', events: photodiodeEvents, color: '#ff5722'},
+  ];
+  for (const tr of traces) {
+    if (!document.getElementById(tr.cb).checked) continue;
+    ctx.strokeStyle = tr.color;
+    ctx.lineWidth = 1.5;
+    for (const evt of tr.events) {
+      const age = now - evt.t;
+      if (age > RASTER_WINDOW || age < 0) continue;
+      const x = ((RASTER_WINDOW - age) / RASTER_WINDOW) * w;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, h - 12);
+      ctx.stroke();
+    }
+  }
+}
+
+function clearAllCanvases() {
+  const c = document.getElementById('canvas-raster');
+  if (c) {
+    c.width = c.clientWidth;
+    c.height = c.clientHeight;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#0a0a1a';
+    ctx.fillRect(0, 0, c.width, c.height);
+  }
+}
+
+function stopAllLive() {
+  if (rasterLive || cameraLive || stimLive) stopLive();
+}
+
+function updateRasterInfo() {
+  const parts = [];
+  if (lickEvents.length) parts.push(lickEvents.length + ' licks');
+  if (rewardEvents.length) parts.push(rewardEvents.length + ' rewards');
+  if (photodiodeEvents.length) parts.push(photodiodeEvents.length + ' pulses');
+  const el = document.getElementById('raster-info');
+  if (el) el.textContent = parts.join(' | ');
+}
+
+// ── Clocks ──
+
+function formatHMS(ms) {
+  const s = Math.floor(ms / 1000);
+  return String(Math.floor(s/3600)).padStart(2,'0') + ':' +
+         String(Math.floor((s%3600)/60)).padStart(2,'0') + ':' +
+         String(s%60).padStart(2,'0');
+}
+
+function formatMS(ms) {
+  const s = Math.floor(ms / 1000);
+  return String(Math.floor(s/60)).padStart(2,'0') + ':' + String(s%60).padStart(2,'0');
+}
+
+function startClock() {
+  stopClock();
+  // Auto-start live when session begins
+  if (!rasterLive) startLive();
+  clockInterval = setInterval(updateClocks, 500);
+  updateClocks();
+}
+
+function stopClock() {
+  if (clockInterval) { clearInterval(clockInterval); clockInterval = null; }
+  sessionStartTime = null;
+  trialStartTime = null;
+  itiStartTime = null;
+  document.getElementById('session-clock').textContent = '00:00:00';
+  document.getElementById('trial-clock').textContent = '--:--';
+  document.getElementById('iti-clock').textContent = '--:--';
+  document.getElementById('trial-num').textContent = '--';
+}
+
+function updateClocks() {
+  const now = Date.now();
+  const sessEl = document.getElementById('session-clock');
+  if (sessEl) sessEl.textContent = sessionStartTime ? formatHMS(now - sessionStartTime) : '00:00:00';
+  const trialEl = document.getElementById('trial-clock');
+  if (trialEl) trialEl.textContent = trialStartTime ? formatMS(now - trialStartTime) : '--:--';
+  const itiEl = document.getElementById('iti-clock');
+  if (itiEl) itiEl.textContent = itiStartTime ? formatMS(now - itiStartTime) : '--:--';
+  const trialNum = document.getElementById('trial-num');
+  if (trialNum) trialNum.textContent = currentTrialNum || '--';
+}
+
+// ── Trial table ──
+
+function addTrialRow(evt) {
+  const tbody = document.getElementById('trial-tbody');
+  const outCls = evt.outcome === 'hit' ? 'outcome-hit' : 'outcome-miss';
+  const typeCls = evt.reward_type === 'operant' ? 'color:#ab47bc' : 'color:#ff9800';
+  const rt = (evt.rt_ms != null && isFinite(evt.rt_ms)) ? evt.rt_ms.toFixed(0) : '--';
+  tbody.insertAdjacentHTML('afterbegin',
+    `<tr><td>${evt.trial_num + 1}</td><td>${evt.stim_az?.toFixed(0) || '--'}&deg;</td>` +
+    `<td>${evt.contrast?.toFixed(3) || '--'}</td>` +
+    `<td style="${typeCls}">${evt.reward_type || '--'}</td>` +
+    `<td class="${outCls}">${evt.outcome}</td>` +
+    `<td>${rt}</td></tr>`);
+}
+
+// ── Phase / buttons ──
+
+const PHASE_ORDER = ['setup', 'connected', 'deployed', 'running', 'ended'];
+
+function setPhase(p) {
+  phase = p;
+  const steps = document.querySelectorAll('.phase-step');
+  const idx = PHASE_ORDER.indexOf(p);
+  steps.forEach((el, i) => {
+    el.className = 'phase-step' + (i < idx ? ' done' : i === idx ? ' active' : '');
+  });
+}
+
+function _lockUI() {
+  uiBusy = true;
+  document.querySelectorAll('.btn').forEach(b => b.disabled = true);
+}
+function _unlockUI() {
+  uiBusy = false;
+  updateButtons();
+}
+
+function updateButtons() {
+  const rigLoaded = !!(config && config.rig);
+  const taskLoaded = !!(config && config.task);
+  const connected = PHASE_ORDER.indexOf(phase) >= 1;
+  const deployed = phase === 'deployed';
+  const running = phase === 'running';
+  const ended = phase === 'ended';
+  const busy = running || transferring || uiBusy;
+
+  document.getElementById('btn-load-rig').disabled = busy;
+  document.getElementById('btn-load-task').disabled = !rigLoaded || busy;
+  document.getElementById('btn-save-task').disabled = !taskLoaded || busy;
+  document.getElementById('btn-save-task-as').disabled = !taskLoaded || busy;
+  document.getElementById('btn-deploy').disabled = !(rigLoaded && taskLoaded && connected && !busy);
+  document.getElementById('btn-go').disabled = !deployed || busy;
+  document.getElementById('btn-stop').disabled = !running;
+  document.getElementById('btn-transfer').disabled = !ended || busy;
+  document.getElementById('btn-live').disabled = !rigLoaded || busy;
+}
+
+// ── Log ──
+
+function log(msg) {
+  const el = document.getElementById('log');
+  const ts = new Date().toLocaleTimeString();
+  el.innerHTML += `<div>[${ts}] ${msg}</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── Quit ──
+
+async function quitApp() {
+  if (!confirm('Quit VRFarm?')) return;
+  if (phase === 'running') {
+    await fetch('/api/stop', {method: 'POST'}).catch(() => {});
+    stopAllLive();
+  }
+  await fetch('/api/quit', {method: 'POST'}).catch(() => {});
+  document.title = 'VRFarm (closed)';
+  document.body.innerHTML = '<div style="text-align:center;margin-top:40vh;color:#888;font-size:16px">Server stopped. You can close this tab.</div>';
+}
+
+// ── Init ──
+updateButtons();
+clearAllCanvases();
+</script>
+</body>
+</html>

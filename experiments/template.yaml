@@ -1,0 +1,44 @@
+last_saved: "2026-04-08"
+# ── What to show ──
+stimulus:
+  background_gray: 0.5
+  size_deg: 8.0
+  duration_s: 2.0          # total projector on-time
+  altitude_deg: 10.0
+  go_rule: all              # all | left | right
+  contrast:
+    values: [1.0]            # contrast level(s)
+    proportions: [1]         # relative proportion per value (auto-normalized)
+  # switch_trial_contrast: lowest   # optional, for blocked designs
+  photodiode_sync_enabled: false   # photodiode stim-onset sync (needs photodiode in rig)
+  photodiode_sync_every_n: 5       # red patch ON every Nth display frame
+
+# ── When to reward ──
+reward:
+  amount_ul: 4.0
+  level: 1                    # 1=free, 2=free on go, 2.5=adaptive, 3=operant
+  reward_delay_s: 0.6         # delay after stim onset before response window opens
+  response_window: 1.4        # response window duration (can extend beyond stim)
+  timeout_rule: rate             # none | rate | count
+  max_lick_rate: 0.3
+
+# ── Trial structure ──
+session:
+  n_blocks: 6
+  block_size: 25
+  block_sequence: [80]      # azimuth per block, cycled
+  iti: [8, 16]              # [min, max] random or scalar for fixed
+  prestim_duration: 0        # baseline period before stimulus onset (0 = immediate)
+  poststim_duration: 0
+  global_delay: 0
+  block_delay: 0
+  block_delay_skip_first: false
+  # randomize_blocks: true  # optional, shuffles all trials
+
+# ── Adaptive (level 2.5 only) ──
+adaptive:
+  enabled: false
+  initial_state: 0.0
+  step_up: 0.2
+  step_down: 0.2
+    

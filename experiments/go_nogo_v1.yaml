@@ -1,0 +1,43 @@
+last_saved: "2026-04-08"
+# Go/No-Go v1. Multi-contrast discrimination.
+
+# ── What to show ──
+stimulus:
+  background_gray: 0.5
+  size_deg: 8.0
+  duration_s: 2.0
+  altitude_deg: 10.0
+  go_rule: right
+  contrast:
+    values: [0.25, 0.15, 0.125]
+    proportions: [0.33, 0.33, 0.33]
+  photodiode_sync_enabled: false   # toggle photodiode stim-onset sync (needs photodiode)
+  photodiode_sync_every_n: 5       # red patch ON every Nth display frame
+
+# ── When to reward ──
+reward:
+  amount_ul: 4.0
+  level: 2
+  reward_delay_s: 0.6
+  response_window: 1.4
+  timeout_rule: rate
+  max_lick_rate: 0.3
+
+# ── Trial structure ──
+session:
+  n_blocks: 6
+  block_size: 25
+  block_sequence: [80, -40, 40, -80, 80, -40]
+  iti: [8, 16]
+  prestim_duration: 0
+  poststim_duration: 0
+  global_delay: 0
+  block_delay: 0
+  block_delay_skip_first: false
+
+# ── Adaptive (level 2.5 only) ──
+adaptive:
+  enabled: true
+  initial_state: 0.0
+  step_up: 0.2
+  step_down: 0.2

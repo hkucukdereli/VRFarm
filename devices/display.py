@@ -1,0 +1,212 @@
+"""
+devices/display.py
+
+Pygame fullscreen renderer for stimulus display.
+Runs on the Follower Pi. Receives SHOW commands with trial index,
+looks up pre-generated stim params from NPZ, renders rectangle,
+auto-blanks after stim duration.
+"""
+
+from __future__ import annotations
+
+from .base import Device, DeviceInfo, IOType, register_device
+
+
+@register_device
+class Display(Device):
+    info = DeviceInfo("display", "Stimulus Display", IOType.HDMI, ["pygame"])
+
+    @classmethod
+    def task_params_schema(cls):
+        return {
+            "background_gray": {
+                "type": "float", "default": 0.0,
+                "label": "Background gray (-1..1)", "min": -1.0, "max": 1.0,
+            },
+        }
+
+    def init(self, rig_config: dict, task_params: dict):
+        self.resolution = tuple(rig_config.get("resolution", [1920, 1080]))
+        self.refresh_hz = float(rig_config.get("refresh_hz", 60))
+        self.bg_gray = task_params.get("background_gray", 0.0)
+        self._screen = None
+        self._warp = None
+
+    def start_display(self):
+        """Initialize pygame and open fullscreen window.
+        Retries up to 3 times with backoff if X11 is not ready.
+        """
+        import time
+        import pygame
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                pygame.init()
+                flags = pygame.FULLSCREEN | pygame.DOUBLEBUF | pygame.HWSURFACE
+                # vsync-locked flip so per-frame sync loops pace to the refresh
+                try:
+                    self._screen = pygame.display.set_mode(
+                        self.resolution, flags, vsync=1)
+                    print("Display: vsync-locked flip")
+                except (pygame.error, TypeError):
+                    self._screen = pygame.display.set_mode(self.resolution, flags)
+                    print("Display: vsync NOT available (unsynced flip)")
+                pygame.mouse.set_visible(False)
+                self.blank()
+                return
+            except pygame.error as e:
+                if attempt < max_retries - 1:
+                    wait = (attempt + 1) * 1.0
+                    print(f"Display init failed (attempt {attempt+1}/{max_retries}): {e}")
+                    print(f"  Retrying in {wait}s...")
+                    try:
+                        pygame.quit()
+                    except Exception:
+                        pass
+                    time.sleep(wait)
+                else:
+                    raise RuntimeError(
+                        f"Display init failed after {max_retries} attempts: {e}. "
+                        f"Is X11 running? Check start_projector.sh completed."
+                    ) from e
+
+    def show_rect(self, px_x: float, px_y: float, px_size: float,
+                  corr_contrast: float, bg_gray: float,
+                  sync_square: bool = False):
+        """Draw a gray rectangle at pixel coordinates and flip."""
+        import pygame
+        if self._screen is None:
+            return
+        # Color conversion: PsychoPy [-1,1] range -> 8-bit RGB
+        bg_lin = (bg_gray + 1) / 2
+        stim_lin = bg_lin + corr_contrast * (1 - bg_lin)
+        rgb = max(0, min(255, int(stim_lin * 255)))
+        bg_rgb = max(0, min(255, int(bg_lin * 255)))
+        # Fill background
+        self._screen.fill((bg_rgb, bg_rgb, bg_rgb))
+        # Draw stimulus rectangle (centered at px_x, px_y)
+        half = px_size / 2
+        rect = pygame.Rect(int(px_x - half), int(px_y - half),
+                           int(px_size), int(px_size))
+        self._screen.fill((rgb, rgb, rgb), rect)
+        # Sync square for photodiode
+        self._draw_sync_square(sync_square)
+        pygame.display.flip()
+
+    def blank(self):
+        """Fill screen with background color."""
+        import pygame
+        if self._screen is None:
+            return
+        bg_lin = (self.bg_gray + 1) / 2
+        bg_rgb = max(0, min(255, int(bg_lin * 255)))
+        self._screen.fill((bg_rgb, bg_rgb, bg_rgb))
+        pygame.display.flip()
+
+    def blank_with_gray(self, gray_value: float):
+        """Fill screen with arbitrary gray value (-1..1 range)."""
+        import pygame
+        if self._screen is None:
+            return
+        lin = (gray_value + 1) / 2
+        rgb = max(0, min(255, int(lin * 255)))
+        self._screen.fill((rgb, rgb, rgb))
+        pygame.display.flip()
+
+    def load_warp(self, npz_path: str):
+        """Load warp map for warped rendering."""
+        import numpy as np
+        from pathlib import Path
+        p = Path(npz_path)
+        if p.exists():
+            self._warp = np.load(str(p))
+            return True
+        return False
+
+    def show_checkers(self, n: int = 8, use_warp: bool = True):
+        """Draw checkerboard. Uses warp map if loaded and use_warp=True, else simple grid."""
+        import pygame
+        if self._screen is None:
+            return
+        if use_warp and self._warp is not None:
+            self._show_checkers_warped(n)
+        else:
+            self._show_checkers_simple(n)
+
+    def _show_checkers_simple(self, n: int = 8):
+        """Simple n x n pixel-space checkerboard."""
+        import pygame
+        w, h = self.resolution
+        cw, ch = w // n, h // n
+        for row in range(n):
+            for col in range(n):
+                color = (255, 255, 255) if (row + col) % 2 == 0 else (0, 0, 0)
+                rect = pygame.Rect(col * cw, row * ch, cw, ch)
+                self._screen.fill(color, rect)
+        pygame.display.flip()
+
+    def _show_checkers_warped(self, n: int = 8):
+        """Checkerboard in visual angle space, rendered through warp map."""
+        import numpy as np
+        import pygame
+        az_map = self._warp["az_map"]    # (H, W) degrees
+        alt_map = self._warp["alt_map"]
+        valid = self._warp["valid_map"]
+
+        # Checker size in degrees
+        az_range = np.nanmax(az_map[valid]) - np.nanmin(az_map[valid])
+        alt_range = np.nanmax(alt_map[valid]) - np.nanmin(alt_map[valid])
+        az_min = np.nanmin(az_map[valid])
+        alt_min = np.nanmin(alt_map[valid])
+        az_step = az_range / n
+        alt_step = alt_range / n
+
+        # Build pixel array
+        h, w = az_map.shape
+        pixels = np.zeros((h, w, 3), dtype=np.uint8)
+        # Background mid-gray for invalid pixels
+        pixels[:] = 40
+
+        az_idx = ((az_map - az_min) / az_step).astype(np.int32)
+        alt_idx = ((alt_map - alt_min) / alt_step).astype(np.int32)
+        checker = (az_idx + alt_idx) % 2 == 0
+        pixels[valid & checker] = 255
+        pixels[valid & ~checker] = 0
+
+        surf = pygame.surfarray.make_surface(pixels.transpose(1, 0, 2))
+        self._screen.blit(surf, (0, 0))
+        pygame.display.flip()
+
+    def _draw_sync_square(self, on: bool):
+        """Draw or clear a 40x40 red square at bottom-center (before flip)."""
+        import pygame
+        if self._screen is None:
+            return
+        w, h = self.resolution
+        sq = 40
+        rect = pygame.Rect(w // 2 - sq // 2, h - sq, sq, sq)
+        if on:
+            self._screen.fill((255, 0, 0), rect)
+        else:
+            bg_lin = (self.bg_gray + 1) / 2
+            bg_rgb = max(0, min(255, int(bg_lin * 255)))
+            self._screen.fill((bg_rgb, bg_rgb, bg_rgb), rect)
+
+    def check(self) -> dict:
+        try:
+            import pygame
+            pygame.init()
+            info = pygame.display.Info()
+            pygame.quit()
+            return {"ok": True,
+                    "message": f"{info.current_w}x{info.current_h}"}
+        except Exception as e:
+            return {"ok": False, "message": str(e)}
+
+    def shutdown(self):
+        import pygame
+        pygame.quit()
+        self._screen = None
+
+    def close(self):
+        self.shutdown()

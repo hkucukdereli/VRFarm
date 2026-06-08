@@ -8,66 +8,83 @@ Read this entire file before touching anything.
 ## What is VRFarm
 
 A behavioral neuroscience experiment system for mice. Two Raspberry Pi 4Bs
-per rig, controlled from a Mac via Flask web UIs. Named after cheese.
+per rig (Leader + Follower), controlled from a Mac via Flask web UIs.
+Paradigms are data (YAML state machines), devices are pluggable.
+Named after cheese.
 
-**Current rig:** cheddar (control Pi) + mozzarella (stim Pi)  
-**Mac:** balthazar (hakan@balthazar), conda env `vrfarm`, Python 3.11  
-**Both Pis:** conda env `rig`, Python 3.11, user `vruser`
+**Current rig:** cheese (cheddar = Leader, mozzarella = Follower)
+**Mac:** balthazar (hakan@balthazar), conda env `vrfarm`, Python 3.11
+**Both Pis:** Debian 13 (trixie), conda env `rig`, user `vruser`. The `rig` env
+Python **must match the system Python** (3.13 on trixie) — the camera bindings
+(`python3-libcamera`/`python3-picamera2`) are apt-built for the system Python and are
+symlinked into the env, so a version mismatch breaks `import picamera2`. Create with
+`conda create -n rig python=$(python3 -c 'import sys;print(f"{sys.version_info[0]}.{sys.version_info[1]}")')`.
 
 ---
 
 ## Project structure
 
 ```
-~/VRFarm/                          ← project root on Mac
+~/VRFarm/                              <- project root on Mac
 ├── config/
-│   └── HK001_day07.yaml          ← session config (references rig by name)
-├── rig_setup/
-│   ├── rig_setup_ui.py           ← Flask UI localhost:4999 — one-time Pi setup
-│   ├── rig_cheese.json           ← full rig hardware config (pins, cal, ports)
+│   └── go_nogo_v1.yaml               <- task/paradigm config (YAML state machine)
+├── rigs/
+│   └── cheese.json                    <- rig hardware config (pins, cal, ports, roles)
+├── devices/
+│   ├── base.py                        <- Device base class, IOType, DEVICE_REGISTRY
+│   ├── lick_sensor.py                 <- MPR121 capacitive touch (I2C)
+│   ├── reward.py                      <- Reward valve (GPIO output)
+│   ├── reward_calibration.py          <- Reward pulse-volume calibration routine
+│   ├── camera.py                      <- picamera2 (CSI)
+│   ├── photodiode.py                  <- TTL sync input (GPIO input)
+│   └── display.py                     <- pygame fullscreen renderer (HDMI)
+├── engine/
+│   ├── state_machine.py               <- Generic YAML-driven state machine
+│   ├── leader.py                      <- Leader Pi main process
+│   └── follower.py                    <- Follower Pi main process
+├── app/
+│   ├── app.py                         <- Flask experiment UI localhost:5000
 │   └── templates/
-│       └── rig_setup.html        ← setup UI HTML/JS
-├── experiment/
-│   ├── experiment_ui.py          ← Flask UI localhost:5000 — run experiments
+│       └── experiment.html            <- Experiment dashboard
+├── setup/
+│   ├── app.py                         <- Flask rig setup UI localhost:4999
 │   └── templates/
-│       └── experiment.html       ← experiment UI HTML/JS
+│       └── setup.html                 <- Setup dashboard
+├── pi_api/
+│   ├── api.py                         <- Flask REST API (runs on each Pi, port 5080)
+│   └── vrfarm.service                 <- systemd unit file
 ├── shared/
-│   └── protocol.py               ← config dataclass, copied to both Pis
-├── stim/
-│   ├── task.py                   ← trial loop + PsychoPy (deployed to mozzarella)
-│   ├── stim_generator.py         ← pre-renders stimuli (deployed to mozzarella)
-│   └── STIM_NOTES.md             ← projector/PsychoPy/stimulus docs
-├── control/
-│   ├── worker.py                 ← lick/reward/camera (deployed to cheddar)
-│   └── CONTROL_NOTES.md          ← GPIO/lick/reward/camera docs
-├── calibration/
-│   ├── compute_warp_map.py       ← generates warp_map.npz
-│   ├── rig_geometry.yaml         ← screen physical measurements
-│   ├── display_test_patches.py   ← photometer measurement tool
+│   ├── config.py                      <- Config loaders + subject database
+│   └── stim_generator.py              <- Pre-compute stimuli (NPZ output)
+├── display_calibration/               <- Display/projector calibration scripts
+│   ├── compute_warp_map.py
+│   ├── rig_geometry.yaml
+│   ├── display_test_patches.py
 │   ├── fit_luminance_correction.py
 │   └── validate_calibration.py
 ├── data/
-│   └── subjects/                 ← HK001.json session history (auto-created)
-├── docs/
-│   ├── FUTURE_WORK.md            ← deferred items tracker
-│   ├── INITIAL_SETUP_REFERENCE.md← environment setup reference
-│   ├── EXPERIMENT_PROTOCOL.md    ← experiment design & data format
-│   ├── CALIBRATION_PROTOCOL.md   ← screen calibration steps
-│   └── AUDIT_20260331.md         ← codebase audit
-└── rig.json                      ← Pi connection info (minimal, saved by rig_setup_ui.py)
+│   └── subjects/                      <- Session history JSONs (auto-created)
+└── docs/
+    ├── FUTURE_WORK.md
+    ├── INITIAL_SETUP_REFERENCE.md
+    ├── EXPERIMENT_PROTOCOL.md
+    ├── CALIBRATION_PROTOCOL.md
+    └── AUDIT_20260331.md
 ```
 
-**On mozzarella (stim Pi, 192.168.10.102):**
+**On cheddar (Leader Pi, 192.168.10.101):**
 ```
-~/rig/                            ← task.py, stim_generator.py, protocol.py
-~/rig/calibration/                ← compute_warp_map.py, rig_geometry.yaml etc
-~/stims/                          ← pre-generated stimuli per session
+~/rig/                                 <- engine/leader.py, devices/*.py, shared/*.py
+~/rig/pi_api/api.py                    <- REST API
+~/data/<session_id>/                   <- HDF5 + metadata (local, transferred after)
+/media/vruser/ssd/video/               <- video recordings (SSD)
 ```
 
-**On cheddar (control Pi, 192.168.10.101):**
+**On mozzarella (Follower Pi, 192.168.10.102):**
 ```
-~/rig/                            ← worker.py, protocol.py
-/media/vruser/ssd/video/          ← video recordings (SSD mounted here)
+~/rig/                                 <- engine/follower.py, devices/display.py
+~/rig/pi_api/api.py                    <- REST API
+~/rig/stims/<session_id>/stimuli.npz   <- pre-generated stim params
 ```
 
 ---
@@ -77,178 +94,163 @@ per rig, controlled from a Mac via Flask web UIs. Named after cheese.
 ```
 Gigabit ethernet switch (experiment traffic)
 ├── Mac balthazar     192.168.10.1   (en5)
-├── mozzarella        192.168.10.102 (eth0 static)
-└── cheddar           192.168.10.101 (eth0 static)
+├── cheddar           192.168.10.101 (eth0 static) — Leader
+└── mozzarella        192.168.10.102 (eth0 static) — Follower
 
 All Pis also on institute WiFi (wlan0) for internet/NTP.
 ```
 
 SSH keys: Mac `~/.ssh/id_rsa.pub` copied to both Pis. Passwordless SSH works.
-```bash
-ssh vruser@192.168.10.101 echo "cheddar OK"   # works
-ssh vruser@192.168.10.102 echo "mozzarella OK" # works
-```
 
 ---
 
 ## Architecture
 
 ```
-Mac (experiment_ui.py Flask)
-  ↕ SSH + paramiko (deploy files, start processes)
-  ↕ ZMQ SUB (receives trial events for dashboard)
-  ↕ ZMQ PUSH (sends GO/STOP/REWARD commands)
+Mac (app/app.py Flask, localhost:5000)
+  ↔ REST API (HTTP, port 5080) for deploy, config, start/stop, data transfer
+  ← UDP :5571 events from Leader (trial, lick, reward, stim, sync)
+  → UDP :5572 commands to Leader (START, STOP, REWARD)
 
-mozzarella (task.py)
-  - PsychoPy window (DISPLAY=:0)
-  - Trial state machine
-  - ZMQ ROUTER (port 5570) ← cheddar connects here
-  - ZMQ PUB (port 5571) → Mac monitor subscribes
-  - ZMQ PULL (port 5581) ← Mac sends commands
+cheddar — Leader (engine/leader.py)
+  - YAML state machine (engine/state_machine.py)
+  - All GPIO devices: lick sensor, reward, camera, photodiode
+  - HDF5 data saved locally, transferred to Mac after session
+  → UDP :5575 display commands to Follower (SHOW, QUIT)
+  → UDP :5571 events to Mac
 
-cheddar (worker.py)
-  - MPR121 lick detection (I2C 0x5A, electrode 4, 200Hz polling)
-  - Solenoid reward (GPIO18, pigpio)
-  - Camera (picamera2, optional)
-  - Photodiode TTL input (GPIO24, optional, disabled for now)
-  - ZMQ DEALER → mozzarella:5570
+mozzarella — Follower (engine/follower.py)
+  - pygame display (HDMI/DPI)
+  - Loads pre-generated stim NPZ at session start
+  - On SHOW: look up trial params, render, wait duration, blank
+  ← UDP :5575 commands from Leader
 ```
 
-**Data flow:**
-- Lick event: cheddar → ZMQ → mozzarella → ZMQ PUB → Mac dashboard
-- Reward command: Mac → ZMQ PUSH → mozzarella → ZMQ ROUTER → cheddar
-- Trial data: written to HDF5 on Mac incrementally per trial
-- Video: saved to cheddar SSD, rsync'd to Mac at session end
-- Stimuli: pre-generated on mozzarella, rsync'd to Mac at session end
+**Key design:** Leader sends `{"cmd": "SHOW", "trial": N}` — Follower handles
+the full show->duration->blank cycle from NPZ data.
+
+**Real-time:** All inter-Pi communication uses Python `socket` module (UDP
+datagrams, ~0.1ms on local gigabit). No ZMQ dependency.
+
+**Management:** Flask REST API on each Pi (port 5080) for file upload/download,
+process start/stop, stim generation. Replaces paramiko SSH.
 
 ---
 
-## Current status (as of 2026-03-30)
+## Config system
 
-### Done ✓
-- Both Pis set up: conda env `rig`, all packages installed
-- pigpio built from source on cheddar, daemon running
-- Passwordless SSH from Mac to both Pis
-- NTP: both Pis syncing to internet Stratum 1-2 servers (~6µs accuracy)
-- `rig_setup_ui.py` working: both Pis green, files deployed
-- `experiment_ui.py` running, mozzarella connects successfully
-- Config loads, mozzarella SSH deploy works
+Two config files with clean separation:
 
-### Broken / not yet tested
-1. **Cheddar SSH fails from paramiko** — system `ssh` works fine but
-   paramiko times out connecting to 192.168.10.101. Increased timeout
-   in latest `experiment_ui.py` but not yet retested. Try:
-   ```bash
-   ssh-keyscan 192.168.10.101 >> ~/.ssh/known_hosts
-   ```
-   Then retest the Connect control Pi button.
+| What                          | Where              | Example                              |
+|-------------------------------|--------------------|--------------------------------------|
+| Pin assignments, I2C addr     | Rig JSON           | `"gpio": 18`, `"i2c_address": "0x5A"` |
+| Calibration tables            | Rig JSON           | `"calibration": [[10,2.1],...]`       |
+| Pi roles, IPs                 | Rig JSON           | `"role": "leader"`                    |
+| State machine / paradigm      | Task YAML `states` | state definitions                    |
+| Experiment-tunable params     | Task YAML `devices`| `amount_ul: 4.0`, `max_lick_rate: 0.3`|
+| Subject, date, session#       | Runtime (UI)       | set in experiment UI fields          |
 
-2. **Config reload after editing YAML** — ✓ FIXED. Config loading now
-   resolves absolute paths and auto-discovers rig JSON from the `rig.name`
-   field in the YAML config (e.g. `rig.name: "cheese"` → `rig_setup/rig_cheese.json`).
+## Device abstraction
 
-3. **Reward delivery not confirmed** — reward button sends ZMQ to
-   mozzarella which forwards to cheddar. If cheddar worker.py isn't
-   running, nothing fires. Fix cheddar connect first.
+Adding a new device = one file in `devices/`. Each device subclasses `Device`
+from `devices/base.py` and declares:
+- `info`: DeviceInfo (name, label, IOType, required_packages)
+- `init(rig_config, task_params)`: hardware init
+- `check()`: health check
+- `task_params_schema()`: experiment-tunable params (editable in UI)
+- `hdf5_datasets()` / `hdf5_trial_data()`: per-trial data saving
+- `start_stream(callback)` / `stop_stream()`: live data
+- `needs_calibration` / `calibrate()` / `load_calibration()`: optional
 
-4. **Lick detection not tested** — MPR121 not yet verified working.
-   Once cheddar connects, touch the lick spout and check the raster.
-
-5. **Warp map not generated** — `warp_map.npz` doesn't exist on
-   mozzarella yet. task.py has a fallback (center stimulus) so it won't
-   crash, but stimuli won't be at correct screen positions. Generate via
-   the "Generate warp map" button in rig_setup_ui.py once basic flow works.
-
-6. **PsychoPy window** ✓ — confirmed working. V3D GPU (hardware), 24-bit visuals.
-   Requires projector startup sequence before task.py: run `~/rig/start_projector.sh`
-   (sets GPIO ALT2, GPIO25 high, runs init_parallel_mode.py, starts X :0).
+`@register_device` decorator adds the class to `DEVICE_REGISTRY`.
 
 ---
 
-## Key config file
+## Experiment workflow
 
-`config/HK001_day07.yaml` — edit this per session.
-Key fields:
-```yaml
-network:
-  stim_ip: "192.168.10.102"
-  control_ip: "192.168.10.101"
-hardware:
-  use_camera: false      # keep false until basic flow works
-  use_photodiode: false  # keep false, hardware not connected yet
-```
+Setup -> Connect -> **Deploy** -> Running -> Ended -> Transfer
+
+- **Deploy** is required before Go: uploads configs, generates stims on Leader,
+  pushes NPZ to Follower, renders thumbnails on Mac.
+- Any parameter change in UI invalidates deploy (Go grays out).
 
 ---
 
 ## Packages
 
 **Mac (conda env vrfarm):**
+Conda base at `/opt/homebrew/Caskroom/miniforge/base`.
+```bash
+conda activate vrfarm
+pip install flask requests scipy matplotlib numpy h5py pyyaml
 ```
-flask paramiko pyzmq scipy matplotlib numpy h5py pyyaml
+No longer needed: `paramiko`, `pyzmq` (replaced by REST API + UDP).
+
+**Cheddar / Leader (conda env rig):**
+```bash
+pip install flask pyyaml numpy scipy h5py smbus2 pigpio
+```
+Optional: `picamera2` (camera, enable in rig JSON)
+
+**Mozzarella / Follower (conda env rig):**
+```bash
+pip install flask pyyaml numpy pygame
 ```
 
-**Mozzarella (conda env rig):**
+pigpiod daemon: on trixie the `pigpio` apt package is gone, so the daemon is built
+from source — already installed at `/usr/local/bin/pigpiod` with a unit at
+`/etc/systemd/system/pigpiod.service` (enabled). The Python client is `pip install
+pigpio` (in the `rig` env). pigpiod must be running: it's a service now
+(`systemctl status pigpiod`), or `sudo pigpiod` manually.
+
+**Running the UIs:**
+```bash
+conda activate vrfarm
+python app/app.py          # experiment UI, localhost:5000
+python setup/app.py        # rig setup UI, localhost:4999
 ```
-pyzmq h5py pyyaml flask numpy scipy
-psychopy (installed --no-deps + pyglet==1.5.27 pillow moviepy imageio
-          imageio-ffmpeg pyopengl requests packaging psutil six json_tricks
-          pandas pyserial python-bidi arabic-reshaper freetype-py)
-```
-Note: pyglet MUST be 1.5.27 — 2.x fails to create GL context under FKMS+DPI.
-
-**Cheddar (conda env rig):**
-```
-pyzmq smbus2 pyyaml flask numpy picamera2
-pigpio (built from source: ~/pigpio/, then pip install pigpio)
-```
-
-**System packages:**
-- mozzarella: `libx11-dev libxext-dev libxi-dev xserver-xorg-core libgl1-mesa-dri libglu1-mesa mesa-utils`
-- cheddar: `libcap-dev`
-
----
-
-## Immediate next steps
-
-1. ✓ Cheddar: paramiko SSH, worker.py, GPIO solenoid, MPR121 lick — all working
-2. ✓ Mozzarella: PsychoPy window opens, V3D GPU confirmed
-3. Run start_projector.sh on mozzarella before deploying task.py
-4. Connect experiment_ui.py to mozzarella — deploy task.py via SSH and verify it starts
-5. Test lick events appearing in UI raster (cheddar→mozzarella ZMQ→Mac)
-6. Run 5-trial session (camera off, photodiode off, warp fallback ok)
-7. Generate warp map via rig_setup_ui.py
-8. Run proper session with correct stimulus positions
 
 ---
 
 ## Known issues / gotchas
 
-- `conda` not in PATH for non-interactive SSH — fixed in rig_setup_ui.py
-  by using `source ~/miniforge3/etc/profile.d/conda.sh && conda activate rig`
-- Same fix needed anywhere else that SSHes and runs Python
+- `conda` not in PATH for non-interactive SSH — use
+  `source ~/miniforge3/etc/profile.d/conda.sh && conda activate rig`
 - macOS port 5000 taken by AirPlay Receiver — disable in System Settings
-  → General → AirDrop & Handoff → AirPlay Receiver off
-- psychtoolbox fails to build on aarch64 — install psychopy with
-  `--no-deps` and add deps manually (already done)
-- pigpio `sudo make install` fails on Python step (distutils missing in
-  3.11) — harmless, C library installed fine, use `pip install pigpio`
+  -> General -> AirDrop & Handoff -> AirPlay Receiver off
+- pigpio `sudo make install` fails on its Python step (distutils missing) —
+  harmless, C library + `pigpiod` install fine; use `pip install pigpio` for the client
+- cheddar is on a tiny ~8 GB SD card (often >90% full) — reclaim with
+  `conda clean -a -y` / `pip cache purge`; a larger card is needed for sustained use
+- Pis are firewall-gated off the `public` WiFi (associated but no egress). To install
+  packages, run an HTTP proxy on the Mac (`python -m proxy --hostname 192.168.10.1
+  --port 8899`) and set `HTTPS_PROXY=http://192.168.10.1:8899` on the Pi
+- Projector startup sequence needed on mozzarella before display:
+  `~/rig/start_projector.sh` (sets GPIO ALT2, GPIO25 high, starts X :0)
+- Warp map not yet generated — stim_generator uses linear approximation fallback
 
 ---
 
-## Docs
+## Next steps
 
-- `docs/SETUP_REFERENCE.md` — full environment setup, all commands
-- `docs/FUTURE_WORK.md` — deferred items (multi-rig, Mac NTP, etc.)
-- `calibration/CALIBRATION_PROTOCOL.md` — screen calibration steps
+1. Deploy new code to both Pis via setup UI (setup/app.py localhost:4999)
+2. Install systemd service on each Pi (pi_api/vrfarm.service)
+3. Test Connect in experiment UI — verify both Pis respond on REST API
+4. Deploy experiment, run 5-trial session (camera off, photodiode off)
+5. Test lick -> reward latency (should be <1ms, same-Pi GPIO)
+6. Generate warp map via display_calibration/
+7. Run full session with correct stimulus positions
 
 ---
 
 ## Style / conventions
 
-- Flask SSE for real-time log streaming to browser
-- ZMQ for inter-Pi communication (ROUTER/DEALER + PUB/SUB)
-- HDF5 for trial data, written incrementally (one row per trial, flushed)
+- Flask SSE for real-time event streaming to browser
+- UDP datagrams for all real-time Pi communication
+- REST API (Flask on each Pi) for management operations
+- systemd services for Pi process lifecycle
+- HDF5 for trial data, written incrementally per trial on Leader
 - All timestamps: `time.time()` Unix seconds, NTP-synced
-- Config: YAML → `shared/protocol.py` dataclasses
-- Pi code deployed via paramiko SFTP, started via SSH nohup
-- Logs go to `/tmp/stim.log` (mozzarella) and `/tmp/control.log` (cheddar)
+- Config: rig JSON (hardware) + task YAML (paradigm)
+- Paradigm as data: YAML state machines, no code changes for new experiments
+- Device abstraction: base class + one file per device type

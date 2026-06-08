@@ -1,0 +1,1286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VRFarm Rig Setup</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         background: #1a1a2e; color: #e0e0e0; padding: 16px; font-size: 13px; }
+  h1 { font-size: 18px; margin-bottom: 12px; color: #fff; }
+  h3 { font-size: 13px; margin-bottom: 6px; color: #aaa; text-transform: uppercase; letter-spacing: 1px; }
+
+  .grid { display: grid; grid-template-columns: 390px 1fr; gap: 16px; }
+
+  .card { background: #16213e; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+  label { display: block; font-size: 11px; color: #888; margin-bottom: 2px; margin-top: 6px; }
+  select, input[type=text], input[type=number] {
+    width: 100%; padding: 5px 8px; border: 1px solid #333; border-radius: 4px;
+    background: #0f3460; color: #e0e0e0; font-size: 13px; }
+
+  .btn { padding: 6px 14px; border: none; border-radius: 4px; cursor: pointer;
+         font-size: 12px; font-weight: 600; }
+  .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .btn-blue { background: #1a73e8; color: #fff; }
+  .btn-green { background: #2e7d32; color: #fff; }
+  .btn-red { background: #c62828; color: #fff; }
+  .btn-orange { background: #e65100; color: #fff; }
+  .btn-yellow { background: #f9a825; color: #000; }
+  .btn-gray { background: #555; color: #fff; }
+  .btn:hover:not(:disabled) { opacity: 0.85; }
+  .btn-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .btn-sm { padding: 3px 10px; font-size: 11px; }
+
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+  .dot-green { background: #4caf50; }
+  .dot-red { background: #f44336; }
+  .dot-gray { background: #666; }
+  .dot-yellow { background: #f9a825; }
+
+  .pi-card { background: #0f3460; border-radius: 6px; padding: 12px; margin-bottom: 10px; }
+  .pi-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .pi-header strong { font-size: 14px; color: #fff; }
+  .pi-header .role-badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 700; }
+  .pi-header .role-badge.leader { background: #000; color: #fff; }
+  .pi-header .role-badge.follower { background: #fff; color: #000; }
+
+  .device-chip { display: inline-block; padding: 2px 8px; border-radius: 10px;
+                 font-size: 11px; margin: 2px; background: #333; color: #ccc; }
+  .device-chip.enabled { background: #2e7d32; color: #fff; }
+
+  .device-card { background: #0f3460; border-radius: 6px; padding: 10px; margin-bottom: 8px; }
+  .device-card h4 { font-size: 12px; color: #ccc; margin-bottom: 4px; }
+  .device-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+  .device-field { display: inline-flex; align-items: center; gap: 4px; }
+  .device-field label { margin: 0; font-size: 10px; white-space: nowrap; }
+  .device-field input, .device-field select { width: auto; min-width: 60px; max-width: 120px;
+    padding: 3px 6px; font-size: 12px; }
+
+  .cal-table { margin-top: 6px; border-collapse: collapse; font-size: 11px; }
+  .cal-table th { color: #888; text-align: left; padding: 2px 6px; font-weight: 500; }
+  .cal-table td { padding: 2px 4px; }
+  .cal-table input { width: 60px; padding: 2px 4px; font-size: 11px; background: #0f3460;
+    border: 1px solid #333; color: #e0e0e0; border-radius: 3px; }
+
+  .lick-canvas { background: #0a0a1a; border-radius: 4px; margin-top: 6px; }
+  .stream-container { margin-top: 6px; }
+  .stream-container img { max-width: 320px; border-radius: 4px; }
+
+  #log { background: #0a0a1a; border-radius: 4px; padding: 8px; font-family: monospace;
+         font-size: 11px; max-height: 200px; overflow-y: auto; color: #888; }
+
+  .quit-btn { position: fixed; top: 12px; right: 12px; width: 32px; height: 32px;
+              border-radius: 50%; border: none; background: #c62828; color: #fff;
+              font-size: 14px; font-weight: 700; cursor: pointer; opacity: 0.5;
+              transition: opacity 0.2s; z-index: 999; line-height: 32px; text-align: center; }
+  .quit-btn:hover { opacity: 1; }
+</style>
+</head>
+<body>
+
+<button class="quit-btn" onclick="quitApp()" title="Quit server">&times;</button>
+<h1>VRFarm Rig Setup</h1>
+
+<div class="grid">
+  <!-- Sidebar -->
+  <div>
+    <div class="card">
+      <h3>Rig</h3>
+      <label>Load existing</label>
+      <select id="rig-select">
+        <option value="">-- select --</option>
+        {% for r in rigs %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
+      </select>
+      <div class="btn-row">
+        <button class="btn btn-blue" onclick="loadRig()">Load Rig</button>
+        <button class="btn btn-green" onclick="createRig()">New Rig</button>
+        <button class="btn btn-blue" onclick="saveRig()">Save Rig</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Add Pi</h3>
+      <label>Name</label>
+      <input type="text" id="add-pi-name" placeholder="e.g. cheddar">
+      <label>IP</label>
+      <input type="text" id="add-pi-ip" placeholder="192.168.10.101">
+      <label>User</label>
+      <input type="text" id="add-pi-user" value="vruser">
+      <label>Role</label>
+      <select id="add-pi-role">
+        <option value="leader">Leader</option>
+        <option value="follower">Follower</option>
+      </select>
+      <div class="btn-row">
+        <button class="btn btn-green" onclick="addPi()">Add Pi</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Device Catalog</h3>
+      <div id="device-catalog">Loading...</div>
+    </div>
+
+    <div class="card">
+      <h3>Log</h3>
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <!-- Main area -->
+  <div>
+    <div class="card">
+      <h3>Pis</h3>
+      <div id="pi-list"></div>
+    </div>
+
+    <div class="card">
+      <h3 style="display:flex; align-items:center; gap:8px">
+        Devices
+        <button id="init-btn" class="btn btn-green btn-sm" onclick="initDevices()" disabled>Initialize</button>
+      </h3>
+      <div id="device-list"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+let rig = null;
+let deviceSchemas = {};
+let deviceState = {};
+let warpExists = false;
+let piState = {};       // ip -> {checked: bool}
+let lickPollInterval = null;
+let devicesInitialized = false;
+let geoFiles = [];          // available geometry YAML filenames
+let geoData = null;         // loaded geometry object
+let geoCurrentName = '';    // currently loaded filename
+
+fetch('/api/device_schemas').then(r => r.json()).then(schemas => {
+  deviceSchemas = schemas;
+  renderDeviceCatalog();
+});
+
+// ── Helpers ──
+
+function getPiForDevice(devName) {
+  if (!rig) return null;
+  for (const pi of rig.pis) {
+    if ((pi.devices || []).includes(devName)) return pi;
+  }
+  return null;
+}
+
+async function proxyPi(ip, endpoint, payload = {}, method = 'POST') {
+  try {
+    const r = await fetch('/api/proxy', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ip, port: rig.network.api_port, endpoint, method, payload})
+    });
+    return await r.json();
+  } catch (e) {
+    log('Proxy error: ' + e);
+    return {ok: false, error: String(e)};
+  }
+}
+
+function interpolateCalMs(calTable, volumeUl) {
+  if (!calTable || calTable.length === 0) return 0;
+  if (calTable.length === 1) {
+    // Single point: linear through origin
+    const ms = calTable[0][0], ul = calTable[0][1];
+    return ul > 0 ? (volumeUl / ul) * ms : 0;
+  }
+  const sorted = [...calTable].sort((a, b) => a[1] - b[1]);
+  if (volumeUl <= sorted[0][1]) {
+    // Extrapolate below
+    const frac = sorted[1][1] !== sorted[0][1]
+      ? (volumeUl - sorted[0][1]) / (sorted[1][1] - sorted[0][1]) : 0;
+    return sorted[0][0] + frac * (sorted[1][0] - sorted[0][0]);
+  }
+  if (volumeUl >= sorted[sorted.length - 1][1]) {
+    const n = sorted.length;
+    const frac = sorted[n-1][1] !== sorted[n-2][1]
+      ? (volumeUl - sorted[n-2][1]) / (sorted[n-1][1] - sorted[n-2][1]) : 0;
+    return sorted[n-2][0] + frac * (sorted[n-1][0] - sorted[n-2][0]);
+  }
+  for (let i = 0; i < sorted.length - 1; i++) {
+    if (volumeUl >= sorted[i][1] && volumeUl <= sorted[i + 1][1]) {
+      const frac = (volumeUl - sorted[i][1]) / (sorted[i + 1][1] - sorted[i][1]);
+      return sorted[i][0] + frac * (sorted[i + 1][0] - sorted[i][0]);
+    }
+  }
+  return sorted[0][0];
+}
+
+// ── Rig management ──
+
+function allPisOk() {
+  if (!rig || !rig.pis.length) return false;
+  return rig.pis.every(pi => {
+    const ps = piState[pi.ip];
+    return ps && ps.checked && ps.ok;
+  });
+}
+
+let uiBusy = false;
+function _lockUI() {
+  uiBusy = true;
+  document.querySelectorAll('.btn').forEach(b => b.disabled = true);
+}
+function _unlockUI() {
+  uiBusy = false;
+  document.querySelectorAll('.btn').forEach(b => b.disabled = false);
+  // Re-apply contextual disabling
+  if (!allPisOk()) document.getElementById('init-btn').disabled = true;
+  renderDeviceList();
+}
+
+async function checkAllPis() {
+  if (!rig) return;
+  log('Checking all Pis...');
+  const promises = rig.pis.map(async (pi) => {
+    try {
+      const r = await fetch('/api/check_pi', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ip: pi.ip, api_port: rig.network.api_port})
+      });
+      const data = await r.json();
+      piState[pi.ip] = {checked: true, ok: data.api, ssh: data.ssh, api: data.api};
+      log(`  ${pi.name}: SSH ${data.ssh ? 'OK' : 'FAIL'}, API ${data.api ? 'OK' : 'FAIL'}`);
+    } catch (e) {
+      piState[pi.ip] = {checked: true, ok: false};
+      log(`  ${pi.name}: FAIL (${e})`);
+    }
+  });
+  await Promise.all(promises);
+  renderAll();
+  if (allPisOk()) {
+    document.getElementById('init-btn').disabled = false;
+    log('All Pis online.');
+  } else {
+    document.getElementById('init-btn').disabled = true;
+    log('Some Pis offline — devices disabled.');
+  }
+}
+
+async function loadRig() {
+  const name = document.getElementById('rig-select').value;
+  if (!name) return;
+  _lockUI();
+  log('Loading rig ' + name + '...');
+  try {
+    const r = await fetch('/api/load_rig', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name})
+    });
+    rig = await r.json();
+    deviceState = {};
+    piState = {};
+    devicesInitialized = false;
+    renderAll();
+    checkWarp();
+    log('Loaded rig: ' + rig.name);
+    await checkAllPis();
+  } finally {
+    _unlockUI();
+  }
+}
+
+async function createRig() {
+  const name = prompt('New rig name:');
+  if (!name) return;
+  const r = await fetch('/api/create_rig', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name})
+  });
+  rig = await r.json();
+  deviceState = {};
+  piState = {};
+  devicesInitialized = false;
+  document.getElementById('init-btn').disabled = true;
+  renderAll();
+  checkWarp();
+  log('Created rig: ' + name);
+  checkAllPis();
+}
+
+async function saveRig() {
+  if (!rig) return;
+  await fetch('/api/save_rig', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(rig)
+  });
+  log('Saved rig: ' + rig.name);
+}
+
+// ── Pi management ──
+
+function addPi() {
+  if (!rig) { log('Load or create a rig first'); return; }
+  const pi = {
+    name: document.getElementById('add-pi-name').value,
+    ip: document.getElementById('add-pi-ip').value,
+    user: document.getElementById('add-pi-user').value,
+    role: document.getElementById('add-pi-role').value,
+    devices: [],
+  };
+  if (!pi.name || !pi.ip) { log('Name and IP required'); return; }
+  rig.pis.push(pi);
+  renderAll();
+  log('Added Pi: ' + pi.name);
+}
+
+function removePi(idx) {
+  const pi = rig.pis[idx];
+  delete piState[pi.ip];
+  rig.pis.splice(idx, 1);
+  renderAll();
+}
+
+async function checkPi(ip) {
+  log('Checking ' + ip + '...');
+  const r = await fetch('/api/check_pi', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ip, api_port: rig.network.api_port})
+  });
+  const data = await r.json();
+  const ok = data.api;
+  piState[ip] = {checked: true, ok: ok, ssh: data.ssh, api: data.api};
+  renderAll();
+  document.getElementById('init-btn').disabled = !allPisOk();
+  log(`  SSH: ${data.ssh ? 'OK' : 'FAIL'}, API: ${data.api ? 'OK' : 'FAIL'}`);
+}
+
+async function installPi(idx) {
+  const pi = rig.pis[idx];
+  _lockUI();
+  log('Installing ' + pi.name + '...');
+  try {
+    const r = await fetch('/api/install_pi', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(pi)
+    });
+    const data = await r.json();
+    (data.steps || []).forEach(s => log('  ' + s));
+    log(data.ok ? 'Install complete.' : 'Install failed: ' + data.error);
+  } finally {
+    _unlockUI();
+  }
+}
+
+async function rebootPi(idx) {
+  const pi = rig.pis[idx];
+  if (!confirm('Reboot ' + pi.name + '?')) return;
+  _lockUI();
+  log('Rebooting ' + pi.name + '...');
+  try {
+    const r = await fetch('/api/reboot_pi', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ip: pi.ip, user: pi.user || 'vruser'})
+    });
+    const data = await r.json();
+    log(data.ok ? pi.name + ' is rebooting.' : 'Reboot failed: ' + data.error);
+  } finally {
+    _unlockUI();
+  }
+}
+
+async function shutdownPi(idx) {
+  const pi = rig.pis[idx];
+  if (!confirm('Shutdown ' + pi.name + '? You will need physical access to turn it back on.')) return;
+  _lockUI();
+  log('Shutting down ' + pi.name + '...');
+  try {
+    const r = await fetch('/api/shutdown_pi', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ip: pi.ip, user: pi.user || 'vruser'})
+    });
+    const data = await r.json();
+    log(data.ok ? pi.name + ' is shutting down.' : 'Shutdown failed: ' + data.error);
+  } finally {
+    _unlockUI();
+  }
+}
+
+async function deployPi(idx) {
+  const pi = rig.pis[idx];
+  _lockUI();
+  log('Deploying to ' + pi.name + '...');
+  try {
+    const r = await fetch('/api/deploy_pi', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ip: pi.ip, role: pi.role, api_port: rig.network.api_port})
+    });
+    const data = await r.json();
+    (data.steps || []).forEach(s => log('  ' + s));
+    log(data.ok ? 'Deploy complete.' : 'Deploy failed: ' + data.error);
+  } finally {
+    _unlockUI();
+  }
+}
+
+// ── Device management ──
+
+function toggleDevice(devName) {
+  if (!rig) return;
+  const dev = rig.devices[devName];
+  if (dev) {
+    dev.enabled = !dev.enabled;
+  } else {
+    rig.devices[devName] = { type: devName, enabled: true };
+  }
+  renderAll();
+}
+
+function assignDeviceToPi(devName, piIdx) {
+  if (!rig) return;
+  const pi = rig.pis[piIdx];
+  if (pi.devices.includes(devName)) {
+    pi.devices = pi.devices.filter(d => d !== devName);
+  } else {
+    pi.devices.push(devName);
+  }
+  renderAll();
+}
+
+async function initDevices() {
+  _lockUI();
+  const btn = document.getElementById('init-btn');
+  btn.textContent = 'Initializing...';
+  log('Initializing devices...');
+  try {
+    const r = await fetch('/api/init_devices', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({})
+    });
+    const data = await r.json();
+    (data.steps || []).forEach(s => log('  ' + s));
+
+    // Update device states from structured results
+    const results = data.results || {};
+    for (const [name, res] of Object.entries(results)) {
+      deviceState[name] = deviceState[name] || {};
+      deviceState[name].initialized = res.ok;
+    }
+
+    devicesInitialized = true;
+    btn.textContent = 'Reinitialize';
+    btn.className = 'btn btn-yellow btn-sm';
+    log(data.ok ? 'All devices initialized.' : 'Some devices failed.');
+  } finally {
+    _unlockUI();
+  }
+}
+
+// ── Device-specific actions ──
+
+async function startCameraStream() {
+  const pi = getPiForDevice('camera');
+  if (!pi) { log('Camera not assigned to a Pi'); return; }
+  const cam = rig.devices.camera || {};
+  log('Starting camera stream...');
+  const result = await proxyPi(pi.ip, '/api/camera_preview_start', {
+    resolution: cam.resolution || [1280, 720], fps: cam.fps || 50
+  });
+  if (result.ok) {
+    deviceState.camera = deviceState.camera || {};
+    deviceState.camera.streaming = true;
+    renderDeviceList();
+    log('Camera stream started.');
+  } else { log('Camera stream failed: ' + (result.error || '')); }
+}
+
+async function stopCameraStream() {
+  const pi = getPiForDevice('camera');
+  if (!pi) return;
+  await proxyPi(pi.ip, '/api/camera_preview_stop');
+  deviceState.camera = deviceState.camera || {};
+  deviceState.camera.streaming = false;
+  renderDeviceList();
+  log('Camera stream stopped.');
+}
+
+async function testCheckers() {
+  const pi = getPiForDevice('display');
+  if (!pi) { log('Display not assigned to a Pi'); return; }
+  const applyWarp = rig.devices.display.apply_warp || false;
+  const result = await proxyPi(pi.ip, '/api/test_checkers', {apply_warp: applyWarp});
+  log(result.ok ? 'Checkerboard shown.' : 'Failed: ' + (result.error || ''));
+}
+
+async function blankDisplay() {
+  const pi = getPiForDevice('display');
+  if (!pi) { log('Display not assigned to a Pi'); return; }
+  const grayInput = document.getElementById('blank-gray-value');
+  const gray = grayInput ? parseFloat(grayInput.value) : 0.0;
+  const result = await proxyPi(pi.ip, '/api/blank_display', {gray_value: gray});
+  log(result.ok ? `Display blanked (gray=${gray}).` : 'Failed: ' + (result.error || ''));
+}
+
+async function checkWarp() {
+  try {
+    const r = await fetch('/api/check_warp');
+    const data = await r.json();
+    warpExists = data.exists;
+  } catch (e) { warpExists = false; }
+  await loadGeoList();
+  if (!geoData && geoFiles.length) await loadGeometry(geoFiles[0]);
+  else renderDeviceList();
+}
+
+async function generateWarp() {
+  // Save current geometry first if modified
+  if (geoData && geoCurrentName) await saveGeometry();
+  const geoPath = geoCurrentName ? `display_calibration/${geoCurrentName}` : '';
+  log('Generating warp map...');
+  const btn = document.querySelector('.warp-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Generating...'; }
+  try {
+    const r = await fetch('/api/generate_warp', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({geometry_path: geoPath || undefined})
+    });
+    const data = await r.json();
+    (data.steps || []).forEach(s => log('  ' + s));
+    if (data.ok) {
+      warpExists = true;
+      log('Warp map generated and deployed.');
+    } else {
+      log('Warp generation failed: ' + (data.error || ''));
+    }
+  } catch (e) { log('Warp generation error: ' + e); }
+  renderDeviceList();
+}
+
+// ── Geometry params ──
+
+async function loadGeoList() {
+  try {
+    const r = await fetch('/api/list_geometries');
+    geoFiles = await r.json();
+  } catch (e) { geoFiles = []; }
+}
+
+async function loadGeometry(name) {
+  name = name || 'rig_geometry.yaml';
+  try {
+    const r = await fetch('/api/load_geometry', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name})
+    });
+    const data = await r.json();
+    if (data.error) { log('Geometry load failed: ' + data.error); return; }
+    geoData = data.geometry;
+    geoCurrentName = data.name;
+    renderDeviceList();
+  } catch (e) { log('Geometry load error: ' + e); }
+}
+
+async function saveGeometry(name) {
+  if (!geoData) return;
+  name = name || geoCurrentName || 'rig_geometry.yaml';
+  try {
+    const r = await fetch('/api/save_geometry', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, geometry: geoData})
+    });
+    const data = await r.json();
+    if (data.ok) {
+      geoCurrentName = data.name;
+      log('Saved geometry: ' + data.name);
+      await loadGeoList();
+      renderDeviceList();
+    } else { log('Save failed: ' + (data.error || '')); }
+  } catch (e) { log('Save error: ' + e); }
+}
+
+async function saveGeometryAs() {
+  const name = prompt('Save geometry as:', 'rig_geometry_new.yaml');
+  if (!name) return;
+  const fname = name.endsWith('.yaml') ? name : name + '.yaml';
+  await saveGeometry(fname);
+}
+
+function updateGeoField(section, key, value) {
+  if (!geoData) return;
+  if (!geoData[section]) geoData[section] = {};
+  geoData[section][key] = value;
+}
+
+async function intensityCal() {
+  const pi = getPiForDevice('display');
+  if (!pi) { log('Display not assigned to a Pi'); return; }
+  log('Running intensity calibration...');
+  const result = await proxyPi(pi.ip, '/api/calibrate', {device: 'display'});
+  log(result.ok ? 'Intensity calibration complete.' : 'Failed: ' + (result.error || ''));
+}
+
+async function startLickMonitor() {
+  const pi = getPiForDevice('lick_sensor');
+  if (!pi) { log('Lick sensor not assigned to a Pi'); return; }
+  const result = await proxyPi(pi.ip, '/api/monitor_lick');
+  if (result.ok) {
+    deviceState.lick_sensor = deviceState.lick_sensor || {};
+    deviceState.lick_sensor.monitoring = true;
+    piClockOffset = null; // reset offset for fresh calibration
+    renderDeviceList();
+    lickPollInterval = setInterval(() => pollLickData(pi.ip), 200);
+    startLickAnimation();
+    log('Lick monitoring started.');
+  } else { log('Failed: ' + (result.error || '')); }
+}
+
+async function stopLickMonitor() {
+  const pi = getPiForDevice('lick_sensor');
+  if (pi) await proxyPi(pi.ip, '/api/stop_monitor_lick');
+  deviceState.lick_sensor = deviceState.lick_sensor || {};
+  deviceState.lick_sensor.monitoring = false;
+  if (lickPollInterval) { clearInterval(lickPollInterval); lickPollInterval = null; }
+  stopLickAnimation();
+  renderDeviceList();
+  log('Lick monitoring stopped.');
+}
+
+let lickEvents = [];
+let piClockOffset = null; // Mac_time - Pi_time (seconds)
+let lickAnimFrame = null;
+
+let photodiodeEvents = [];
+let photodiodeClockOffset = null;
+let photodidePollInterval = null;
+let photodiodeAnimFrame = null;
+
+let rewardEvents = [];
+let rewardClockOffset = null;
+let rewardPollInterval = null;
+let rewardAnimFrame = null;
+
+async function pollLickData(ip) {
+  const result = await proxyPi(ip, '/api/lick_data', {}, 'GET');
+  lickEvents = result.events || [];
+  // Compute clock offset from first event we receive
+  if (piClockOffset === null && lickEvents.length > 0) {
+    piClockOffset = Date.now() / 1000 - lickEvents[lickEvents.length - 1].t;
+  }
+  const lastEl = document.getElementById('last-lick-time');
+  if (lastEl && lickEvents.length > 0) {
+    const lastT = lickEvents[lickEvents.length - 1].t;
+    const d = new Date(lastT * 1000);
+    lastEl.textContent = d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
+  }
+}
+
+function startLickAnimation() {
+  function frame() {
+    drawLickRaster();
+    lickAnimFrame = requestAnimationFrame(frame);
+  }
+  lickAnimFrame = requestAnimationFrame(frame);
+}
+
+function stopLickAnimation() {
+  if (lickAnimFrame) { cancelAnimationFrame(lickAnimFrame); lickAnimFrame = null; }
+}
+
+function drawLickRaster() {
+  const canvas = document.getElementById('lick-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  ctx.fillStyle = '#0a0a1a';
+  ctx.fillRect(0, 0, w, h);
+
+  // "now" in Pi clock = Mac clock - offset
+  const windowS = 30;
+  const now = piClockOffset !== null ? (Date.now() / 1000 - piClockOffset) : (lickEvents.length > 0 ? lickEvents[lickEvents.length - 1].t : 0);
+
+  // Time axis labels
+  ctx.fillStyle = '#444';
+  ctx.font = '9px monospace';
+  for (let s = 0; s <= 30; s += 5) {
+    const x = ((windowS - s) / windowS) * w;
+    ctx.fillText('-' + s + 's', x, h - 2);
+  }
+
+  ctx.strokeStyle = '#4caf50';
+  ctx.lineWidth = 1.5;
+  for (const evt of lickEvents) {
+    const age = now - evt.t;
+    if (age > windowS || age < 0) continue;
+    const x = ((windowS - age) / windowS) * w;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h - 12);
+    ctx.stroke();
+  }
+}
+
+async function deliverReward() {
+  const pi = getPiForDevice('reward');
+  if (!pi) { log('Reward not assigned to a Pi'); return; }
+  const amountEl = document.getElementById('reward-deliver-ul');
+  const amount = amountEl ? parseFloat(amountEl.value) : 4.0;
+  const cal = (rig.devices.reward || {}).calibration || {};
+  const table = cal.main || [];
+  const ms = interpolateCalMs(table, amount);
+  const gpio = ((rig.devices.reward || {}).pins || {}).main ? rig.devices.reward.pins.main.gpio : 18;
+  log(`Delivering ${amount} uL (${ms.toFixed(1)} ms, GPIO ${gpio})...`);
+  const result = await proxyPi(pi.ip, '/api/deliver_reward', {duration_ms: ms, gpio: gpio});
+  log(result.ok ? 'Reward delivered.' : 'Failed: ' + (result.error || ''));
+}
+
+// ── Reward live ──
+
+async function startRewardLive() {
+  const pi = getPiForDevice('reward');
+  if (!pi) { log('Reward not assigned to a Pi'); return; }
+  deviceState.reward = deviceState.reward || {};
+  deviceState.reward.monitoring = true;
+  rewardClockOffset = null;
+  rewardEvents = [];
+  renderDeviceList();
+  rewardPollInterval = setInterval(() => pollRewardData(pi.ip), 200);
+  startRewardAnimation();
+  log('Reward live view started.');
+}
+
+function stopRewardLive() {
+  deviceState.reward = deviceState.reward || {};
+  deviceState.reward.monitoring = false;
+  if (rewardPollInterval) { clearInterval(rewardPollInterval); rewardPollInterval = null; }
+  stopRewardAnimation();
+  renderDeviceList();
+  log('Reward live view stopped.');
+}
+
+async function pollRewardData(ip) {
+  const result = await proxyPi(ip, '/api/reward_data', {}, 'GET');
+  rewardEvents = result.events || [];
+  if (rewardClockOffset === null && rewardEvents.length > 0) {
+    rewardClockOffset = Date.now() / 1000 - rewardEvents[rewardEvents.length - 1].t;
+  }
+  const lastEl = document.getElementById('last-reward-time');
+  if (lastEl && rewardEvents.length > 0) {
+    const last = rewardEvents[rewardEvents.length - 1];
+    const d = new Date(last.t * 1000);
+    lastEl.textContent = d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0') + ' (' + last.duration_ms.toFixed(0) + 'ms)';
+  }
+  const countEl = document.getElementById('reward-count');
+  if (countEl) countEl.textContent = rewardEvents.length;
+}
+
+function startRewardAnimation() {
+  function frame() {
+    drawRewardRaster();
+    rewardAnimFrame = requestAnimationFrame(frame);
+  }
+  rewardAnimFrame = requestAnimationFrame(frame);
+}
+
+function stopRewardAnimation() {
+  if (rewardAnimFrame) { cancelAnimationFrame(rewardAnimFrame); rewardAnimFrame = null; }
+}
+
+function drawRewardRaster() {
+  const canvas = document.getElementById('reward-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  ctx.fillStyle = '#0a0a1a';
+  ctx.fillRect(0, 0, w, h);
+
+  const windowS = 30;
+  const now = rewardClockOffset !== null
+    ? (Date.now() / 1000 - rewardClockOffset)
+    : (rewardEvents.length > 0 ? rewardEvents[rewardEvents.length - 1].t : 0);
+
+  ctx.fillStyle = '#444';
+  ctx.font = '9px monospace';
+  for (let s = 0; s <= 30; s += 5) {
+    const x = ((windowS - s) / windowS) * w;
+    ctx.fillText('-' + s + 's', x, h - 2);
+  }
+
+  ctx.strokeStyle = '#2196f3';
+  ctx.lineWidth = 2;
+  for (const evt of rewardEvents) {
+    const age = now - evt.t;
+    if (age > windowS || age < 0) continue;
+    const x = ((windowS - age) / windowS) * w;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h - 12);
+    ctx.stroke();
+  }
+}
+
+// ── Photodiode monitoring ──
+
+async function startPhotodiodeMonitor() {
+  const pi = getPiForDevice('photodiode');
+  if (!pi) { log('Photodiode not assigned to a Pi'); return; }
+  const gpio = (rig.devices.photodiode || {}).gpio || 24;
+  const result = await proxyPi(pi.ip, '/api/monitor_photodiode', {gpio});
+  if (result.ok) {
+    deviceState.photodiode = deviceState.photodiode || {};
+    deviceState.photodiode.monitoring = true;
+    photodiodeClockOffset = null;
+    renderDeviceList();
+    photodidePollInterval = setInterval(() => pollPhotodiodeData(pi.ip), 200);
+    startPhotodiodeAnimation();
+    log('Photodiode monitoring started.');
+  } else { log('Failed: ' + (result.error || '')); }
+}
+
+async function stopPhotodiodeMonitor() {
+  const pi = getPiForDevice('photodiode');
+  if (pi) await proxyPi(pi.ip, '/api/stop_monitor_photodiode');
+  deviceState.photodiode = deviceState.photodiode || {};
+  deviceState.photodiode.monitoring = false;
+  if (photodidePollInterval) { clearInterval(photodidePollInterval); photodidePollInterval = null; }
+  stopPhotodiodeAnimation();
+  renderDeviceList();
+  log('Photodiode monitoring stopped.');
+}
+
+async function pollPhotodiodeData(ip) {
+  const result = await proxyPi(ip, '/api/photodiode_data', {}, 'GET');
+  photodiodeEvents = result.events || [];
+  if (photodiodeClockOffset === null && photodiodeEvents.length > 0) {
+    photodiodeClockOffset = Date.now() / 1000 - photodiodeEvents[photodiodeEvents.length - 1].t;
+  }
+  const lastEl = document.getElementById('last-pulse-time');
+  if (lastEl && photodiodeEvents.length > 0) {
+    const lastT = photodiodeEvents[photodiodeEvents.length - 1].t;
+    const d = new Date(lastT * 1000);
+    lastEl.textContent = d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
+  }
+  const countEl = document.getElementById('pulse-count');
+  if (countEl) countEl.textContent = photodiodeEvents.length;
+}
+
+function startPhotodiodeAnimation() {
+  function frame() {
+    drawPhotodiodeRaster();
+    photodiodeAnimFrame = requestAnimationFrame(frame);
+  }
+  photodiodeAnimFrame = requestAnimationFrame(frame);
+}
+
+function stopPhotodiodeAnimation() {
+  if (photodiodeAnimFrame) { cancelAnimationFrame(photodiodeAnimFrame); photodiodeAnimFrame = null; }
+}
+
+function drawPhotodiodeRaster() {
+  const canvas = document.getElementById('photodiode-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  ctx.fillStyle = '#0a0a1a';
+  ctx.fillRect(0, 0, w, h);
+
+  const windowS = 30;
+  const now = photodiodeClockOffset !== null
+    ? (Date.now() / 1000 - photodiodeClockOffset)
+    : (photodiodeEvents.length > 0 ? photodiodeEvents[photodiodeEvents.length - 1].t : 0);
+
+  // Time axis labels
+  ctx.fillStyle = '#444';
+  ctx.font = '9px monospace';
+  for (let s = 0; s <= 30; s += 5) {
+    const x = ((windowS - s) / windowS) * w;
+    ctx.fillText('-' + s + 's', x, h - 2);
+  }
+
+  ctx.strokeStyle = '#ff5722';
+  ctx.lineWidth = 1.5;
+  for (const evt of photodiodeEvents) {
+    const age = now - evt.t;
+    if (age > windowS || age < 0) continue;
+    const x = ((windowS - age) / windowS) * w;
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, h - 12);
+    ctx.stroke();
+  }
+}
+
+function updateRewardMs() {
+  const amountEl = document.getElementById('reward-deliver-ul');
+  const msEl = document.getElementById('reward-computed-ms');
+  if (!amountEl || !msEl) return;
+  const cal = (rig.devices.reward || {}).calibration || {};
+  const table = cal.main || [];
+  const ms = interpolateCalMs(table, parseFloat(amountEl.value) || 0);
+  msEl.textContent = ms.toFixed(1) + ' ms';
+}
+
+function updateCalTable() {
+  if (!rig || !rig.devices.reward) return;
+  const rows = document.querySelectorAll('.cal-row');
+  const newCal = [];
+  rows.forEach(row => {
+    const ms = parseFloat(row.querySelector('.cal-ms').value);
+    const ul = parseFloat(row.querySelector('.cal-ul').value);
+    if (!isNaN(ms) && !isNaN(ul)) newCal.push([ms, ul]);
+  });
+  rig.devices.reward.calibration = rig.devices.reward.calibration || {};
+  rig.devices.reward.calibration.main = newCal;
+  updateRewardMs();
+}
+
+function applyCalibration() {
+  updateCalTable();
+  saveRig();
+  log('Calibration saved to rig config.');
+  updateRewardMs();
+}
+
+function addCalRow() {
+  if (!rig || !rig.devices.reward) return;
+  rig.devices.reward.calibration = rig.devices.reward.calibration || {};
+  rig.devices.reward.calibration.main = rig.devices.reward.calibration.main || [];
+  rig.devices.reward.calibration.main.push([0, 0]);
+  renderDeviceList();
+}
+
+function removeCalRow() {
+  if (!rig || !rig.devices.reward) return;
+  const cal = rig.devices.reward.calibration && rig.devices.reward.calibration.main;
+  if (cal && cal.length > 0) cal.pop();
+  renderDeviceList();
+}
+
+// ── Rendering ──
+
+function renderAll() {
+  renderPiList();
+  renderDeviceList();
+}
+
+function renderPiList() {
+  const el = document.getElementById('pi-list');
+  if (!rig || !rig.pis.length) { el.innerHTML = '<div style="color:#666">No Pis configured</div>'; return; }
+
+  el.innerHTML = rig.pis.map((pi, idx) => {
+    const ps = piState[pi.ip] || {};
+    const dotClass = ps.checked ? (ps.ok ? 'dot-green' : 'dot-red') : 'dot-gray';
+    return `
+    <div class="pi-card">
+      <div class="pi-header">
+        <span class="status-dot ${dotClass}"></span>
+        <strong>${pi.name}</strong>
+        <span class="role-badge ${pi.role}">${pi.role}</span>
+        <span style="color:#888; font-size:11px">${pi.ip}</span>
+      </div>
+      <div>
+        ${(pi.devices || []).map(d =>
+          `<span class="device-chip enabled">${d}</span>`
+        ).join('')}
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-blue btn-sm" onclick="checkPi('${pi.ip}')">Check</button>
+        <button class="btn btn-orange btn-sm" onclick="installPi(${idx})">Install</button>
+        <button class="btn btn-green btn-sm" onclick="deployPi(${idx})">Deploy</button>
+        <button class="btn btn-red btn-sm" onclick="rebootPi(${idx})">Reboot</button>
+        <button class="btn btn-red btn-sm" onclick="shutdownPi(${idx})">Shutdown</button>
+        <button class="btn btn-red btn-sm" onclick="removePi(${idx})">Remove</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderDeviceList() {
+  const el = document.getElementById('device-list');
+  if (!rig) { el.innerHTML = ''; return; }
+
+  const pisReady = allPisOk();
+  const devices = rig.devices || {};
+  el.innerHTML = Object.entries(devices).map(([name, dev]) => {
+    const schema = deviceSchemas[name] || {};
+    const enabled = dev.enabled !== false;
+    const ds = deviceState[name] || {};
+    const initDot = ds.initialized === true ? 'dot-green' : ds.initialized === false ? 'dot-red' : 'dot-gray';
+    const assignHtml = (rig.pis || []).map((pi, i) => {
+      const assigned = (pi.devices || []).includes(name);
+      return `<span class="device-chip ${assigned ? 'enabled' : ''}"
+                    onclick="assignDeviceToPi('${name}', ${i})"
+                    style="cursor:pointer">${pi.name}</span>`;
+    }).join('');
+
+    const showControls = enabled && pisReady;
+    let controlsHtml = '';
+    if (showControls) {
+      if (name === 'camera') controlsHtml = renderCameraControls(dev);
+      else if (name === 'display') controlsHtml = renderDisplayControls(dev);
+      else if (name === 'lick_sensor') controlsHtml = renderLickControls(dev);
+      else if (name === 'photodiode') controlsHtml = renderPhotodiodeControls(dev);
+      else if (name === 'reward') controlsHtml = renderRewardControls(dev);
+    }
+
+    const opacity = pisReady ? (enabled ? 1 : 0.4) : 0.3;
+    return `
+    <div class="device-card" style="opacity: ${opacity}">
+      <h4>
+        <span class="status-dot ${initDot}"></span>
+        <span class="device-chip ${enabled ? 'enabled' : ''}"
+              onclick="toggleDevice('${name}')" style="cursor:pointer">
+          ${schema.label || name} ${enabled ? '(on)' : '(off)'}
+        </span>
+        ${assignHtml}
+      </h4>
+      ${showControls ? controlsHtml : ''}
+      ${!pisReady && enabled ? '<div style="font-size:10px; color:#f44336; margin-top:4px">Waiting for Pi check...</div>' : ''}
+    </div>`;
+  }).join('');
+}
+
+function renderCameraControls(dev) {
+  const res = dev.resolution || [1280, 720];
+  const resStr = res[0] + 'x' + res[1];
+  const fps = dev.fps || 50;
+  const ds = deviceState.camera || {};
+  const streaming = ds.streaming;
+  const pi = getPiForDevice('camera');
+  const streamUrl = pi ? `http://${pi.ip}:${rig.network.api_port}/api/camera_stream` : '';
+
+  return `
+    <div class="device-controls">
+      <div class="device-field">
+        <label>Resolution</label>
+        <select onchange="rig.devices.camera.resolution = this.value.split('x').map(Number)">
+          <option value="640x480" ${resStr === '640x480' ? 'selected' : ''}>640x480</option>
+          <option value="1280x720" ${resStr === '1280x720' ? 'selected' : ''}>1280x720</option>
+          <option value="1920x1080" ${resStr === '1920x1080' ? 'selected' : ''}>1920x1080</option>
+        </select>
+      </div>
+      <div class="device-field">
+        <label>FPS</label>
+        <input type="number" value="${fps}" min="10" max="120" style="width:55px"
+               onchange="rig.devices.camera.fps = parseInt(this.value)">
+      </div>
+      ${streaming
+        ? `<button class="btn btn-red btn-sm" onclick="stopCameraStream()">Stop</button>`
+        : `<button class="btn btn-blue btn-sm" onclick="startCameraStream()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
+    </div>
+    ${streaming ? `<div class="stream-container"><img src="${streamUrl}" alt="Camera stream" style="filter:grayscale(1)"></div>` : ''}`;
+}
+
+function renderDisplayControls(dev) {
+  const warp = dev.apply_warp || false;
+  const warpBtnClass = warpExists ? 'btn-yellow' : 'btn-orange';
+  const warpBtnText = warpExists ? 'Regenerate Warp' : 'Generate Warp';
+
+  // Geometry dropdown options
+  const geoOptions = geoFiles.map(f =>
+    `<option value="${f}" ${f === geoCurrentName ? 'selected' : ''}>${f.replace('.yaml','')}</option>`
+  ).join('');
+
+  // Geometry param fields (only shown when loaded)
+  let geoFields = '';
+  if (geoData) {
+    const g = geoData;
+    const s = g.screen || {};
+    const p = g.projector || {};
+    const m = g.mouse || {};
+    const gf = (section, key, label, val, step) =>
+      `<div class="device-field">
+        <label>${label}</label>
+        <input type="number" value="${val}" step="${step || 'any'}" style="width:70px"
+               onchange="updateGeoField('${section}','${key}',parseFloat(this.value))">
+      </div>`;
+
+    geoFields = `
+    <div style="margin-top:6px; border-top:1px solid #333; padding-top:6px">
+      <div class="device-controls">
+        <span style="font-size:10px; color:#888; min-width:60px">SCREEN</span>
+        ${gf('screen','parabola_A','A depth cm',s.parabola_A,0.1)}
+        ${gf('screen','parabola_B','B curve',s.parabola_B,0.001)}
+        ${gf('screen','azimuth_max_deg','Az max°',s.azimuth_max_deg,1)}
+        ${gf('screen','height_cm','Height cm',s.height_cm,0.1)}
+        ${gf('screen','altitude_min_deg','Alt min°',s.altitude_min_deg,1)}
+        ${gf('screen','altitude_max_deg','Alt max°',s.altitude_max_deg,1)}
+      </div>
+      <div class="device-controls">
+        <span style="font-size:10px; color:#888; min-width:60px">PROJECTOR</span>
+        ${gf('projector','throw_ratio','Throw ratio',p.throw_ratio,0.1)}
+        ${gf('projector','throw_distance_cm','Throw cm',p.throw_distance_cm,1)}
+        ${gf('projector','optical_axis_elevation_deg','Axis elev°',p.optical_axis_elevation_deg,1)}
+        ${gf('projector','lens_offset_vertical','Lens offset',p.lens_offset_vertical,0.1)}
+        ${gf('projector','lateral_offset_cm','Lat offset cm',p.lateral_offset_cm,0.1)}
+      </div>
+      <div class="device-controls">
+        <span style="font-size:10px; color:#888; min-width:60px">MOUSE</span>
+        ${gf('mouse','eye_height_above_ball_cm','Eye height cm',m.eye_height_above_ball_cm,0.1)}
+        ${gf('mouse','ball_diameter_cm','Ball dia cm',m.ball_diameter_cm,0.1)}
+      </div>
+      <div class="btn-row" style="margin-top:6px">
+        <button class="btn btn-green btn-sm" onclick="saveGeometry()">Save</button>
+        <button class="btn btn-blue btn-sm" onclick="saveGeometryAs()">Save As...</button>
+      </div>
+    </div>`;
+  }
+
+  return `
+    <div class="device-controls">
+      <button class="warp-btn btn ${warpBtnClass} btn-sm" onclick="generateWarp()">${warpBtnText}</button>
+      <button class="btn btn-orange btn-sm" onclick="intensityCal()">Intensity Cal</button>
+      <button class="btn btn-blue btn-sm" onclick="testCheckers()">Test Checkers</button>
+      <button class="btn btn-gray btn-sm" onclick="blankDisplay()">Blank</button>
+      <div class="device-field">
+        <label>Gray</label>
+        <input type="number" id="blank-gray-value" value="0.0" min="-1" max="1" step="0.1" style="width:60px">
+      </div>
+      <div class="device-field">
+        <label style="display:inline; cursor:pointer">
+          <input type="checkbox" ${warp ? 'checked' : ''}
+                 onchange="rig.devices.display.apply_warp = this.checked"
+                 style="width:auto; min-width:auto; margin-right:3px; vertical-align:middle">
+          Apply warp
+        </label>
+      </div>
+    </div>
+    <div class="device-controls" style="margin-top:4px">
+      <div class="device-field">
+        <label>Geometry</label>
+        <select id="warp-geometry-select" onchange="loadGeometry(this.value)"
+                style="min-width:180px; max-width:280px">
+          ${geoOptions}
+        </select>
+      </div>
+      ${warpExists ? '<span style="font-size:10px; color:#4caf50">warp_map.npz found on Leader</span>' : '<span style="font-size:10px; color:#f44336">warp_map.npz not found on Leader</span>'}
+    </div>
+    ${geoFields}`;
+}
+
+function renderLickControls(dev) {
+  const addr = dev.i2c_address || '0x5A';
+  const electrode = dev.electrode || 4;
+  const ds = deviceState.lick_sensor || {};
+  const monitoring = ds.monitoring;
+
+  return `
+    <div class="device-controls">
+      <div class="device-field">
+        <label>I2C</label>
+        <input type="text" value="${addr}" style="width:55px"
+               onchange="rig.devices.lick_sensor.i2c_address = this.value">
+      </div>
+      <div class="device-field">
+        <label>Ch</label>
+        <input type="number" value="${electrode}" min="0" max="11" style="width:45px"
+               onchange="rig.devices.lick_sensor.electrode = parseInt(this.value)">
+      </div>
+      ${monitoring
+        ? `<button class="btn btn-red btn-sm" onclick="stopLickMonitor()">Stop</button>`
+        : `<button class="btn btn-blue btn-sm" onclick="startLickMonitor()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
+      ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">Last lick: <span id="last-lick-time">--</span></span>` : ''}
+    </div>
+    ${monitoring ? `<canvas id="lick-canvas" class="lick-canvas" width="400" height="60"></canvas>` : ''}`;
+}
+
+function renderPhotodiodeControls(dev) {
+  const gpio = dev.gpio || 24;
+  const every_n = dev.pulse_every_n_frames || 5;
+  const ds = deviceState.photodiode || {};
+  const monitoring = ds.monitoring;
+
+  return `
+    <div class="device-controls">
+      <div class="device-field">
+        <label>GPIO</label>
+        <input type="number" value="${gpio}" min="0" max="27" style="width:45px"
+               onchange="rig.devices.photodiode.gpio = parseInt(this.value)">
+      </div>
+      <div class="device-field">
+        <label>Sync every N frames</label>
+        <input type="number" value="${every_n}" min="1" max="60" style="width:45px"
+               onchange="rig.devices.photodiode.pulse_every_n_frames = parseInt(this.value)">
+      </div>
+      ${monitoring
+        ? `<button class="btn btn-red btn-sm" onclick="stopPhotodiodeMonitor()">Stop</button>`
+        : `<button class="btn btn-blue btn-sm" onclick="startPhotodiodeMonitor()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
+      ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">Pulses: <span id="pulse-count">0</span> | Last: <span id="last-pulse-time">--</span></span>` : ''}
+    </div>
+    ${monitoring ? `<canvas id="photodiode-canvas" class="lick-canvas" width="400" height="60"></canvas>` : ''}
+    <div style="font-size:10px; color:#666; margin-top:2px">Rising edge detection on GPIO${gpio} — sync square at bottom-center of display</div>`;
+}
+
+function renderRewardControls(dev) {
+  const rewardType = dev.reward_type || 'water';
+  const cal = (dev.calibration || {}).main || [];
+  const deliverUl = 4.0;
+  const computedMs = interpolateCalMs(cal, deliverUl);
+  const ds = deviceState.reward || {};
+  const monitoring = ds.monitoring;
+
+  let calRows = cal.map((row, i) => `
+    <tr class="cal-row">
+      <td><input class="cal-ms" type="number" value="${row[0]}" step="1" onchange="updateCalTable()"></td>
+      <td><input class="cal-ul" type="number" value="${row[1]}" step="0.1" onchange="updateCalTable()"></td>
+    </tr>
+  `).join('');
+
+  return `
+    <div class="device-controls">
+      <div class="device-field">
+        <label>Type</label>
+        <input type="text" value="${rewardType}" style="width:70px"
+               onchange="rig.devices.reward.reward_type = this.value">
+      </div>
+      <div class="device-field">
+        <label>Deliver</label>
+        <input type="number" id="reward-deliver-ul" value="${deliverUl}" min="0.5" max="20" step="0.5"
+               style="width:55px" oninput="updateRewardMs()">
+        <label>uL</label>
+      </div>
+      <button class="btn btn-green btn-sm" onclick="deliverReward()" ${ds.initialized !== true ? 'disabled' : ''}>Deliver</button>
+      <span id="reward-computed-ms" style="font-size:11px; color:#888">${computedMs.toFixed(1)} ms</span>
+      ${monitoring
+        ? `<button class="btn btn-red btn-sm" onclick="stopRewardLive()">Stop</button>`
+        : `<button class="btn btn-blue btn-sm" onclick="startRewardLive()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
+      ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">Pulses: <span id="reward-count">0</span> | Last: <span id="last-reward-time">--</span></span>` : ''}
+    </div>
+    ${monitoring ? `<canvas id="reward-canvas" class="lick-canvas" width="400" height="60"></canvas>` : ''}
+    <table class="cal-table">
+      <tr><th>ms</th><th>uL</th></tr>
+      ${calRows}
+    </table>
+    <div class="btn-row" style="margin-top:4px">
+      <button class="btn btn-blue btn-sm" onclick="addCalRow()">+ Row</button>
+      <button class="btn btn-red btn-sm" onclick="removeCalRow()">- Row</button>
+      <button class="btn btn-orange btn-sm" onclick="applyCalibration()">Save Calibration</button>
+    </div>`;
+}
+
+function renderDeviceCatalog() {
+  const el = document.getElementById('device-catalog');
+  el.innerHTML = Object.entries(deviceSchemas).map(([name, s]) =>
+    `<div style="margin: 4px 0">
+       <span class="device-chip" onclick="toggleDevice('${name}')" style="cursor:pointer">
+         + ${s.label}
+       </span>
+       <span style="font-size:10px; color:#666">${s.io_type} | ${s.required_packages.join(', ')}</span>
+     </div>`
+  ).join('');
+}
+
+// ── Log ──
+
+function log(msg) {
+  const el = document.getElementById('log');
+  const ts = new Date().toLocaleTimeString();
+  el.innerHTML += `<div>[${ts}] ${msg}</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+async function quitApp() {
+  if (!confirm('Quit VRFarm Setup?')) return;
+  await fetch('/api/quit', {method: 'POST'}).catch(() => {});
+  document.title = 'VRFarm Setup (closed)';
+  document.body.innerHTML = '<div style="text-align:center;margin-top:40vh;color:#888;font-size:16px">Server stopped. You can close this tab.</div>';
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,66 @@
+data:
+  leader_dir: /home/vruser/data
+  mac_dir: /Users/hakan/VRFarm/data
+  video_dir: /media/vruser/ssd/video
+devices:
+  camera:
+    enabled: true
+    fps: 50
+    resolution:
+    - 1280
+    - 720
+    type: camera
+  display:
+    apply_warp: true
+    enabled: true
+    refresh_hz: 60
+    resolution:
+    - 1920
+    - 1080
+    type: display
+  lick_sensor:
+    electrode: 4
+    enabled: true
+    i2c_address: '0x5A'
+    type: lick_sensor
+  photodiode:
+    enabled: true
+    gpio: 24
+    pulse_every_n_frames: 5
+    type: photodiode
+  reward:
+    calibration:
+      main:
+      - - 100
+        - 4
+    enabled: true
+    pins:
+      main:
+        gpio: 18
+        label: reward
+    reward_type: water
+    type: reward
+grace_period_s: 10
+name: cheese
+network:
+  api_port: 5080
+  camera_port: 5001
+  command_port: 5572
+  display_port: 5575
+  event_port: 5571
+pis:
+- devices:
+  - lick_sensor
+  - reward
+  - photodiode
+  - camera
+  ip: 192.168.10.101
+  name: cheddar
+  role: leader
+  user: vruser
+- devices:
+  - display
+  ip: 192.168.10.102
+  name: mozzarella
+  role: follower
+  user: vruser

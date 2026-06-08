@@ -1,0 +1,97 @@
+# attention_training.yaml
+#
+# Single-location attention training. Days 1-8, Levels 1/2/2.5/3.
+#
+# Level 1 (Habituation, Days 1-3):
+#   Reward on first lick OR auto at 0.6s (whichever first).
+#   Override in UI: n_trials 60-90, ITI [30,90], size 12, max_lick high, reward 8-10uL.
+#
+# Level 2 (Conditioning, Days 4-5):
+#   Free reward at 0.6s after stim onset. Lick limit introduced.
+#   Override in UI: n_trials 120, ITI [16,45], size 10, max_lick 0.75-0.9.
+#
+# Level 2.5 (Adaptive, Days 6-8):
+#   Probabilistic mix of L2 (free) and L3 (operant). adaptive_state drives mix.
+#   Defaults below are Day 7-8 params.
+#
+# Level 3 (Operant):
+#   Reward only on first lick during response window. Used by adaptive system.
+
+paradigm: attention
+version: 1
+
+states:
+  iti:
+    duration:
+      random: [8, 16]
+    events:
+      lick:
+        - condition: "lick_count > max_licks"
+          action: restart_iti
+    on_timeout: stimulus
+
+  stimulus:
+    duration: 0.6
+    entry_actions:
+      - show_stim
+    events:
+      lick:
+        - condition: "level == 1 and not rewarded"
+          action: deliver_reward
+    on_timeout: response_window
+
+  response_window:
+    duration: 1.4
+    entry_actions:
+      - auto_reward
+    events:
+      lick:
+        - condition: "level == 3 and is_go and not rewarded"
+          action: deliver_reward
+          transition: outcome
+    on_timeout: outcome
+
+  outcome:
+    duration: 0.5
+    entry_actions:
+      - record_trial
+    on_timeout: iti
+
+stimulus:
+  size_deg: 8.0
+  duration_s: 2.0
+  altitude_deg: 10.0
+  go_rule: all
+  contrast: 1.0
+
+timing:
+  reward_delay_s: 0.6
+
+session:
+  n_trials: 150
+  block_size: 150
+  block_sequence: [80]
+
+levels:
+  1:
+    description: "Habituation - reward on lick OR auto at 0.6s"
+  2:
+    description: "Conditioning - free reward at 0.6s"
+  2.5:
+    description: "Adaptive - probabilistic L2/L3 per trial"
+  3:
+    description: "Operant - reward only on lick"
+
+adaptive:
+  enabled: true
+  initial_state: 0.0
+  step_up: 0.2
+  step_down: 0.2
+
+devices:
+  lick_sensor:
+    max_lick_rate: 0.45
+  reward:
+    amount_ul: 4.0
+  display:
+    background_gray: 0.5

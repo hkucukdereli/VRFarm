@@ -1,0 +1,16 @@
+[Unit]
+Description=VRFarm Pi API
+After=network.target
+
+[Service]
+User=vruser
+WorkingDirectory=/home/vruser/rig
+ExecStart=/home/vruser/miniforge3/envs/rig/bin/python pi_api/api.py
+Restart=always
+RestartSec=3
+TimeoutStopSec=5
+KillMode=mixed
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

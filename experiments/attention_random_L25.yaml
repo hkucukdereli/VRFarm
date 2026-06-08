@@ -1,0 +1,43 @@
+last_saved: '2026-04-08'
+stimulus:
+  background_gray: 0.5
+  size_deg: 4
+  duration_s: 2
+  altitude_deg: 10
+  go_rule: all
+  contrast:
+    proportions:
+    - 0.34
+    - 0.33
+    - 0.33
+    values:
+    - 0.25
+    - 0.15
+    - 0.125
+reward:
+  amount_ul: 4
+  level: 2.5
+  reward_delay_s: 0.6
+  response_window: 1.4
+  timeout_rule: rate
+  max_lick_rate: 0.3
+session:
+  n_blocks: 150
+  block_size: 1
+  block_sequence:
+  - 80
+  - -80
+  iti:
+  - 4
+  - 16
+  prestim_duration: 0
+  poststim_duration: 0
+  global_delay: 0
+  block_delay: 0
+  block_delay_skip_first: false
+  randomize_blocks: true
+adaptive:
+  enabled: true
+  initial_state: 0
+  step_up: 0.2
+  step_down: 0.2

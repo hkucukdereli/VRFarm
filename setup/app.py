@@ -448,26 +448,34 @@ def api_init_devices():
 def api_generate_warp():
     """Generate warp map from rig_geometry.yaml, then SCP to Leader Pi."""
     data = request.json or {}
-    geometry_path = data.get("geometry_path", str(ROOT / "display_calibration" / "rig_geometry.yaml"))
+    # Resolve the geometry file SERVER-SIDE under GEO_DIR (don't trust a client cwd-relative
+    # path). Prefer a bare filename; fall back to a path resolved against the repo root.
+    name = data.get("geometry")
+    if name:
+        geo_file = (GEO_DIR / Path(name).name).resolve()
+    else:
+        gp = data.get("geometry_path", str(GEO_DIR / "rig_geometry.yaml"))
+        geo_file = (Path(gp) if Path(gp).is_absolute() else (ROOT / gp)).resolve()
 
-    if not Path(geometry_path).exists():
-        return jsonify({"ok": False, "error": f"Geometry file not found: {geometry_path}"}), 404
+    if not geo_file.exists():
+        return jsonify({"ok": False, "error": f"Geometry file not found: {geo_file}"}), 404
 
     steps = []
     try:
-        # 1. Run compute_warp_map.py on Mac
+        # 1. Run compute_warp_map.py on Mac, building from the SELECTED geometry file
+        #    (so the warp and the geometry shipped to the Pi are the same source).
         conda_prefix = Path("/opt/homebrew/Caskroom/miniforge/base/envs/vrfarm/bin")
         python = str(conda_prefix / "python")
-        script = str(ROOT / "display_calibration" / "compute_warp_map.py")
+        script = str(GEO_DIR / "compute_warp_map.py")
         r = subprocess.run(
-            [python, script],
+            [python, script, "--geo", str(geo_file)],
             capture_output=True, text=True, timeout=60,
-            cwd=str(ROOT / "display_calibration"))
+            cwd=str(GEO_DIR))
         if r.returncode != 0:
             return jsonify({"ok": False, "error": r.stderr[-500:], "steps": steps})
-        steps.append("Generated warp map on Mac")
+        steps.append(f"Generated warp map on Mac from {geo_file.name}")
 
-        npz_path = ROOT / "display_calibration" / "warp_map.npz"
+        npz_path = GEO_DIR / "warp_map.npz"
         if not npz_path.exists():
             return jsonify({"ok": False, "error": "warp_map.npz not created", "steps": steps})
 
@@ -479,7 +487,11 @@ def api_generate_warp():
                 try:
                     _ssh(f"{user}@{ip}", "mkdir -p ~/rig/calibration")
                     _scp(str(npz_path), f"{user}@{ip}:~/rig/calibration/warp_map.npz")
-                    steps.append(f"Copied warp_map.npz to {pi['name']} ({ip})")
+                    # Push the SAME geometry the warp was built from, so the live
+                    # calib_geo.py tool on the Pi starts from these values (and overwrites
+                    # this file on Save).
+                    _scp(str(geo_file), f"{user}@{ip}:~/rig/calibration/rig_geometry.yaml")
+                    steps.append(f"Copied warp_map.npz + rig_geometry.yaml to {pi['name']} ({ip})")
                 except Exception as e:
                     steps.append(f"Failed to copy to {pi['name']}: {e}")
 
@@ -555,7 +567,9 @@ def api_save_geometry():
         geo["luminance_reference"] = [_FlowList(p) for p in geo["luminance_reference"]]
     path = GEO_DIR / name
     with open(path, "w") as f:
-        yaml.dump(geo, f, default_flow_style=False, sort_keys=False)
+        # sort_keys=True keeps this writer byte-for-byte consistent with the
+        # standalone calib_geo.py dumper, so saving from either side gives no diff churn.
+        yaml.dump(geo, f, default_flow_style=False, sort_keys=True)
     return jsonify({"ok": True, "name": name})
 
 

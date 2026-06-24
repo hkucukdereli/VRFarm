@@ -412,9 +412,9 @@ def compute_theoretical_luminance_correction(geo, az_samples):
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def main(validate=False):
-    print("Loading rig geometry...")
-    geo = load_geometry()
+def main(validate=False, geo_path=None):
+    print(f"Loading rig geometry from {geo_path or GEO_FILE}...")
+    geo = load_geometry(geo_path or GEO_FILE)
 
     print("Building projector model...")
     proj = build_projector(geo)
@@ -515,7 +515,9 @@ def _plot_validation(az_map, alt_map, valid_map,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compute parabolic screen warp map")
+    parser.add_argument('--geo', default=None,
+                        help='geometry YAML to build from (default: ./rig_geometry.yaml)')
     parser.add_argument('--validate', action='store_true',
                         help='Show validation plots after computing')
     args = parser.parse_args()
-    main(validate=args.validate)
+    main(validate=args.validate, geo_path=args.geo)

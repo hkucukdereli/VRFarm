@@ -1,23 +1,32 @@
 """
 calib_geo.py — LIVE geometry calibration with curvature.
 
-Unlike calib_tool.py (affine-only on a fixed warp map), this draws the azimuth/altitude
-isolines by forward-projecting sampled angles THROUGH the projector+screen geometry on
-every change — so every geometry parameter, including the screen CURVATURE
-(parabola_A / parabola_B), is a live slider. Fast because it only projects a few hundred
-points per line (no 2M-pixel warp regen).
+Draws the azimuth/altitude isolines by forward-projecting sampled angles THROUGH the
+projector+screen geometry on every change — so every geometry parameter, including the
+screen CURVATURE (parabola_A / parabola_B), is a live slider. Fast because it only
+projects a few hundred points per line (no 2M-pixel warp regen).
 
 Adjust from a web slider panel on your Mac; watch the projector update live:
   parabola_A : screen depth (eye->vertex, cm)
   parabola_B : screen CURVATURE (bigger = more curved) <- the one you want
-  throw_ratio: horizontal scale
-  vertical_stretch: vertical scale (anamorphic)
-  offset_x/y : fine position (+y = up)
-  flip_h/flip_v : orientation
+  throw_ratio / horizontal_stretch / vertical_stretch : image scale (anamorphic)
+  optical_axis_elevation_deg / lens_offset_vertical   : projector geometry
+  offset_x/y, flip_h/flip_v : preview alignment only (see below)
 
-Run on mozzarella:
+THE DELIVERABLE IS rig_geometry.yaml. The geometry sliders edit it directly — clicking
+Save OVERWRITES rig_geometry.yaml (next to this script) with the tuned values, preserving
+every other section (mouse, luminance_reference, altitude/azimuth limits, ...). The setup
+UI then loads the same file into its editable boxes and feeds it to compute_warp_map.py.
+
+The flip_h/flip_v/offset_x/offset_y sliders ONLY orient this live PREVIEW so it matches
+the physical projector — nothing in the experiment render path reads them, so they are
+NOT written into rig_geometry.yaml. They persist to a small sidecar (.calib_preview.json)
+so a restart keeps your preview orientation.
+
+Run on mozzarella (projector X must be up):
   DISPLAY=:0 ~/miniforge3/envs/rig/bin/python calib_geo.py
-Then open http://192.168.10.102:5091 on your Mac. Click Save -> geo_fit.json.
+Then open http://192.168.10.102:5091 on your Mac. Tune parabola_B until the cyan
+horizontal lines are straight/level on the curved screen, then click Save.
 """
 import argparse
 import copy
@@ -27,25 +36,107 @@ import threading
 from pathlib import Path
 
 import numpy as np
+import yaml
 
-SAVE_PATH = Path.home() / "rig" / "calibration" / "geo_fit.json"
+HERE = Path(__file__).resolve().parent
+GEO_PATH = HERE / "rig_geometry.yaml"          # OVERWRITTEN on Save (the deliverable)
+PREVIEW_PATH = HERE / ".calib_preview.json"    # preview-only flips/offsets
 
-# Base geometry (non-slider params). Slider params override these each render.
-BASE_GEO = {
+# Geometry sliders -> (yaml section, key). Written back into rig_geometry.yaml on Save.
+GEO_SLIDERS = {
+    "parabola_A": ("screen", "parabola_A"),
+    "parabola_B": ("screen", "parabola_B"),
+    "throw_ratio": ("projector", "throw_ratio"),
+    "horizontal_stretch": ("projector", "horizontal_stretch"),
+    "vertical_stretch": ("projector", "vertical_stretch"),
+    "optical_axis_elevation_deg": ("projector", "optical_axis_elevation_deg"),
+    "lens_offset_vertical": ("projector", "lens_offset_vertical"),
+}
+PREVIEW_KEYS = ["offset_x", "offset_y", "flip_h", "flip_v"]
+
+# Defaults — only fill gaps if rig_geometry.yaml is missing a key.
+DEFAULT_GEO = {
     "projector": {"resolution": [1920, 1080], "throw_distance_cm": 48,
                   "throw_ratio": 0.8, "optical_axis_elevation_deg": 49,
                   "lens_offset_vertical": 0, "lateral_offset_cm": 0,
-                  "vertical_stretch": 2.4},
+                  "horizontal_stretch": 1.0, "vertical_stretch": 2.4},
     "screen": {"parabola_A": 12.7, "parabola_B": 0.04186,
                "altitude_min_deg": -48.6, "altitude_max_deg": 25.3,
-               "azimuth_max_deg": 105},
+               "azimuth_max_deg": 105, "height_cm": 20},
+    "mouse": {"eye_height_above_ball_cm": 2.54, "ball_diameter_cm": 20.32},
 }
 
+GEO = copy.deepcopy(DEFAULT_GEO)   # full geometry dict (loaded from YAML, written back)
 PARAMS = {"parabola_A": 12.7, "parabola_B": 0.04186, "throw_ratio": 0.8,
           "horizontal_stretch": 1.0, "vertical_stretch": 2.4,
           "optical_axis_elevation_deg": 49.0, "lens_offset_vertical": 0.0,
           "offset_x": 0, "offset_y": 186, "flip_h": False, "flip_v": True}
 LOCK = threading.Lock()
+
+
+# ── load / save rig_geometry.yaml ──
+def _deep_merge(base, override):
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _deep_merge(base[k], v)
+        else:
+            base[k] = v
+    return base
+
+
+def load_geometry():
+    """Load rig_geometry.yaml into GEO and seed the geometry sliders from it.
+    Preview flips/offsets load from the sidecar."""
+    if GEO_PATH.exists():
+        try:
+            loaded = yaml.safe_load(GEO_PATH.read_text()) or {}
+            _deep_merge(GEO, loaded)
+            for slider, (sec, key) in GEO_SLIDERS.items():
+                if sec in GEO and key in GEO[sec]:
+                    PARAMS[slider] = GEO[sec][key]
+            print(f"loaded geometry from {GEO_PATH}")
+        except Exception as e:
+            print("geometry load failed (using defaults):", e)
+    else:
+        print(f"{GEO_PATH.name} not found — starting from defaults")
+    if PREVIEW_PATH.exists():
+        try:
+            pv = json.loads(PREVIEW_PATH.read_text())
+            for k in PREVIEW_KEYS:
+                if k in pv:
+                    PARAMS[k] = pv[k]
+        except Exception:
+            pass
+
+
+class _Flow(list):
+    """List that yaml.dump renders inline: [a, b, c]."""
+
+
+yaml.add_representer(
+    _Flow, lambda d, data: d.represent_sequence(
+        "tag:yaml.org,2002:seq", data, flow_style=True))
+
+
+def _dump_geo(geo):
+    g = copy.deepcopy(geo)
+    if "projector" in g and "resolution" in g["projector"]:
+        g["projector"]["resolution"] = _Flow(g["projector"]["resolution"])
+    if "luminance_reference" in g:
+        g["luminance_reference"] = [_Flow(p) for p in g["luminance_reference"]]
+    return yaml.dump(g, default_flow_style=False, sort_keys=True)
+
+
+def save_geometry():
+    """Merge slider values into GEO, overwrite rig_geometry.yaml; preview -> sidecar."""
+    with LOCK:
+        for slider, (sec, key) in GEO_SLIDERS.items():
+            GEO.setdefault(sec, {})[key] = PARAMS[slider]
+        geo_out = copy.deepcopy(GEO)
+        preview = {k: PARAMS[k] for k in PREVIEW_KEYS}
+    GEO_PATH.write_text(_dump_geo(geo_out))
+    PREVIEW_PATH.write_text(json.dumps(preview, indent=2))
+    print(f"saved {GEO_PATH}")
 
 
 # ── geometry (embedded verbatim from compute_warp_map.py; numpy-only) ──
@@ -114,14 +205,9 @@ def screen_point_to_pixel(pt, proj):
 
 
 def render(p, pygame, W, H):
-    geo = copy.deepcopy(BASE_GEO)
-    geo["screen"]["parabola_A"] = p["parabola_A"]
-    geo["screen"]["parabola_B"] = p["parabola_B"]
-    geo["projector"]["throw_ratio"] = p["throw_ratio"]
-    geo["projector"]["horizontal_stretch"] = p["horizontal_stretch"]
-    geo["projector"]["vertical_stretch"] = p["vertical_stretch"]
-    geo["projector"]["optical_axis_elevation_deg"] = p["optical_axis_elevation_deg"]
-    geo["projector"]["lens_offset_vertical"] = p["lens_offset_vertical"]
+    geo = copy.deepcopy(GEO)
+    for slider, (sec, key) in GEO_SLIDERS.items():
+        geo.setdefault(sec, {})[key] = p[slider]
     A, B = p["parabola_A"], p["parabola_B"]
     almin = geo["screen"]["altitude_min_deg"]
     almax = geo["screen"]["altitude_max_deg"]
@@ -166,14 +252,16 @@ def render(p, pygame, W, H):
 PAGE = """<!doctype html><html><head><meta name=viewport content="width=device-width,initial-scale=1">
 <title>Geo calibration</title><style>
 body{font-family:sans-serif;background:#1b1b1b;color:#eee;padding:18px;font-size:15px}
-.row{margin:14px 0}label{display:inline-block;width:140px}
-input[type=range]{width:48%;vertical-align:middle}output{display:inline-block;width:70px;text-align:right;color:#7cf}
+.row{margin:14px 0}label{display:inline-block;width:170px}
+input[type=range]{width:44%;vertical-align:middle}output{display:inline-block;width:70px;text-align:right;color:#7cf}
 button{padding:9px 18px;margin-top:12px;font-size:15px}#msg{margin-left:10px;color:#8f8}
-.k{color:#fd6}</style></head><body>
+.k{color:#fd6}.note{color:#888;font-size:13px}</style></head><body>
 <h3>Geometry calibration (live)</h3>
-<p>Tune <span class=k>parabola_B</span> until the cyan horizontal lines are straight/level.</p>
+<p>Tune <span class=k>parabola_B</span> until the cyan horizontal lines are straight/level.
+Save overwrites <span class=k>rig_geometry.yaml</span>.</p>
 <div id=ctrls></div>
-<button onclick=save()>Save geo_fit.json</button><span id=msg></span>
+<button onclick=save()>Save rig_geometry.yaml</button><span id=msg></span>
+<p class=note>flip/offset sliders only align this preview (saved to .calib_preview.json), not the warp.</p>
 <script>
 const S=[['parabola_A',-16,16,0.05],['parabola_B',-0.30,0.30,0.001],
 ['throw_ratio',0.4,1.6,0.01],['horizontal_stretch',0.4,4.0,0.05],['vertical_stretch',0.5,4.0,0.05],
@@ -221,25 +309,19 @@ def start_web(port):
 
     @app.route("/save")
     def save():
-        with LOCK:
-            SAVE_PATH.write_text(json.dumps(PARAMS, indent=2))
+        save_geometry()
         return "saved"
 
     app.run(host="0.0.0.0", port=port, threaded=True)
 
 
-def run(port):
+def run(port, geo_path=None):
     import pygame
-    try:
-        if SAVE_PATH.exists():
-            saved = json.loads(SAVE_PATH.read_text())
-            with LOCK:
-                for k in list(PARAMS):
-                    if k in saved:
-                        PARAMS[k] = saved[k]
-            print("loaded saved geo fit:", saved)
-    except Exception as e:
-        print("no saved fit:", e)
+    global GEO_PATH, PREVIEW_PATH
+    if geo_path:
+        GEO_PATH = Path(geo_path).expanduser().resolve()
+        PREVIEW_PATH = GEO_PATH.parent / ".calib_preview.json"  # keep the sidecar paired
+    load_geometry()
     threading.Thread(target=start_web, args=(port,), daemon=True).start()
 
     pygame.init()
@@ -274,5 +356,7 @@ def run(port):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Live geometry calibration")
     ap.add_argument("--port", type=int, default=5091)
+    ap.add_argument("--geo", default=None,
+                    help="path to rig_geometry.yaml (default: next to this script)")
     a = ap.parse_args()
-    run(a.port)
+    run(a.port, a.geo)

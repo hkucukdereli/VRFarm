@@ -307,11 +307,22 @@ async function createRig() {
 
 async function saveRig() {
   if (!rig) return;
+  // Save rig hardware config (cheese.yaml) ...
   await fetch('/api/save_rig', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(rig)
   });
-  log('Saved rig: ' + rig.name);
+  // ... and any edited geometry to its own file (rig_geometry.yaml), one unified Save.
+  if (geoData && geoCurrentName) {
+    const r = await fetch('/api/save_geometry', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: geoCurrentName, geometry: geoData})
+    });
+    const d = await r.json();
+    log('Saved rig: ' + rig.name + (d.ok ? ' + ' + geoCurrentName : ''));
+  } else {
+    log('Saved rig: ' + rig.name);
+  }
 }
 
 // ── Pi management ──
@@ -525,21 +536,32 @@ async function checkWarp() {
     warpExists = data.exists;
   } catch (e) { warpExists = false; }
   await loadGeoList();
-  if (!geoData && geoFiles.length) await loadGeometry(geoFiles[0]);
+  // Load the geometry file this rig points to (cheese.yaml -> display.geometry_file).
+  const want = (rig && rig.devices && rig.devices.display
+                && rig.devices.display.geometry_file) || 'rig_geometry.yaml';
+  const name = geoFiles.includes(want) ? want : (geoFiles[0] || 'rig_geometry.yaml');
+  if (geoFiles.length) await loadGeometry(name);
   else renderDeviceList();
+}
+
+// Dropdown: pick which geometry file this rig uses; persisted on Save Rig.
+function selectGeometry(name) {
+  if (rig && rig.devices && rig.devices.display) {
+    rig.devices.display.geometry_file = name;
+  }
+  loadGeometry(name);
 }
 
 async function generateWarp() {
   // Save current geometry first if modified
   if (geoData && geoCurrentName) await saveGeometry();
-  const geoPath = geoCurrentName ? `display_calibration/${geoCurrentName}` : '';
   log('Generating warp map...');
   const btn = document.querySelector('.warp-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Generating...'; }
   try {
     const r = await fetch('/api/generate_warp', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({geometry_path: geoPath || undefined})
+      body: JSON.stringify({geometry: geoCurrentName || undefined})
     });
     const data = await r.json();
     (data.steps || []).forEach(s => log('  ' + s));
@@ -593,13 +615,6 @@ async function saveGeometry(name) {
       renderDeviceList();
     } else { log('Save failed: ' + (data.error || '')); }
   } catch (e) { log('Save error: ' + e); }
-}
-
-async function saveGeometryAs() {
-  const name = prompt('Save geometry as:', 'rig_geometry_new.yaml');
-  if (!name) return;
-  const fname = name.endsWith('.yaml') ? name : name + '.yaml';
-  await saveGeometry(fname);
 }
 
 function updateGeoField(section, key, value) {
@@ -1106,6 +1121,8 @@ function renderDisplayControls(dev) {
         <span style="font-size:10px; color:#888; min-width:60px">PROJECTOR</span>
         ${gf('projector','throw_ratio','Throw ratio',p.throw_ratio,0.1)}
         ${gf('projector','throw_distance_cm','Throw cm',p.throw_distance_cm,1)}
+        ${gf('projector','horizontal_stretch','H stretch',p.horizontal_stretch ?? 1.0,0.05)}
+        ${gf('projector','vertical_stretch','V stretch',p.vertical_stretch ?? 2.4,0.05)}
         ${gf('projector','optical_axis_elevation_deg','Axis elev°',p.optical_axis_elevation_deg,1)}
         ${gf('projector','lens_offset_vertical','Lens offset',p.lens_offset_vertical,0.1)}
         ${gf('projector','lateral_offset_cm','Lat offset cm',p.lateral_offset_cm,0.1)}
@@ -1115,9 +1132,9 @@ function renderDisplayControls(dev) {
         ${gf('mouse','eye_height_above_ball_cm','Eye height cm',m.eye_height_above_ball_cm,0.1)}
         ${gf('mouse','ball_diameter_cm','Ball dia cm',m.ball_diameter_cm,0.1)}
       </div>
-      <div class="btn-row" style="margin-top:6px">
-        <button class="btn btn-green btn-sm" onclick="saveGeometry()">Save</button>
-        <button class="btn btn-blue btn-sm" onclick="saveGeometryAs()">Save As...</button>
+      <div style="font-size:10px; color:#888; margin-top:6px">
+        Edits persist to <b>${geoCurrentName || 'rig_geometry.yaml'}</b> when you click
+        <b>Save Rig</b> (top-left).
       </div>
     </div>`;
   }
@@ -1144,7 +1161,7 @@ function renderDisplayControls(dev) {
     <div class="device-controls" style="margin-top:4px">
       <div class="device-field">
         <label>Geometry</label>
-        <select id="warp-geometry-select" onchange="loadGeometry(this.value)"
+        <select id="warp-geometry-select" onchange="selectGeometry(this.value)"
                 style="min-width:180px; max-width:280px">
           ${geoOptions}
         </select>

@@ -617,10 +617,44 @@ async function saveGeometry(name) {
   } catch (e) { log('Save error: ' + e); }
 }
 
+// Reload the geometry file list (picks up calibrations just saved from the projector).
+async function refreshGeoList() {
+  await loadGeoList();
+  renderDeviceList();
+  log('Geometry list reloaded (' + geoFiles.length + ' files).');
+}
+
+// Send the geometry selected in the dropdown to the projector Pi as its rig_geometry.yaml.
+async function sendGeometry() {
+  const sel = document.getElementById('warp-geometry-select');
+  const name = (sel && sel.value) || geoCurrentName;
+  if (!name) { log('No geometry selected'); return; }
+  log('Sending ' + name + ' to projector...');
+  try {
+    const r = await fetch('/api/send_geometry', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name})
+    });
+    const data = await r.json();
+    log(data.ok ? ('Sent ' + data.sent + ' → ' + data.to + ' (as rig_geometry.yaml).')
+                : ('Send failed: ' + (data.error || '')));
+  } catch (e) { log('Send error: ' + e); }
+}
+
 function updateGeoField(section, key, value) {
   if (!geoData) return;
   if (!geoData[section]) geoData[section] = {};
   geoData[section][key] = value;
+  // keep the derived "Eye↑bottom" field in sync when its inputs change
+  if (section === 'screen' && (key === 'parabola_A' || key === 'altitude_min_deg')) renderDeviceList();
+}
+
+// Eye height above the screen bottom drives altitude_min = atan(-h / parabola_A).
+function updateEyeHeight(h) {
+  if (!geoData || !geoData.screen || !geoData.screen.parabola_A || isNaN(h)) return;
+  geoData.screen.altitude_min_deg =
+    +(Math.atan2(-h, geoData.screen.parabola_A) * 180 / Math.PI).toFixed(2);
+  renderDeviceList();
 }
 
 async function intensityCal() {
@@ -629,6 +663,51 @@ async function intensityCal() {
   log('Running intensity calibration...');
   const result = await proxyPi(pi.ip, '/api/calibrate', {device: 'display'});
   log(result.ok ? 'Intensity calibration complete.' : 'Failed: ' + (result.error || ''));
+}
+
+async function startCalibration() {
+  const pi = getPiForDevice('display');
+  if (!pi) { log('Display not assigned to a Pi'); return; }
+  // Open the window synchronously within the click so it isn't popup-blocked;
+  // point it at the sliders once the backend confirms the tool is up.
+  const win = window.open('', 'geo-calibration', 'width=800,height=940');
+  if (win) win.document.write('<body style="font:15px sans-serif;background:#1b1b1b;'
+    + 'color:#eee;padding:22px">Starting geometry calibration on ' + pi.ip + ' …</body>');
+  log('Starting geometry calibration on ' + pi.ip + '...');
+  const btn = document.querySelector('.calib-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+  try {
+    const r = await fetch('/api/start_calibration', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({geometry: geoCurrentName || undefined, geometry_data: geoData || undefined})
+    });
+    const data = await r.json();
+    (data.steps || []).forEach(s => log('  ' + s));
+    if (data.ok && data.url) {
+      log('Calibration running — sliders at ' + data.url);
+      if (win) win.location = data.url; else window.open(data.url, 'geo-calibration');
+    } else {
+      log('Calibration start failed: ' + (data.error || ''));
+      if (win) win.close();
+    }
+  } catch (e) {
+    log('Calibration error: ' + e);
+    if (win) win.close();
+  }
+  if (btn) { btn.disabled = false; btn.textContent = 'Calibrate'; }
+}
+
+async function stopCalibration() {
+  const pi = getPiForDevice('display');
+  if (!pi) { log('Display not assigned to a Pi'); return; }
+  log('Stopping geometry calibration on ' + pi.ip + '...');
+  try {
+    const r = await fetch('/api/stop_calibration', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+    });
+    const data = await r.json();
+    log(data.ok ? 'Calibration stopped.' : 'Stop failed: ' + (data.error || ''));
+  } catch (e) { log('Stop error: ' + e); }
 }
 
 async function startLickMonitor() {
@@ -740,9 +819,28 @@ async function deliverReward() {
   const table = cal.main || [];
   const ms = interpolateCalMs(table, amount);
   const gpio = ((rig.devices.reward || {}).pins || {}).main ? rig.devices.reward.pins.main.gpio : 18;
-  log(`Delivering ${amount} uL (${ms.toFixed(1)} ms, GPIO ${gpio})...`);
-  const result = await proxyPi(pi.ip, '/api/deliver_reward', {duration_ms: ms, gpio: gpio});
-  log(result.ok ? 'Reward delivered.' : 'Failed: ' + (result.error || ''));
+  const nEl = document.getElementById('reward-count-n');
+  const intEl = document.getElementById('reward-interval-s');
+  const n = Math.max(1, nEl ? (parseInt(nEl.value) || 1) : 1);
+  const intervalS = Math.max(0, intEl ? (parseFloat(intEl.value) || 0) : 0);
+  log(`Delivering ${n}× ${amount} uL (${ms.toFixed(1)} ms, GPIO ${gpio})` + (n > 1 ? ` every ${intervalS}s...` : '...'));
+  for (let i = 0; i < n; i++) {
+    const result = await proxyPi(pi.ip, '/api/deliver_reward', {duration_ms: ms, gpio: gpio});
+    if (!result.ok) { log(`Failed at ${i + 1}/${n}: ` + (result.error || '')); return; }
+    if (i < n - 1 && intervalS > 0) await new Promise(r => setTimeout(r, intervalS * 1000));
+  }
+  log(n > 1 ? `Delivered ${n} rewards.` : 'Reward delivered.');
+}
+
+async function homeReward() {
+  const pi = getPiForDevice('reward');
+  if (!pi) { log('Reward not assigned to a Pi'); return; }
+  const homePin = ((rig.devices.reward || {}).pins || {}).home;
+  if (!homePin) { log('No home pin configured'); return; }
+  const gpio = homePin.gpio;
+  log(`Homing (10 ms TTL, GPIO ${gpio})...`);
+  const result = await proxyPi(pi.ip, '/api/deliver_reward', {duration_ms: 10, gpio: gpio});
+  log(result.ok ? 'Home pulse sent.' : 'Failed: ' + (result.error || ''));
 }
 
 // ── Reward live ──
@@ -1098,7 +1196,9 @@ function renderDisplayControls(dev) {
     const g = geoData;
     const s = g.screen || {};
     const p = g.projector || {};
-    const m = g.mouse || {};
+    // Eye height above the screen bottom — derived from altitude_min; editing it drives altitude_min.
+    const eyeH = (s.parabola_A && s.altitude_min_deg != null)
+      ? (-s.parabola_A * Math.tan(s.altitude_min_deg * Math.PI / 180)).toFixed(1) : '';
     const gf = (section, key, label, val, step) =>
       `<div class="device-field">
         <label>${label}</label>
@@ -1115,6 +1215,11 @@ function renderDisplayControls(dev) {
         ${gf('screen','azimuth_max_deg','Az max°',s.azimuth_max_deg,1)}
         ${gf('screen','height_cm','Height cm',s.height_cm,0.1)}
         ${gf('screen','altitude_min_deg','Alt min°',s.altitude_min_deg,1)}
+        <div class="device-field">
+          <label>Eye↑bottom cm</label>
+          <input type="number" value="${eyeH}" step="0.1" style="width:70px"
+                 onchange="updateEyeHeight(parseFloat(this.value))">
+        </div>
         ${gf('screen','altitude_max_deg','Alt max°',s.altitude_max_deg,1)}
       </div>
       <div class="device-controls">
@@ -1127,11 +1232,6 @@ function renderDisplayControls(dev) {
         ${gf('projector','lens_offset_vertical','Lens offset',p.lens_offset_vertical,0.1)}
         ${gf('projector','lateral_offset_cm','Lat offset cm',p.lateral_offset_cm,0.1)}
       </div>
-      <div class="device-controls">
-        <span style="font-size:10px; color:#888; min-width:60px">MOUSE</span>
-        ${gf('mouse','eye_height_above_ball_cm','Eye height cm',m.eye_height_above_ball_cm,0.1)}
-        ${gf('mouse','ball_diameter_cm','Ball dia cm',m.ball_diameter_cm,0.1)}
-      </div>
       <div style="font-size:10px; color:#888; margin-top:6px">
         Edits persist to <b>${geoCurrentName || 'rig_geometry.yaml'}</b> when you click
         <b>Save Rig</b> (top-left).
@@ -1141,6 +1241,8 @@ function renderDisplayControls(dev) {
 
   return `
     <div class="device-controls">
+      <button class="calib-btn btn btn-green btn-sm" onclick="startCalibration()">Calibrate</button>
+      <button class="btn btn-red btn-sm" onclick="stopCalibration()">Stop Calib</button>
       <button class="warp-btn btn ${warpBtnClass} btn-sm" onclick="generateWarp()">${warpBtnText}</button>
       <button class="btn btn-orange btn-sm" onclick="intensityCal()">Intensity Cal</button>
       <button class="btn btn-blue btn-sm" onclick="testCheckers()">Test Checkers</button>
@@ -1166,6 +1268,8 @@ function renderDisplayControls(dev) {
           ${geoOptions}
         </select>
       </div>
+      <button class="btn btn-gray btn-sm" onclick="refreshGeoList()" title="Reload the geometry list (pick up newly saved calibrations)">&#8635;</button>
+      <button class="btn btn-blue btn-sm" onclick="sendGeometry()" title="Copy the selected geometry to the projector Pi as its rig_geometry.yaml">Send to projector</button>
       ${warpExists ? '<span style="font-size:10px; color:#4caf50">warp_map.npz found on Leader</span>' : '<span style="font-size:10px; color:#f44336">warp_map.npz not found on Leader</span>'}
     </div>
     ${geoFields}`;
@@ -1226,6 +1330,7 @@ function renderPhotodiodeControls(dev) {
 
 function renderRewardControls(dev) {
   const rewardType = dev.reward_type || 'water';
+  const homePin = (dev.pins || {}).home;
   const cal = (dev.calibration || {}).main || [];
   const deliverUl = 4.0;
   const computedMs = interpolateCalMs(cal, deliverUl);
@@ -1252,8 +1357,18 @@ function renderRewardControls(dev) {
                style="width:55px" oninput="updateRewardMs()">
         <label>uL</label>
       </div>
+      <div class="device-field">
+        <label>×</label>
+        <input type="number" id="reward-count-n" value="1" min="1" step="1" style="width:45px">
+      </div>
+      <div class="device-field">
+        <label>every</label>
+        <input type="number" id="reward-interval-s" value="0.5" min="0" step="0.1" style="width:50px">
+        <label>s</label>
+      </div>
       <button class="btn btn-green btn-sm" onclick="deliverReward()" ${ds.initialized !== true ? 'disabled' : ''}>Deliver</button>
       <span id="reward-computed-ms" style="font-size:11px; color:#888">${computedMs.toFixed(1)} ms</span>
+      ${homePin ? `<button class="btn btn-orange btn-sm" onclick="homeReward()" ${ds.initialized !== true ? 'disabled' : ''}>Home</button>` : ''}
       ${monitoring
         ? `<button class="btn btn-red btn-sm" onclick="stopRewardLive()">Stop</button>`
         : `<button class="btn btn-blue btn-sm" onclick="startRewardLive()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}

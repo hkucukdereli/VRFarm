@@ -17,7 +17,7 @@ projector:
   vertical_stretch: 3.35
 screen:
   altitude_max_deg: 25.3
-  altitude_min_deg: -49.75
+  altitude_min_deg: -28.86
   azimuth_max_deg: 105
   height_cm: 20
   parabola_A: 12.7

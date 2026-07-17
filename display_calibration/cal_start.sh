@@ -25,8 +25,10 @@ case "$TOOL" in
   *) echo "unknown tool '$TOOL' (use: geo | panel | warp)"; exit 1 ;;
 esac
 
-# Launch detached so it survives closing this SSH session
-setsid bash -c "SDL_AUDIODRIVER=dummy DISPLAY=:0 $PY $CAL/$SCRIPT $ARGS > /tmp/cal_$TOOL.log 2>&1" < /dev/null &
+# Launch detached so it survives closing this SSH session.
+# Redirect the WHOLE detached subtree's stdio (outside the bash -c) so it releases the
+# SSH channel — otherwise `ssh ... cal_start.sh` never returns (hangs the caller/UI).
+setsid bash -c "SDL_AUDIODRIVER=dummy DISPLAY=:0 $PY $CAL/$SCRIPT $ARGS" < /dev/null > /tmp/cal_$TOOL.log 2>&1 &
 sleep 3
 if pgrep -f "$SCRIPT" >/dev/null; then
   echo "Started '$TOOL' on the projector.  Control: $URL"

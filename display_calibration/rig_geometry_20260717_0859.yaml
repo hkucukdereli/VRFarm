@@ -7,17 +7,17 @@ luminance_reference:
 - [100, 0.35]
 - [105, 0.3]
 projector:
-  horizontal_stretch: 0.85
+  horizontal_stretch: 0.65
   lateral_offset_cm: 0
   lens_offset_vertical: 1
   optical_axis_elevation_deg: -3
   resolution: [1920, 1080]
   throw_distance_cm: 48
   throw_ratio: 1.2
-  vertical_stretch: 3.35
+  vertical_stretch: 2.5
 screen:
   altitude_max_deg: 25.3
-  altitude_min_deg: -49.75
+  altitude_min_deg: -43.38
   azimuth_max_deg: 105
   height_cm: 20
   parabola_A: 12.7

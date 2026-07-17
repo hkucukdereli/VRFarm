@@ -32,14 +32,17 @@ devices:
   reward:
     calibration:
       main:
-      - - 100
+      - - 10
         - 4
     enabled: true
     pins:
+      home:
+        gpio: 17
+        label: home
       main:
         gpio: 18
         label: reward
-    reward_type: water
+    reward_type: sucrose
     type: reward
 grace_period_s: 10
 name: cheese

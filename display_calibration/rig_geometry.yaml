@@ -1,3 +1,11 @@
+calibration:
+  az90_x: 1720
+  flip_h: false
+  flip_v: true
+  frame_x: 40
+  frame_y: 40
+  offset_x: 0
+  offset_y: 0
 luminance_reference:
 - [0, 1]
 - [20, 0.96]
@@ -16,9 +24,9 @@ projector:
   throw_ratio: 1.2
   vertical_stretch: 3.35
 screen:
-  altitude_max_deg: 25.3
+  altitude_max_deg: 21.49
   altitude_min_deg: -49.75
-  azimuth_max_deg: 105
+  azimuth_height: 15.0
   height_cm: 20
   parabola_A: 12.7
   parabola_B: 0.044

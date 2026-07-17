@@ -645,15 +645,27 @@ function updateGeoField(section, key, value) {
   if (!geoData) return;
   if (!geoData[section]) geoData[section] = {};
   geoData[section][key] = value;
-  // keep the derived "Eye↑bottom" field in sync when its inputs change
-  if (section === 'screen' && (key === 'parabola_A' || key === 'altitude_min_deg')) renderDeviceList();
+  // re-derive the altitudes when their inputs (azimuth_height, parabola_A, height_cm) change
+  if (section === 'screen' && (key === 'parabola_A' || key === 'height_cm' ||
+                               key === 'azimuth_height')) {
+    deriveAltitudes();
+    renderDeviceList();
+  }
 }
 
-// Eye height above the screen bottom drives altitude_min = atan(-h / parabola_A).
-function updateEyeHeight(h) {
-  if (!geoData || !geoData.screen || !geoData.screen.parabola_A || isNaN(h)) return;
-  geoData.screen.altitude_min_deg =
-    +(Math.atan2(-h, geoData.screen.parabola_A) * 180 / Math.PI).toFixed(2);
+// azimuth_height (eye/az-line above screen bottom) DRIVES the visual field:
+//   altitude_min = atan(-h / A),  altitude_max = atan((height - h) / A)
+function deriveAltitudes() {
+  const s = geoData && geoData.screen;
+  if (!s || !s.parabola_A || s.azimuth_height == null) return;
+  const A = s.parabola_A, h = s.azimuth_height, hc = s.height_cm ?? 20;
+  s.altitude_min_deg = +(Math.atan2(-h, A) * 180 / Math.PI).toFixed(2);
+  s.altitude_max_deg = +(Math.atan2(hc - h, A) * 180 / Math.PI).toFixed(2);
+}
+function updateAzimuthHeight(h) {
+  if (!geoData || !geoData.screen || isNaN(h)) return;
+  geoData.screen.azimuth_height = h;
+  deriveAltitudes();
   renderDeviceList();
 }
 
@@ -1196,9 +1208,11 @@ function renderDisplayControls(dev) {
     const g = geoData;
     const s = g.screen || {};
     const p = g.projector || {};
-    // Eye height above the screen bottom — derived from altitude_min; editing it drives altitude_min.
-    const eyeH = (s.parabola_A && s.altitude_min_deg != null)
-      ? (-s.parabola_A * Math.tan(s.altitude_min_deg * Math.PI / 180)).toFixed(1) : '';
+    // azimuth_height (eye/az-line above screen bottom) drives the derived altitudes;
+    // fall back to reconstructing it from altitude_min for older geometry files.
+    const azH = (s.azimuth_height != null) ? s.azimuth_height
+      : ((s.parabola_A && s.altitude_min_deg != null)
+         ? +(-s.parabola_A * Math.tan(s.altitude_min_deg * Math.PI / 180)).toFixed(1) : '');
     const gf = (section, key, label, val, step) =>
       `<div class="device-field">
         <label>${label}</label>
@@ -1212,15 +1226,20 @@ function renderDisplayControls(dev) {
         <span style="font-size:10px; color:#888; min-width:60px">SCREEN</span>
         ${gf('screen','parabola_A','A depth cm',s.parabola_A,0.1)}
         ${gf('screen','parabola_B','B curve',s.parabola_B,0.001)}
-        ${gf('screen','azimuth_max_deg','Az max°',s.azimuth_max_deg,1)}
         ${gf('screen','height_cm','Height cm',s.height_cm,0.1)}
-        ${gf('screen','altitude_min_deg','Alt min°',s.altitude_min_deg,1)}
         <div class="device-field">
-          <label>Eye↑bottom cm</label>
-          <input type="number" value="${eyeH}" step="0.1" style="width:70px"
-                 onchange="updateEyeHeight(parseFloat(this.value))">
+          <label>Az height cm</label>
+          <input type="number" value="${azH}" step="0.1" style="width:70px"
+                 onchange="updateAzimuthHeight(parseFloat(this.value))">
         </div>
-        ${gf('screen','altitude_max_deg','Alt max°',s.altitude_max_deg,1)}
+        <div class="device-field">
+          <label>Alt min° (derived)</label>
+          <input type="number" value="${s.altitude_min_deg ?? ''}" step="1" style="width:70px" disabled>
+        </div>
+        <div class="device-field">
+          <label>Alt max° (derived)</label>
+          <input type="number" value="${s.altitude_max_deg ?? ''}" step="1" style="width:70px" disabled>
+        </div>
       </div>
       <div class="device-controls">
         <span style="font-size:10px; color:#888; min-width:60px">PROJECTOR</span>

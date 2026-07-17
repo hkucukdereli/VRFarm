@@ -37,7 +37,24 @@ GEO_FILE = CAL_DIR / "rig_geometry.yaml"
 
 def load_geometry(path=GEO_FILE):
     with open(path) as f:
-        return yaml.safe_load(f)
+        return normalize_geo(yaml.safe_load(f))
+
+
+def normalize_geo(geo):
+    """Derive screen.altitude_min/max from azimuth_height (eye/az-line above the screen
+    bottom) so this matches the landmark calibrator. The eye sits `h` above the bottom at
+    depth `A`, screen height `hc`:
+      altitude_min = atan(-h / A)   (bottom, below eye)
+      altitude_max = atan((hc-h)/A) (top, above eye)
+    In-place; no-op if azimuth_height is absent (older files keep their stored altitudes)."""
+    s = (geo or {}).get("screen", {})
+    h = s.get("azimuth_height")
+    A = s.get("parabola_A")
+    hc = s.get("height_cm")
+    if h is not None and A and hc is not None:
+        s["altitude_min_deg"] = float(np.degrees(np.arctan2(-h, A)))
+        s["altitude_max_deg"] = float(np.degrees(np.arctan2(hc - h, A)))
+    return geo
 
 # ── Screen intersection ────────────────────────────────────────────────────────
 
@@ -227,7 +244,12 @@ def compute_inverse_map(geo, proj):
     res_w, res_h = proj['res']
     alt_min = geo['screen']['altitude_min_deg']
     alt_max = geo['screen']['altitude_max_deg']
-    az_max = geo['screen']['azimuth_max_deg']
+    # Usable-pixel rectangle from the landmark calibrator (where projector light actually
+    # falls on the physical screen). Replaces the old azimuth_max_deg gating — horizontal
+    # extent is now defined by the frame + ±90° landmarks, not a stored max azimuth.
+    cal = geo.get('calibration', {})
+    fx = int(cal.get('frame_x', 0))
+    fy = int(cal.get('frame_y', 0))
 
     az_map  = np.full((res_h, res_w), np.nan)
     alt_map = np.full((res_h, res_w), np.nan)
@@ -302,8 +324,10 @@ def compute_inverse_map(geo, proj):
     az_deg_arr  = np.degrees(az_rad)
     alt_deg_arr = np.degrees(alt_rad)
 
-    # Validity: t finite, point on screen within azimuth/altitude bounds
-    hit = (t < 1e9) & disc_ok & (np.abs(az_deg_arr) <= az_max) & \
+    # Validity: t finite, in front of mouse, within the altitude band, and inside the
+    # usable-pixel rectangle (the frame marks pixels that land on the physical screen).
+    in_frame = (PX >= fx) & (PX < res_w - fx) & (PY >= fy) & (PY < res_h - fy)
+    hit = (t < 1e9) & disc_ok & in_frame & \
           (alt_deg_arr >= alt_min) & (alt_deg_arr <= alt_max) & \
           (ys > 0)   # must be in front of mouse
 
@@ -435,7 +459,9 @@ def main(validate=False, geo_path=None):
     az_sym = np.linspace(0, 105, 53)
     lum_gain = compute_theoretical_luminance_correction(geo, az_sym)
 
-    # Save
+    # Save. Carry the calibration orientation (flip/offset/frame) so the runtime renderer
+    # reproduces exactly what was tuned in calib_geo (the maps themselves stay model-space).
+    cal = geo.get('calibration', {})
     out_path = CAL_DIR / "warp_map.npz"
     np.savez(out_path,
              az_map=az_map,
@@ -446,7 +472,13 @@ def main(validate=False, geo_path=None):
              az_samples=az_samples,
              alt_samples=alt_samples,
              lum_az=az_sym,
-             lum_gain_theoretical=lum_gain)
+             lum_gain_theoretical=lum_gain,
+             flip_h=bool(cal.get('flip_h', False)),
+             flip_v=bool(cal.get('flip_v', False)),
+             offset_x=int(cal.get('offset_x', 0)),
+             offset_y=int(cal.get('offset_y', 0)),
+             frame_x=int(cal.get('frame_x', 0)),
+             frame_y=int(cal.get('frame_y', 0)))
     print(f"\nSaved: {out_path}")
 
     if validate:

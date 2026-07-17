@@ -1,32 +1,35 @@
 """
-calib_geo.py — LIVE geometry calibration with curvature.
+calib_geo.py — LANDMARK-registration geometry calibration.
 
-Draws the azimuth/altitude isolines by forward-projecting sampled angles THROUGH the
-projector+screen geometry on every change — so every geometry parameter, including the
-screen CURVATURE (parabola_A / parabola_B), is a live slider. Fast because it only
-projects a few hundred points per line (no 2M-pixel warp regen).
+Instead of eyeballing abstract stretch factors, you register the projected grid to
+physical reality and the tool back-solves the geometry:
 
-Adjust from a web slider panel on your Mac; watch the projector update live:
-  parabola_A : screen depth (eye->vertex, cm)
-  parabola_B : screen CURVATURE (bigger = more curved) <- the one you want
-  throw_ratio / horizontal_stretch / vertical_stretch : image scale (anamorphic)
-  optical_axis_elevation_deg / lens_offset_vertical   : projector geometry
-  offset_x/y, flip_h/flip_v : preview alignment only (see below)
+  1. frame_x / frame_y : slide the thin cyan boundary lines onto where the projector
+     light actually meets the physical screen. The enclosed rectangle = USABLE PIXELS.
+  2. offset_x / offset_y : move the GREEN 0° cross (vertical = az 0 meridian,
+     horizontal = alt 0 "azimuth line" / eye level) onto physical straight-ahead. That
+     intersection is the coordinate origin.
+  3. azimuth_height (cm) : measure IRL from the horizontal green line to the screen
+     bottom and type it in. With screen height_cm and parabola_A it DERIVES the visual
+     field: altitude_min = atan(-h/A), altitude_max = atan((height-h)/A).
+  4. az90_x : drag the GREEN ±90° azimuth lines onto the physical 90° marks. The tool
+     rescales horizontal_stretch so the model projects ±90° exactly there, and rescales
+     vertical_stretch so the altitude range fills the usable area — no more eyeballing.
+  5. parabola_B : tune only the mid-field CURVATURE against the cyan 30° grid; the
+     ±90° and altitude endpoints stay anchored.
 
-THE DELIVERABLE IS rig_geometry.yaml. The geometry sliders edit it directly — clicking
-Save OVERWRITES rig_geometry.yaml (next to this script) with the tuned values, preserving
-every other section (mouse, luminance_reference, altitude/azimuth limits, ...). The setup
-UI then loads the same file into its editable boxes and feeds it to compute_warp_map.py.
+Grid is drawn every 30°. Green = 0° vertical, 0° horizontal, ±90° verticals. Cyan =
+every other line and the usable-area frame. All colors are B/G only (R=0) — the
+projector's red LED is deactivated.
 
-The flip_h/flip_v/offset_x/offset_y sliders ONLY orient this live PREVIEW so it matches
-the physical projector — nothing in the experiment render path reads them, so they are
-NOT written into rig_geometry.yaml. They persist to a small sidecar (.calib_preview.json)
-so a restart keeps your preview orientation.
+THE DELIVERABLE IS rig_geometry.yaml. Save overwrites it (next to this script) with the
+solved geometry (incl. horizontal/vertical_stretch), the derived altitudes, the
+azimuth_height, and a `calibration:` block (flip/offset/frame/az90 landmarks), dropping
+the now-redundant azimuth_max_deg. compute_warp_map.py builds warp_map.npz from it.
 
 Run on mozzarella (projector X must be up):
   DISPLAY=:0 ~/miniforge3/envs/rig/bin/python calib_geo.py
-Then open http://192.168.10.102:5091 on your Mac. Tune parabola_B until the cyan
-horizontal lines are straight/level on the curved screen, then click Save.
+Then open http://192.168.10.102:5091 on your Mac.
 """
 import argparse
 import copy
@@ -40,11 +43,14 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 GEO_PATH = HERE / "rig_geometry.yaml"          # OVERWRITTEN on Save (the deliverable)
-PREVIEW_PATH = HERE / ".calib_preview.json"    # preview-only flips/offsets
+PREVIEW_PATH = HERE / ".calib_preview.json"    # landmark/orientation sidecar (fast restart)
 DEFAULTS_PATH = HERE / ".calib_defaults.json"  # Save/Load Defaults snapshot (all sliders)
 MAC_URL = "http://192.168.10.1:4999"           # setup UI — Save POSTs the YAML back here (best-effort archive)
 
+RES_W, RES_H = 1920, 1080                       # projector panel (also read from GEO on load)
+
 # Geometry sliders -> (yaml section, key). Written back into rig_geometry.yaml on Save.
+# horizontal_stretch / vertical_stretch are SOLVED from the landmarks, not hand-tuned.
 GEO_SLIDERS = {
     "parabola_A": ("screen", "parabola_A"),
     "parabola_B": ("screen", "parabola_B"),
@@ -54,26 +60,34 @@ GEO_SLIDERS = {
     "optical_axis_elevation_deg": ("projector", "optical_axis_elevation_deg"),
     "lens_offset_vertical": ("projector", "lens_offset_vertical"),
 }
-PREVIEW_KEYS = ["offset_x", "offset_y", "flip_h", "flip_v", "frame"]
+# Landmark / orientation controls. Written to rig_geometry.yaml `calibration:` AND the
+# sidecar. These DO reach the deployed warp (usable area + orientation), unlike before.
+DISPLAY_KEYS = ["offset_x", "offset_y", "flip_h", "flip_v", "frame_x", "frame_y", "az90_x"]
+
+# Changing any of these re-anchors the solved stretches to the landmarks.
+SOLVE_TRIGGERS = {"az90_x", "offset_x", "frame_y", "azimuth_height", "parabola_A",
+                  "parabola_B", "throw_ratio", "optical_axis_elevation_deg",
+                  "lens_offset_vertical"}
 
 # Defaults — only fill gaps if rig_geometry.yaml is missing a key.
 DEFAULT_GEO = {
     "projector": {"resolution": [1920, 1080], "throw_distance_cm": 48,
-                  "throw_ratio": 0.8, "optical_axis_elevation_deg": 49,
-                  "lens_offset_vertical": 0, "lateral_offset_cm": 0,
-                  "horizontal_stretch": 1.0, "vertical_stretch": 2.4},
-    "screen": {"parabola_A": 12.7, "parabola_B": 0.04186,
-               "altitude_min_deg": -48.6, "altitude_max_deg": 25.3,
-               "azimuth_max_deg": 105, "height_cm": 20},
+                  "throw_ratio": 1.2, "optical_axis_elevation_deg": -3,
+                  "lens_offset_vertical": 1.0, "lateral_offset_cm": 0,
+                  "horizontal_stretch": 0.85, "vertical_stretch": 3.35},
+    "screen": {"parabola_A": 12.7, "parabola_B": 0.044,
+               "azimuth_height": 14.4, "height_cm": 20,
+               "altitude_min_deg": -49.75, "altitude_max_deg": 25.3},
 }
 
 GEO = copy.deepcopy(DEFAULT_GEO)   # full geometry dict (loaded from YAML, written back)
-PARAMS = {"parabola_A": 12.7, "parabola_B": 0.04186, "throw_ratio": 0.8,
-          "horizontal_stretch": 1.0, "vertical_stretch": 2.4,
-          "optical_axis_elevation_deg": 49.0, "lens_offset_vertical": 0.0,
-          "eye_above_screen_bottom_cm": 14.4,   # driver: sets altitude_min = atan(-h / parabola_A)
-          "offset_x": 0, "offset_y": 186, "flip_h": False, "flip_v": True,
-          "frame": 2}   # outer-frame thickness: 0-100, each step = 1% (top/bot of H, left/right of W)
+PARAMS = {"parabola_A": 12.7, "parabola_B": 0.044, "throw_ratio": 1.2,
+          "horizontal_stretch": 0.85, "vertical_stretch": 3.35,
+          "optical_axis_elevation_deg": -3.0, "lens_offset_vertical": 1.0,
+          "azimuth_height": 14.4,   # cm, eye/az-line above screen bottom -> drives altitudes
+          "offset_x": 0, "offset_y": 0, "flip_h": False, "flip_v": True,
+          "frame_x": 40, "frame_y": 40,   # usable-area insets (px), symmetric L/R and T/B
+          "az90_x": 1720}                 # display column of the +90° azimuth landmark line
 LOCK = threading.Lock()
 
 
@@ -88,8 +102,9 @@ def _deep_merge(base, override):
 
 
 def load_geometry():
-    """Load rig_geometry.yaml into GEO and seed the geometry sliders from it.
-    Preview flips/offsets load from the sidecar."""
+    """Load rig_geometry.yaml into GEO and seed the sliders from it. Landmark/orientation
+    controls load from the `calibration:` block (or the sidecar as a fallback)."""
+    global RES_W, RES_H
     if GEO_PATH.exists():
         try:
             loaded = yaml.safe_load(GEO_PATH.read_text()) or {}
@@ -102,32 +117,70 @@ def load_geometry():
             print("geometry load failed (using defaults):", e)
     else:
         print(f"{GEO_PATH.name} not found — starting from defaults")
-    # Seed eye-height-above-screen-bottom from the loaded altitude_min; from here the user
-    # edits h and it DRIVES altitude_min (see _apply_eye_height).
     try:
-        PARAMS["eye_above_screen_bottom_cm"] = round(
-            float(-PARAMS["parabola_A"] * np.tan(np.radians(GEO["screen"]["altitude_min_deg"]))), 1)
+        RES_W, RES_H = (int(x) for x in GEO["projector"]["resolution"])
     except Exception:
         pass
+    # azimuth_height: prefer the stored value; else reconstruct from altitude_min (migration
+    # from the old eye_above_screen_bottom_cm). From here it DRIVES the altitudes.
+    sc = GEO.get("screen", {})
+    if "azimuth_height" in sc:
+        PARAMS["azimuth_height"] = float(sc["azimuth_height"])
+    elif "eye_above_screen_bottom_cm" in sc:
+        PARAMS["azimuth_height"] = float(sc["eye_above_screen_bottom_cm"])
+    else:
+        try:
+            PARAMS["azimuth_height"] = round(
+                float(-PARAMS["parabola_A"] * np.tan(np.radians(sc["altitude_min_deg"]))), 1)
+        except Exception:
+            pass
+    # landmark/orientation controls: calibration block first, then sidecar
+    cal = GEO.get("calibration", {})
+    for k in DISPLAY_KEYS:
+        if k in cal:
+            PARAMS[k] = cal[k]
     if PREVIEW_PATH.exists():
         try:
             pv = json.loads(PREVIEW_PATH.read_text())
-            for k in PREVIEW_KEYS:
+            for k in DISPLAY_KEYS:
                 if k in pv:
                     PARAMS[k] = pv[k]
         except Exception:
             pass
+    _coerce_types()
+    _apply_visual_field()
+    _solve_stretches()
 
 
-def _apply_eye_height():
-    """eye_above_screen_bottom_cm drives altitude_min: the screen bottom (center) sits at
-    z = -h below the eye, so altitude_min = atan(-h / parabola_A). Call under LOCK after
-    h or parabola_A changes."""
-    h = PARAMS.get("eye_above_screen_bottom_cm")
+def _coerce_types():
+    for k in ("flip_h", "flip_v"):
+        PARAMS[k] = bool(PARAMS[k])
+    for k in ("offset_x", "offset_y", "frame_x", "frame_y", "az90_x"):
+        PARAMS[k] = int(round(float(PARAMS[k])))
+
+
+def _apply_visual_field():
+    """azimuth_height (h) + screen height (hc) + parabola_A (A) DERIVE the visual field:
+    the eye/az-line sits h above the screen bottom at depth A, so
+      altitude_min = atan(-h / A)          (screen bottom, below eye)
+      altitude_max = atan((hc - h) / A)    (screen top, above eye)
+    Call under LOCK after h, height_cm, or parabola_A change."""
+    h = PARAMS.get("azimuth_height")
     A = PARAMS.get("parabola_A")
+    hc = GEO.get("screen", {}).get("height_cm", 20)
     if h is not None and A:
-        GEO.setdefault("screen", {})["altitude_min_deg"] = round(
-            float(np.degrees(np.arctan2(-h, A))), 2)
+        s = GEO.setdefault("screen", {})
+        s["altitude_min_deg"] = round(float(np.degrees(np.arctan2(-h, A))), 2)
+        s["altitude_max_deg"] = round(float(np.degrees(np.arctan2(hc - h, A))), 2)
+
+
+def _params_to_geo(p=None):
+    """Full geometry dict from GEO + the live slider values (for the ray trace)."""
+    p = p if p is not None else PARAMS
+    geo = copy.deepcopy(GEO)
+    for slider, (sec, key) in GEO_SLIDERS.items():
+        geo.setdefault(sec, {})[key] = p[slider]
+    return geo
 
 
 class _Flow(list):
@@ -149,14 +202,19 @@ def _dump_geo(geo):
 
 
 def save_geometry():
-    """Merge slider values into GEO, overwrite rig_geometry.yaml; preview -> sidecar.
-    Also POSTs the YAML back to the Mac setup UI so it lands (timestamped) in the repo.
-    Returns the archived filename on the Mac, or None (local save always succeeds)."""
+    """Merge solved geometry + derived altitudes + azimuth_height + landmark record into
+    GEO, overwrite rig_geometry.yaml (dropping azimuth_max_deg), mirror to the sidecar,
+    and POST to the Mac for a timestamped archive. Returns the archived filename or None."""
     with LOCK:
         for slider, (sec, key) in GEO_SLIDERS.items():
             GEO.setdefault(sec, {})[key] = PARAMS[slider]
+        GEO.setdefault("screen", {})["azimuth_height"] = PARAMS["azimuth_height"]
+        _apply_visual_field()
+        GEO["screen"].pop("azimuth_max_deg", None)            # extent now from ±90 landmark + frame
+        GEO["screen"].pop("eye_above_screen_bottom_cm", None)  # renamed -> azimuth_height
+        GEO["calibration"] = {k: PARAMS[k] for k in DISPLAY_KEYS}
         geo_out = copy.deepcopy(GEO)
-        preview = {k: PARAMS[k] for k in PREVIEW_KEYS}
+        preview = {k: PARAMS[k] for k in DISPLAY_KEYS}
     text = _dump_geo(geo_out)
     GEO_PATH.write_text(text)
     PREVIEW_PATH.write_text(json.dumps(preview, indent=2))
@@ -248,10 +306,71 @@ def screen_point_to_pixel(pt, proj):
     return (px, py)
 
 
+# ── landmark solver ──
+def _model_pixel(az, alt, geo, proj):
+    pt = ray_screen_intersection(az, alt, geo["screen"]["parabola_A"],
+                                 geo["screen"]["parabola_B"])
+    if pt is None:
+        return None
+    r = screen_point_to_pixel(pt, proj)
+    if r is None or not (np.isfinite(r[0]) and np.isfinite(r[1])):
+        return None
+    return r
+
+
+def _solve_stretches():
+    """Re-anchor horizontal/vertical_stretch to the registered landmarks (call under LOCK).
+
+    The projected span scales EXACTLY linearly with each stretch (img_w ∝ 1/hstretch,
+    img_h ∝ 1/vstretch, and az=0 stays at the panel center column), so a single
+    proportional rescale hits the target with no iteration:
+      - horizontal: model |px(±90)-px(0)| span -> the marked ±90 half-span in display px.
+      - vertical:   model |py(alt_max)-py(alt_min)| span -> the usable height (res_h-2*frame_y).
+    """
+    geo = _params_to_geo()
+    try:
+        proj = build_projector(geo)
+    except Exception:
+        return
+    res_w, res_h = geo["projector"]["resolution"]
+    almin = geo["screen"]["altitude_min_deg"]
+    almax = geo["screen"]["altitude_max_deg"]
+
+    # Horizontal: anchor at the eye line (alt=0), where the origin cross and the ±90°
+    # landmark are read. (The ±90° column varies slightly with altitude because the tilted
+    # optical axis adds perspective, so the anchor altitude must be fixed.)
+    p0 = _model_pixel(0.0, 0.0, geo, proj)
+    p90 = _model_pixel(90.0, 0.0, geo, proj)
+    if p0 and p90:
+        cur = abs(p90[0] - p0[0])
+        tgt = abs(PARAMS["az90_x"] - (res_w / 2 + PARAMS["offset_x"]))
+        if cur > 1.0 and tgt > 1.0:
+            PARAMS["horizontal_stretch"] = float(
+                np.clip(PARAMS["horizontal_stretch"] * tgt / cur, 0.05, 6.0))
+
+    ptop = _model_pixel(0.0, almax, geo, proj)
+    pbot = _model_pixel(0.0, almin, geo, proj)
+    if ptop and pbot:
+        cur = abs(pbot[1] - ptop[1])
+        tgt = abs(res_h - 2 * PARAMS["frame_y"])
+        if cur > 1.0 and tgt > 1.0:
+            PARAMS["vertical_stretch"] = float(
+                np.clip(PARAMS["vertical_stretch"] * tgt / cur, 0.1, 6.0))
+
+
+# ── colors (B/G only; red LED off) ──
+BG_COL = (0, 18, 18)
+GREEN = (0, 255, 0)       # 0° vertical, 0° horizontal, ±90° verticals
+CYAN = (0, 220, 220)      # every other 30° line
+FRAME_COL = (0, 255, 255)  # usable-area boundary
+
+
+def _az_color(az_t):
+    return GREEN if az_t in (0, 90, -90) else CYAN
+
+
 def render(p, pygame, W, H):
-    geo = copy.deepcopy(GEO)
-    for slider, (sec, key) in GEO_SLIDERS.items():
-        geo.setdefault(sec, {})[key] = p[slider]
+    geo = _params_to_geo(p)
     A, B = p["parabola_A"], p["parabola_B"]
     almin = geo["screen"]["altitude_min_deg"]
     almax = geo["screen"]["altitude_max_deg"]
@@ -261,66 +380,49 @@ def render(p, pygame, W, H):
         return pygame.Surface((W, H))
 
     def proj_pt(az, alt):
-        pt = ray_screen_intersection(az, alt, A, B)
-        if pt is None:
-            return None
-        r = screen_point_to_pixel(pt, proj)
-        if r is None or not (np.isfinite(r[0]) and np.isfinite(r[1])):
-            return None
-        return (int(r[0]), int(r[1]))
+        r = _model_pixel(az, alt, geo, proj)
+        return (int(r[0]), int(r[1])) if r else None
 
     surf = pygame.Surface((W, H))
-    # All colors are B/G only (R=0) — the projector's red LED is deactivated, so any red
-    # channel simply won't show. Eye line (alt 0 = horizon) and the straight-ahead meridian
-    # (az 0) are drawn thick and distinct.
-    surf.fill((0, 18, 18))                                      # R-free dark background
-    a0 = int(np.floor(almin / 10) * 10)
-    for alt_t in range(a0, int(almax) + 1, 10):                 # altitude isolines
+    surf.fill(BG_COL)
+    # altitude isolines every 30° (plus the 0° eye line)
+    a0 = int(np.floor(almin / 30) * 30)
+    alts = sorted(set(list(range(a0, int(almax) + 30, 30)) + [0]))
+    for alt_t in alts:
+        if alt_t < almin - 0.5 or alt_t > almax + 0.5:
+            continue
         pts = [q for q in (proj_pt(az, alt_t) for az in np.linspace(-90, 90, 80)) if q]
         if len(pts) >= 2:
-            if alt_t == 0:                                      # EYE LINE — animal eye level / horizon
-                pygame.draw.lines(surf, (0, 255, 0), False, pts, 5)
-            else:
-                pygame.draw.lines(surf, (0, 190, 190), False, pts, 2)
-    for az_t in range(-80, 81, 20):                             # azimuth isolines
+            green = (alt_t == 0)
+            pygame.draw.lines(surf, GREEN if green else CYAN, False, pts, 4 if green else 2)
+    # azimuth isolines every 30° (0° meridian and ±90° drawn green/thick)
+    for az_t in range(-90, 91, 30):
         pts = [q for q in (proj_pt(az_t, alt) for alt in np.linspace(almin, almax, 80)) if q]
         if len(pts) >= 2:
-            if az_t == 0:                                       # straight-ahead meridian (thick)
-                pygame.draw.lines(surf, (0, 200, 255), False, pts, 5)
-            else:
-                pygame.draw.lines(surf, (0, 110, 235), False, pts, 2)
-    # orientation labels — B/G only (red LED off)
-    font = pygame.font.SysFont(None, 64)
-    almid = (almin + almax) / 2
-    for text, az, alt, col in [(f"TOP {almax:.0f}", 0, almax, (0, 255, 130)),
-                               (f"BOTTOM {almin:.0f}", 0, almin, (0, 255, 130)),
-                               ("LEFT -80", -80, almid, (0, 190, 255)),
-                               ("RIGHT +80", 80, almid, (0, 190, 255))]:
-        q = proj_pt(az, alt)
-        if q:
-            s = font.render(text, True, col)
-            surf.blit(s, s.get_rect(center=q))
-    # azimuth angle of each vertical line, written along the eye line (altitude 0)
+            green = az_t in (0, 90, -90)
+            pygame.draw.lines(surf, _az_color(az_t), False, pts, 4 if green else 2)
+    # azimuth angle numbers along the eye line (altitude 0)
     afont = pygame.font.SysFont(None, 40)
-    for az_t in range(-80, 81, 20):
+    for az_t in range(-90, 91, 30):
         q = proj_pt(az_t, 0)
         if q:
             s = afont.render(f"{az_t}", True, (0, 220, 255))
-            surf.blit(s, s.get_rect(center=(q[0], q[1] - 16)))   # just above the eye line
+            surf.blit(s, s.get_rect(center=(q[0], q[1] - 16)))
     return surf
 
 
 def grid_lines(p):
-    """Az/alt isolines in projector pixels for the CURRENT params — data for the web
-    preview (mirrors render()'s projection but returns polylines, not a pygame surface)."""
-    geo = copy.deepcopy(GEO)
-    for slider, (sec, key) in GEO_SLIDERS.items():
-        geo.setdefault(sec, {})[key] = p[slider]
+    """Az/alt 30° isolines in projector pixels for the web preview (mirrors render())."""
+    geo = _params_to_geo(p)
     A, B = p["parabola_A"], p["parabola_B"]
     almin = geo["screen"]["altitude_min_deg"]
     almax = geo["screen"]["altitude_max_deg"]
-    out = {"res": list(geo["projector"]["resolution"]),
-           "almin": almin, "almax": almax, "azmin": -90, "azmax": 90,
+    res_w, res_h = geo["projector"]["resolution"]
+    out = {"res": [res_w, res_h], "almin": almin, "almax": almax,
+           "azmin": -90, "azmax": 90,
+           "frame_x": p["frame_x"], "frame_y": p["frame_y"],
+           "hstretch": round(p["horizontal_stretch"], 4),
+           "vstretch": round(p["vertical_stretch"], 4),
            "alt_lines": [], "az_lines": []}
     try:
         proj = build_projector(geo)
@@ -328,20 +430,17 @@ def grid_lines(p):
         return out
 
     def pp(az, alt):
-        pt = ray_screen_intersection(az, alt, A, B)
-        if pt is None:
-            return None
-        r = screen_point_to_pixel(pt, proj)
-        if r is None or not (np.isfinite(r[0]) and np.isfinite(r[1])):
-            return None
-        return [float(r[0]), float(r[1])]
+        r = _model_pixel(az, alt, geo, proj)
+        return [float(r[0]), float(r[1])] if r else None
 
-    a0 = int(np.floor(almin / 10) * 10)
-    for alt_t in range(a0, int(almax) + 1, 10):
+    a0 = int(np.floor(almin / 30) * 30)
+    for alt_t in sorted(set(list(range(a0, int(almax) + 30, 30)) + [0])):
+        if alt_t < almin - 0.5 or alt_t > almax + 0.5:
+            continue
         pts = [q for q in (pp(az, alt_t) for az in np.linspace(-90, 90, 60)) if q]
         if len(pts) >= 2:
             out["alt_lines"].append({"t": alt_t, "pts": pts})
-    for az_t in range(-80, 81, 20):
+    for az_t in range(-90, 91, 30):
         pts = [q for q in (pp(az_t, alt) for alt in np.linspace(almin, almax, 60)) if q]
         if len(pts) >= 2:
             out["az_lines"].append({"t": az_t, "pts": pts})
@@ -351,19 +450,23 @@ def grid_lines(p):
 PAGE = """<!doctype html><html><head><meta name=viewport content="width=device-width,initial-scale=1">
 <title>Geo calibration</title><style>
 body{font-family:sans-serif;background:#1b1b1b;color:#eee;padding:18px;font-size:15px}
-.row{margin:14px 0}label{display:inline-block;width:170px}
-input[type=range]{width:44%;vertical-align:middle}output{display:inline-block;width:70px;text-align:right;color:#7cf}
+.row{margin:12px 0}label{display:inline-block;width:180px}
+input[type=range]{width:42%;vertical-align:middle}output{display:inline-block;min-width:70px;text-align:right;color:#7cf}
 button{padding:9px 18px;margin:12px 8px 0 0;font-size:15px}#msg{margin-left:10px;color:#8f8}
-.k{color:#fd6}.note{color:#888;font-size:13px}
+.k{color:#fd6}.note{color:#888;font-size:13px}.solved{color:#6f6}
 #previews{display:flex;gap:18px;margin:8px 0 20px;max-width:1000px}
 .pv{flex:1}.pv h4{margin:0 0 5px;font-weight:normal;color:#bbb;font-size:13px}
-canvas{width:100%;height:auto;background:#111;border:1px solid #333;border-radius:4px}</style></head><body>
-<h3>Geometry calibration (live)</h3>
-<p>Tune <span class=k>parabola_B</span> until the cyan horizontal lines are straight/level.
-Save overwrites <span class=k>rig_geometry.yaml</span> and archives a timestamped copy on the Mac.</p>
-<div class=row><label>Eye above screen bottom</label>
-<input type=number id=eyeh step=0.1 style="width:80px" onchange="set('eye_above_screen_bottom_cm',this.value,0)"> cm
-<span class=note id=eyenote></span></div>
+canvas{width:100%;height:auto;background:#111;border:1px solid #333;border-radius:4px}
+h4.sec{margin:18px 0 2px;color:#9cf;font-weight:normal;border-bottom:1px solid #333;padding-bottom:3px}</style></head><body>
+<h3>Geometry calibration — landmark registration</h3>
+<p>Register the grid to the real screen: set the <span class=k>frame</span> to the usable
+area, place the green <span class=k>0° cross</span> with offsets, type the measured
+<span class=k>azimuth_height</span>, then drag <span class=k>az90_x</span> so the green ±90°
+lines sit on the physical 90° marks. Stretches are solved for you. Tune
+<span class=k>parabola_B</span> for mid-field shape. Save writes <span class=k>rig_geometry.yaml</span>.</p>
+<div class=row><label>azimuth_height</label>
+<input type=number id=azh step=0.1 style="width:80px" onchange="set('azimuth_height',this.value,0)"> cm
+<span class=note id=azhnote></span></div>
 <div id=previews>
   <div class=pv><h4>TARGET — flat/undistorted (what the mouse should see)</h4><canvas id=cvIdeal width=480 height=270></canvas></div>
   <div class=pv><h4>PROJECTED — warped for the curved screen (what goes IRL)</h4><canvas id=cvWarp width=480 height=270></canvas></div>
@@ -372,28 +475,43 @@ Save overwrites <span class=k>rig_geometry.yaml</span> and archives a timestampe
 <button onclick=save()>Save rig_geometry.yaml</button>
 <button onclick=saveDefaults()>Save defaults</button>
 <button onclick=loadDefaults()>Load defaults</button><span id=msg></span>
-<p class=note>flip/offset sliders only align this preview (saved to .calib_preview.json), not the warp.
-Defaults live on the projector (.calib_defaults.json).</p>
+<p class=note>horizontal_stretch / vertical_stretch are <span class=solved>solved</span> from the ±90°
+and frame landmarks. flip/offset/frame/az90 persist to .calib_preview.json and the yaml
+`calibration:` block. Defaults live on the projector (.calib_defaults.json).</p>
 <script>
-const S=[['parabola_A',1,30,0.05],['parabola_B',0.001,0.30,0.001],
-['throw_ratio',0.4,1.6,0.01],['horizontal_stretch',0.4,4.0,0.05],['vertical_stretch',0.5,4.0,0.05],
-['optical_axis_elevation_deg',-30,60,0.5],['lens_offset_vertical',0,1,0.05],
-['offset_x',-1000,1000,2],['offset_y',-1000,1000,2],['frame',0,100,1]];
+const RES=[1920,1080];
+// [key, min, max, step, section-label]
+const S=[
+['parabola_A',1,30,0.05,'Screen (measured)'],['parabola_B',0.001,0.30,0.001,''],
+['throw_ratio',0.4,1.6,0.01,'Projector (measured)'],
+['optical_axis_elevation_deg',-30,60,0.5,''],['lens_offset_vertical',0,1,0.05,''],
+['horizontal_stretch',0.05,6.0,0.01,'Solved from landmarks'],['vertical_stretch',0.1,6.0,0.01,''],
+['offset_x',-1000,1000,1,'Landmarks — origin cross'],['offset_y',-1000,1000,1,''],
+['az90_x',0,1920,1,'Landmark — ±90° lines'],
+['frame_x',0,600,1,'Usable area (px insets)'],['frame_y',0,400,1,'']];
 const T=['flip_h','flip_v'];let P={};
-const DEC={};for(const[k,,,s]of S)DEC[k]=Math.max(0,-Math.floor(Math.log10(s)+1e-9));
+const DEC={};for(const r of S)DEC[r[0]]=Math.max(0,-Math.floor(Math.log10(r[3])+1e-9));
 function fmt(k,v){return (+v).toFixed(DEC[k]??2);}
-function outLabel(k,v){if(k==='frame')return 'x='+Math.round(v*10.8)+'/1080, y='+Math.round(v*19.2)+'/1920';return fmt(k,v);}
+function outLabel(k,v){v=+v;
+  if(k==='frame_x')return v+'px  usable x: '+v+'..'+(RES[0]-v)+' ('+(RES[0]-2*v)+')';
+  if(k==='frame_y')return v+'px  usable y: '+v+'..'+(RES[1]-v)+' ('+(RES[1]-2*v)+')';
+  if(k==='az90_x')return 'col '+v;
+  return fmt(k,v);}
+const SOLVED=new Set(['horizontal_stretch','vertical_stretch']);
 async function load(){P=await(await fetch('/get')).json();draw();refreshPreview();}
-function draw(){let h='';for(const[k,a,b,s]of S)h+=`<div class=row><label>${k}</label>
-<input type=range min=${a} max=${b} step=${s} value=${P[k]} oninput="set('${k}',this.value,1)">
-<output id=o_${k} style="${k==='frame'?'width:170px':''}">${outLabel(k,P[k])}</output></div>`;
+function draw(){let h='';for(const[k,a,b,s,sec] of S){
+  if(sec)h+=`<h4 class=sec>${sec}</h4>`;
+  const ro=SOLVED.has(k)?' disabled':'';
+  h+=`<div class=row><label ${SOLVED.has(k)?'class=solved':''}>${k}</label>
+<input type=range min=${a} max=${b} step=${s} value=${P[k]}${ro} oninput="set('${k}',this.value,1)">
+<output id=o_${k} style="${(k==='frame_x'||k==='frame_y')?'min-width:200px':''}">${outLabel(k,P[k])}</output></div>`;}
 for(const k of T)h+=`<div class=row><label>${k}</label>
 <input type=checkbox ${P[k]?'checked':''} onchange="set('${k}',this.checked?1:0,0)"></div>`;
 document.getElementById('ctrls').innerHTML=h;
-document.getElementById('eyeh').value=(+P['eye_above_screen_bottom_cm']).toFixed(1);}
+document.getElementById('azh').value=(+P['azimuth_height']).toFixed(1);}
 async function set(k,v,num){if(num)document.getElementById('o_'+k).textContent=outLabel(k,v);
 await fetch('/set?k='+k+'&v='+v);schedulePreview();}
-function flash(t){let m=document.getElementById('msg');m.textContent=t;setTimeout(()=>m.textContent='',2000);}
+function flash(t){let m=document.getElementById('msg');m.textContent=t;setTimeout(()=>m.textContent='',2500);}
 async function save(){let r=await(await fetch('/save')).json();
 flash(r.archived?('saved ✓ → '+r.archived):'saved ✓ (Mac not reached — local only)');}
 async function saveDefaults(){await fetch('/save_defaults');flash('defaults saved ✓');}
@@ -401,19 +519,29 @@ async function loadDefaults(){P=await(await fetch('/load_defaults')).json();draw
 // ── side-by-side preview: left = ideal flat grid, right = the warp actually projected ──
 let previewTimer=null;
 function schedulePreview(){clearTimeout(previewTimer);previewTimer=setTimeout(refreshPreview,120);}
-function col(t){return t===0?'#ff0':'#fff';}
+function azcol(t){return (t===0||t===90||t===-90)?'#0f0':'#0dd';}
+function altcol(t){return t===0?'#0f0':'#0dd';}
 function poly(ctx,pts,sx,sy){ctx.beginPath();pts.forEach((p,i)=>{const x=p[0]*sx,y=p[1]*sy;i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();}
 function drawIdeal(d){const c=document.getElementById('cvIdeal'),ctx=c.getContext('2d'),W=c.width,H=c.height;
 ctx.fillStyle='#111';ctx.fillRect(0,0,W,H);
 const X=a=>(a-d.azmin)/(d.azmax-d.azmin)*W,Y=a=>(1-(a-d.almin)/(d.almax-d.almin))*H;
-for(const l of d.alt_lines){ctx.strokeStyle=l.t===0?'#0f0':'#00d2d2';ctx.lineWidth=l.t===0?3:1.5;ctx.beginPath();ctx.moveTo(0,Y(l.t));ctx.lineTo(W,Y(l.t));ctx.stroke();}
-for(const l of d.az_lines){ctx.strokeStyle=l.t===0?'#0cf':col(l.t);ctx.lineWidth=l.t===0?3:1.5;ctx.beginPath();ctx.moveTo(X(l.t),0);ctx.lineTo(X(l.t),H);ctx.stroke();}}
+for(const l of d.alt_lines){ctx.strokeStyle=altcol(l.t);ctx.lineWidth=l.t===0?3:1.5;ctx.beginPath();ctx.moveTo(0,Y(l.t));ctx.lineTo(W,Y(l.t));ctx.stroke();}
+for(const l of d.az_lines){ctx.strokeStyle=azcol(l.t);ctx.lineWidth=(l.t===0||Math.abs(l.t)===90)?3:1.5;ctx.beginPath();ctx.moveTo(X(l.t),0);ctx.lineTo(X(l.t),H);ctx.stroke();}}
 function drawWarp(d){const c=document.getElementById('cvWarp'),ctx=c.getContext('2d'),W=c.width,H=c.height;
 ctx.fillStyle='#111';ctx.fillRect(0,0,W,H);const sx=W/d.res[0],sy=H/d.res[1];
-for(const l of d.alt_lines){ctx.strokeStyle=l.t===0?'#0f0':'#00d2d2';ctx.lineWidth=l.t===0?3:1.5;poly(ctx,l.pts,sx,sy);}
-for(const l of d.az_lines){ctx.strokeStyle=l.t===0?'#0cf':col(l.t);ctx.lineWidth=l.t===0?3:1.5;poly(ctx,l.pts,sx,sy);}}
+for(const l of d.alt_lines){ctx.strokeStyle=altcol(l.t);ctx.lineWidth=l.t===0?3:1.5;poly(ctx,l.pts,sx,sy);}
+for(const l of d.az_lines){ctx.strokeStyle=azcol(l.t);ctx.lineWidth=(l.t===0||Math.abs(l.t)===90)?3:1.5;poly(ctx,l.pts,sx,sy);}
+// usable-area frame
+ctx.strokeStyle='#0ff';ctx.lineWidth=1.5;
+ctx.strokeRect(d.frame_x*sx,d.frame_y*sy,(d.res[0]-2*d.frame_x)*sx,(d.res[1]-2*d.frame_y)*sy);}
 async function refreshPreview(){const d=await(await fetch('/preview')).json();drawIdeal(d);drawWarp(d);
-const en=document.getElementById('eyenote');if(en)en.textContent='→ altitude_min = '+d.almin.toFixed(1)+'° (screen bottom)';}
+// reflect solved stretches + derived altitude range
+P.horizontal_stretch=d.hstretch;P.vertical_stretch=d.vstretch;
+const oh=document.getElementById('o_horizontal_stretch');if(oh)oh.textContent=fmt('horizontal_stretch',d.hstretch);
+const ov=document.getElementById('o_vertical_stretch');if(ov)ov.textContent=fmt('vertical_stretch',d.vstretch);
+const rh=document.querySelector('input[oninput*="horizontal_stretch"]');if(rh)rh.value=d.hstretch;
+const rv=document.querySelector('input[oninput*="vertical_stretch"]');if(rv)rv.value=d.vstretch;
+const en=document.getElementById('azhnote');if(en)en.textContent='→ altitude '+d.almin.toFixed(1)+'° … '+d.almax.toFixed(1)+'° (bottom … top)';}
 load();</script></body></html>"""
 
 
@@ -436,12 +564,14 @@ def start_web(port):
         with LOCK:
             if k in ("flip_h", "flip_v"):
                 PARAMS[k] = (v == "1")
-            elif k in ("offset_x", "offset_y", "frame"):
+            elif k in ("offset_x", "offset_y", "frame_x", "frame_y", "az90_x"):
                 PARAMS[k] = int(float(v))
             elif k in PARAMS:
                 PARAMS[k] = float(v)
-            if k in ("eye_above_screen_bottom_cm", "parabola_A"):
-                _apply_eye_height()          # re-derive altitude_min (screen-bottom position)
+            if k in ("azimuth_height", "parabola_A"):
+                _apply_visual_field()
+            if k in SOLVE_TRIGGERS:
+                _solve_stretches()
         return "ok"
 
     @app.route("/save")
@@ -469,15 +599,13 @@ def start_web(port):
                 try:
                     d = json.loads(DEFAULTS_PATH.read_text())
                     for k, v in d.items():
-                        if k in ("flip_h", "flip_v"):
-                            PARAMS[k] = bool(v)
-                        elif k in ("offset_x", "offset_y"):
-                            PARAMS[k] = int(v)
-                        elif k in PARAMS:
-                            PARAMS[k] = float(v)
+                        if k in PARAMS:
+                            PARAMS[k] = v
+                    _coerce_types()
                 except Exception as e:
                     print("load_defaults failed:", e)
-            _apply_eye_height()              # keep altitude_min consistent with restored h
+            _apply_visual_field()
+            _solve_stretches()
             return json.dumps(PARAMS)
 
     app.run(host="0.0.0.0", port=port, threaded=True)
@@ -506,22 +634,20 @@ def run(port, geo_path=None):
     while running["v"]:
         with LOCK:
             p = dict(PARAMS)
-        key = tuple(sorted(p.items()))
+        key = tuple(sorted((k, str(v)) for k, v in p.items()))
         if key != last_key:
             last_key = key
             grid = render(p, pygame, SW, SH)
             grid = pygame.transform.flip(grid, p["flip_h"], p["flip_v"])
             composed.fill((0, 0, 0))
             composed.blit(grid, (p["offset_x"], -p["offset_y"]))
+            # thin cyan usable-area frame lines (symmetric insets; not filled bars)
+            fx, fy = int(p["frame_x"]), int(p["frame_y"])
+            for x in (fx, SW - fx):
+                pygame.draw.line(composed, FRAME_COL, (x, 0), (x, SH), 2)
+            for y in (fy, SH - fy):
+                pygame.draw.line(composed, FRAME_COL, (0, y), (SW, y), 2)
         screen.blit(composed, (0, 0))
-        # static edge frame — 'frame' slider (0-100), proportional: top/bottom bars are
-        # frame% of height, left/right bars frame% of width (R-free blue; red LED off)
-        fx = int(round(p["frame"] * SH / 100))   # top/bottom bar thickness (of 1080)
-        fy = int(round(p["frame"] * SW / 100))   # left/right bar thickness (of 1920)
-        if fx > 0:
-            screen.fill((0, 0, 255), (0, 0, SW, fx)); screen.fill((0, 0, 255), (0, SH - fx, SW, fx))
-        if fy > 0:
-            screen.fill((0, 0, 255), (0, 0, fy, SH)); screen.fill((0, 0, 255), (SW - fy, 0, fy, SH))
         pygame.display.flip()
         for e in pygame.event.get():
             if e.type == pygame.QUIT or (e.type == pygame.KEYDOWN and
@@ -532,7 +658,7 @@ def run(port, geo_path=None):
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="Live geometry calibration")
+    ap = argparse.ArgumentParser(description="Landmark geometry calibration")
     ap.add_argument("--port", type=int, default=5091)
     ap.add_argument("--geo", default=None,
                     help="path to rig_geometry.yaml (default: next to this script)")

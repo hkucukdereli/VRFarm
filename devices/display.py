@@ -12,6 +12,16 @@ from __future__ import annotations
 from .base import Device, DeviceInfo, IOType, register_device
 
 
+def _unit_dir(az_deg, alt_deg):
+    """Unit gaze vector for (azimuth, altitude), matching compute_warp_map's convention
+    (x=lateral, y=forward, z=up; az=0 forward, +right; alt=0 eye level)."""
+    import numpy as np
+    az = np.radians(az_deg)
+    alt = np.radians(alt_deg)
+    ca = np.cos(alt)
+    return (np.sin(az) * ca, np.cos(az) * ca, np.sin(alt))
+
+
 @register_device
 class Display(Device):
     info = DeviceInfo("display", "Stimulus Display", IOType.HDMI, ["pygame"])
@@ -31,6 +41,10 @@ class Display(Device):
         self.bg_gray = task_params.get("background_gray", 0.0)
         self._screen = None
         self._warp = None
+        # calibration orientation (flip/offset), read from the warp NPZ at load_warp
+        self._cal = {"flip_h": False, "flip_v": False, "offset_x": 0, "offset_y": 0,
+                     "frame_x": 0, "frame_y": 0}
+        self._patch_cache = {}
 
     def start_display(self):
         """Initialize pygame and open fullscreen window.
@@ -120,8 +134,90 @@ class Display(Device):
         p = Path(npz_path)
         if p.exists():
             self._warp = np.load(str(p))
+            self._cal = self._read_cal(self._warp)
+            self._patch_cache = {}
             return True
         return False
+
+    @staticmethod
+    def _read_cal(warp):
+        """Pull the calibration orientation (flip/offset/frame) stored in the warp NPZ."""
+        def g(k, d):
+            try:
+                return warp[k].item() if k in warp.files else d
+            except Exception:
+                return d
+        return {"flip_h": bool(g("flip_h", False)), "flip_v": bool(g("flip_v", False)),
+                "offset_x": int(g("offset_x", 0)), "offset_y": int(g("offset_y", 0)),
+                "frame_x": int(g("frame_x", 0)), "frame_y": int(g("frame_y", 0))}
+
+    def _orient(self, pixels):
+        """Apply the calibration flip/offset so the framebuffer matches the tuned calib_geo
+        preview (which flips the grid and blits it at (offset_x, -offset_y)).
+        pixels: (H, W, 3) uint8 model-space array -> oriented (H, W, 3)."""
+        import numpy as np
+        c = self._cal
+        out = pixels
+        if c.get("flip_h"):
+            out = out[:, ::-1]
+        if c.get("flip_v"):
+            out = out[::-1, :]
+        ox, oy = int(c.get("offset_x", 0)), int(c.get("offset_y", 0))
+        if ox:
+            out = np.roll(out, ox, axis=1)
+        if oy:
+            out = np.roll(out, -oy, axis=0)
+        return np.ascontiguousarray(out)
+
+    def show_patch_spherical(self, az_deg: float, alt_deg: float, size_deg: float,
+                             corr_contrast: float, bg_gray: float,
+                             sync_square: bool = False):
+        """Render a stimulus patch in true visual-angle space through the warp map, so it
+        subtends `size_deg` at any azimuth/altitude and is shaped to the screen curvature.
+        Surfaces are cached per (az, alt, size, contrast, bg) — positions recur every block,
+        so a trial re-blits a prebuilt surface. Silently no-ops if no warp is loaded (the
+        follower falls back to show_rect)."""
+        import pygame
+        if self._screen is None or self._warp is None:
+            return
+        key = (round(float(az_deg), 2), round(float(alt_deg), 2),
+               round(float(size_deg), 2), round(float(corr_contrast), 4),
+               round(float(bg_gray), 4))
+        surf = self._patch_cache.get(key)
+        if surf is None:
+            surf = self._build_patch_surface(az_deg, alt_deg, size_deg,
+                                             corr_contrast, bg_gray)
+            self._patch_cache[key] = surf
+        self._screen.blit(surf, (0, 0))
+        self._draw_sync_square(sync_square)
+        pygame.display.flip()
+
+    def _build_patch_surface(self, az0, alt0, size_deg, corr_contrast, bg_gray):
+        """Compose the full (H, W) framebuffer for one patch: background everywhere, stimulus
+        where the pixel's visual direction is within size_deg/2 (great-circle) of (az0, alt0)
+        and on the screen. Oriented to match calibration."""
+        import numpy as np
+        import pygame
+        az_map = self._warp["az_map"]
+        alt_map = self._warp["alt_map"]
+        valid = self._warp["valid_map"]
+        # PsychoPy [-1, 1] -> 8-bit (same mapping as show_rect)
+        bg_lin = (bg_gray + 1) / 2
+        stim_lin = bg_lin + corr_contrast * (1 - bg_lin)
+        rgb = max(0, min(255, int(stim_lin * 255)))
+        bg_rgb = max(0, min(255, int(bg_lin * 255)))
+        # great-circle angular distance from (az0, alt0) to each pixel's (az, alt)
+        d = _unit_dir(az0, alt0)
+        azr = np.radians(np.where(valid, az_map, 0.0))
+        altr = np.radians(np.where(valid, alt_map, 0.0))
+        ca = np.cos(altr)
+        dot = np.sin(azr) * ca * d[0] + np.cos(azr) * ca * d[1] + np.sin(altr) * d[2]
+        ang = np.degrees(np.arccos(np.clip(dot, -1.0, 1.0)))
+        lit = valid & (ang <= size_deg / 2.0)
+        pixels = np.full((az_map.shape[0], az_map.shape[1], 3), bg_rgb, dtype=np.uint8)
+        pixels[lit] = rgb
+        pixels = self._orient(pixels)
+        return pygame.surfarray.make_surface(pixels.transpose(1, 0, 2))
 
     def show_checkers(self, n: int = 8, use_warp: bool = True):
         """Draw checkerboard. Uses warp map if loaded and use_warp=True, else simple grid."""
@@ -173,6 +269,7 @@ class Display(Device):
         pixels[valid & checker] = 255
         pixels[valid & ~checker] = 0
 
+        pixels = self._orient(pixels)
         surf = pygame.surfarray.make_surface(pixels.transpose(1, 0, 2))
         self._screen.blit(surf, (0, 0))
         pygame.display.flip()

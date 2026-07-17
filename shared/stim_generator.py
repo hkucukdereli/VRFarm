@@ -184,6 +184,9 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str) -> dict:
     corr_contrast = np.zeros(n, dtype=np.float32)
     duration_s = np.full(n, duration, dtype=np.float32)
     bg_gray = np.full(n, bg, dtype=np.float32)
+    # visual-angle size per trial — drives the follower's spherical renderer (px_* is
+    # kept for logging and the no-warp fallback)
+    stim_size_deg = np.full(n, float(stim_cfg.get("size_deg", 10.0)), dtype=np.float32)
 
     for i, t in enumerate(trials):
         trial_idx[i] = t["trial_idx"]
@@ -252,6 +255,7 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str) -> dict:
         px_x=px_x,
         px_y=px_y,
         px_size=px_size,
+        stim_size_deg=stim_size_deg,
         corr_contrast=corr_contrast,
         duration_s=duration_s,
         bg_gray=bg_gray,

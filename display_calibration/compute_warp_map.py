@@ -243,20 +243,36 @@ def compute_inverse_map(geo, proj):
     B = geo['screen']['parabola_B']
     res_w, res_h = proj['res']
 
+    # Bake the calibration orientation (flip + offset) into the PIXEL GRID rather than
+    # shifting the finished array. Each OUTPUT (display) pixel is mapped back to its SOURCE
+    # image pixel by inverting calib_geo's preview transform (flip, then blit at
+    # (offset_x, -offset_y)). Source coords are deliberately allowed to fall OUTSIDE [0,res]
+    # so the image-plane position extrapolates smoothly — the ray then still traces the real
+    # parabola and yields TRUE angles in the offset-vacated band, preserving angular
+    # continuity (no flat nearest-fill).
+    cal = geo.get('calibration', {})
+    flip_h = bool(cal.get('flip_h', False))
+    flip_v = bool(cal.get('flip_v', False))
+    ox = int(cal.get('offset_x', 0))
+    oy = int(cal.get('offset_y', 0))
+
     az_map  = np.full((res_h, res_w), np.nan)
     alt_map = np.full((res_h, res_w), np.nan)
     valid   = np.zeros((res_h, res_w), dtype=bool)
 
-    # Pixel grid
-    px_arr = np.arange(res_w)
-    py_arr = np.arange(res_h)
-    PX, PY = np.meshgrid(px_arr, py_arr)
+    # OUTPUT (display) pixel grid, then invert flip+offset to the SOURCE image pixel
+    PX, PY = np.meshgrid(np.arange(res_w), np.arange(res_h))
+    SPX = PX - ox
+    SPY = PY + oy
+    if flip_h:
+        SPX = (res_w - 1) - SPX
+    if flip_v:
+        SPY = (res_h - 1) - SPY
 
-    # Pixel → image plane position (inches relative to optical axis)
-    # Lens offset shifts the origin: offset=1 means axis at bottom edge
+    # Source pixel → image plane position (extrapolates for source coords outside [0,res])
     ov = proj.get('lens_offset_v', 0.0)
-    x_img = (PX / res_w - 0.5) * proj['img_w']
-    y_img = (0.5 - PY / res_h + ov * 0.5) * proj['img_h']
+    x_img = (SPX / res_w - 0.5) * proj['img_w']
+    y_img = (0.5 - SPY / res_h + ov * 0.5) * proj['img_h']
 
     # Ray direction from projector (in world coords)
     # ray = forward * throw + right * x_img + up * y_img, then normalize
@@ -317,9 +333,10 @@ def compute_inverse_map(geo, proj):
     alt_deg_arr = np.degrees(alt_rad)
 
     # Validity: the ray hits the screen in front of the mouse. NO azimuth/altitude clipping
-    # and NO frame gating here — the ±90°/altitude lines are references, not clips. The frame
-    # mask and the flip/offset orientation are applied afterwards (orient_maps), in display
-    # space, so the delivered warp fills the whole visible screen the user marked.
+    # and NO frame gating here — the ±90°/altitude lines are references, not clips. flip+offset
+    # are already baked into the pixel grid above; orient_maps only masks to the frame and
+    # fills any residual ray-miss holes. Angles are TRUE ray-traced values everywhere the
+    # (extrapolated-grid) ray meets the parabola, including the offset-vacated band.
     hit = (t < 1e9) & disc_ok & (ys > 0)
 
     az_map[hit]  = az_deg_arr[hit]
@@ -329,25 +346,14 @@ def compute_inverse_map(geo, proj):
     return az_map, alt_map, valid
 
 
-def _shift_fill(a, dx, dy, fill):
-    """Shift a 2D/3D array by (dx cols, dy rows), filling vacated cells with `fill`
-    (no wrap-around)."""
-    out = np.full_like(a, fill)
-    h, w = a.shape[:2]
-    xs0, xs1 = max(0, -dx), min(w, w - dx)
-    ys0, ys1 = max(0, -dy), min(h, h - dy)
-    xd0, xd1 = max(0, dx), min(w, w + dx)
-    yd0, yd1 = max(0, dy), min(h, h + dy)
-    if xs1 > xs0 and ys1 > ys0:
-        out[yd0:yd1, xd0:xd1] = a[ys0:ys1, xs0:xs1]
-    return out
-
-
 def orient_maps(geo, az_map, alt_map, valid, px_map, py_map):
-    """Bake the calibration orientation into the maps and apply the usable frame in DISPLAY
-    space, exactly matching calib_geo's preview (flip the grid, blit at (offset_x, -offset_y),
-    draw the frame). After this the warp IS the full experiment transformation: az_map/valid
-    are in physical framebuffer space and valid_map == the visible screen the user marked."""
+    """Finalize the warp. Flip+offset are ALREADY baked into az_map/alt_map/valid by
+    compute_inverse_map (via the pixel-grid mapping), so those arrays are already in display
+    space with true ray-traced angles across the offset-vacated band. Here we just: mask to
+    the usable frame (the visible screen the user marked; ±90°/altitude lines are references,
+    not clips), nearest-fill any residual ray-miss holes inside the frame (a thin sliver now,
+    only where the ray genuinely never meets the parabola), and transform the FORWARD pixel
+    map into display space."""
     cal = geo.get('calibration', {})
     res_w, res_h = geo['projector']['resolution']
     flip_h = bool(cal.get('flip_h', False))
@@ -357,26 +363,13 @@ def orient_maps(geo, az_map, alt_map, valid, px_map, py_map):
     fx = int(cal.get('frame_x', 0))
     fy = int(cal.get('frame_y', 0))
 
-    def orient2d(a, fill):
-        if flip_h:
-            a = a[:, ::-1]
-        if flip_v:
-            a = a[::-1, :]
-        return _shift_fill(a, ox, -oy, fill)   # blit at (offset_x, -offset_y)
-
-    az_map = orient2d(az_map, np.nan)
-    alt_map = orient2d(alt_map, np.nan)
-    have = orient2d(valid.astype(np.int8), 0).astype(bool)   # where the ray-trace defined an angle
-
-    # The FRAME is the visible screen (user-marked); the ±90°/altitude lines are references,
-    # not clips. Fill EVERY frame pixel with an (az, alt): use the ray-trace where defined and
-    # nearest-extrapolate into the ray-miss / offset-vacated gaps, so the whole visible screen
-    # is covered by the warp (blank, stimulus, and checkers all fill it).
     PX, PY = np.meshgrid(np.arange(res_w), np.arange(res_h))
     in_frame = (PX >= fx) & (PX < res_w - fx) & (PY >= fy) & (PY < res_h - fy)
+
+    have = valid & np.isfinite(az_map)
     try:
         from scipy import ndimage
-        if have.any():
+        if have.any() and bool((~have & in_frame).any()):
             idx = ndimage.distance_transform_edt(
                 ~have, return_distances=False, return_indices=True)
             az_map = az_map[tuple(idx)]
@@ -387,7 +380,7 @@ def orient_maps(geo, az_map, alt_map, valid, px_map, py_map):
     az_map = np.where(valid, az_map, np.nan)
     alt_map = np.where(valid, alt_map, np.nan)
 
-    # forward pixel coords -> same display space (flip then offset)
+    # forward pixel coords -> display space (flip then offset), matching the grid mapping
     if flip_h:
         px_map = (res_w - 1) - px_map
     if flip_v:

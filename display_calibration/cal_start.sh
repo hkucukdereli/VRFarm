@@ -21,7 +21,7 @@ sleep 1
 case "$TOOL" in
   geo)    SCRIPT=calib_geo.py;   ARGS="--port 5091";                              URL="http://192.168.10.102:5091" ;;
   panel)  SCRIPT=panel_grid.py;  ARGS="--spacing 100";                            URL="(no web UI — read the grid)" ;;
-  warp)   SCRIPT=validate_calibration_pygame.py; ARGS="--warp $CAL/warp_map.npz --pattern grid --flip-v"; URL="(no web UI)" ;;
+  warp)   SCRIPT=validate_calibration_pygame.py; ARGS="--warp $CAL/warp_map.npz --pattern grid"; URL="(no web UI)" ;;
   *) echo "unknown tool '$TOOL' (use: geo | panel | warp)"; exit 1 ;;
 esac
 

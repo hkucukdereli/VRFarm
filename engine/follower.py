@@ -90,7 +90,16 @@ class Follower:
 
         # Start display if present
         if "display" in self.devices:
-            self.devices["display"].start_display()
+            display = self.devices["display"]
+            display.start_display()
+            # Load the warp so stimuli render through the TRUE SPHERICAL path (fills the
+            # visible screen, correct visual angle). Without this, display._warp stays None
+            # and _handle_show silently falls back to the flat show_rect.
+            warp_path = Path.home() / "rig" / "calibration" / "warp_map.npz"
+            if display.load_warp(str(warp_path)):
+                print(f"  Warp map loaded from {warp_path}")
+            else:
+                print(f"  No warp map at {warp_path} — stimuli use flat fallback")
 
         while self.running:
             try:

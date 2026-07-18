@@ -56,8 +56,11 @@ landmark and the usable-pixel frame, not a stored max azimuth.
 
 ## Calibration (orientation + landmarks)
 
-Written by `calib_geo.py`; carried into `warp_map.npz` so the runtime renderer reproduces
-what was tuned.
+Written by `calib_geo.py` and **baked into** `warp_map.npz` by `compute_warp_map.orient_maps`
+(flip → offset → usable-frame mask → nearest-extrapolate angles into any gaps). The **frame is
+the visible-screen boundary** — the warp fills it entirely (blank, stimulus, checkers); the
+±90°/altitude lines are references, not clips. So the deployed warp is the complete experiment
+transformation and the runtime renders `az_map`/`valid_map` directly (no separate orientation).
 
 | Field | Unit | Meaning |
 |-------|------|---------|

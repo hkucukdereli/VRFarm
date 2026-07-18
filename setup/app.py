@@ -321,6 +321,32 @@ def api_deploy_pi():
                 except Exception as e:
                     steps.append(f"WARN ~/dlp/ push skipped: {e}")
 
+        # Restart pi_api so the just-uploaded code actually RUNS. A long-running Python
+        # process won't pick up overwritten files on its own — this is why a redeploy alone
+        # left the old code (and stale in-memory warp) in effect. /api/restart self-kills and
+        # systemd (Restart=always) respawns with the new code. Re-init the display afterwards.
+        if data.get("restart", True):
+            try:
+                requests.post(f"http://{ip}:{port}/api/restart", timeout=5)
+                steps.append("Restarted pi_api to load new code")
+                # Wait for it to respawn so the UI isn't left hitting a down Pi. The restart
+                # drops all initialized devices — the client resets their state after deploy.
+                import time as _time
+                _time.sleep(2.0)          # let the old process exit first
+                back = False
+                for _ in range(12):
+                    try:
+                        if requests.get(f"http://{ip}:{port}/api/logs?n=1", timeout=2).ok:
+                            back = True
+                            break
+                    except Exception:
+                        pass
+                    _time.sleep(1.0)
+                steps.append("pi_api back online — re-initialize devices" if back else
+                             "WARN pi_api did not respond after restart — re-check the Pi")
+            except Exception as e:
+                steps.append(f"(pi_api restart skipped: {e})")
+
         return jsonify({"ok": True, "steps": steps})
 
     except Exception as e:
@@ -518,12 +544,38 @@ def api_generate_warp():
                          "mv ~/rig/calibration/warp_map.npz.tmp ~/rig/calibration/warp_map.npz && "
                          "mv ~/rig/calibration/rig_geometry.yaml.tmp ~/rig/calibration/rig_geometry.yaml")
                     steps.append(f"Copied warp_map.npz + rig_geometry.yaml to {pi['name']} ({ip})")
+                    # Tell the RUNNING display to re-read the new warp — otherwise it keeps the
+                    # old warp cached in memory (load_warp is one-shot at init) and the
+                    # projector looks unchanged despite the new file on disk.
+                    try:
+                        api_port = (_rig_config.get("network") or {}).get("api_port", 5080)
+                        rr = requests.post(
+                            f"http://{ip}:{api_port}/api/reload_warp",
+                            timeout=5)
+                        if rr.ok and rr.json().get("reloaded"):
+                            steps.append(f"Reloaded warp into live display on {pi['name']}")
+                        else:
+                            steps.append(f"Warp saved on {pi['name']} — display not active, "
+                                         f"loads on next Init Display")
+                    except Exception as e:
+                        steps.append(f"(warp reload skipped on {pi['name']}: {e})")
                 except Exception as e:
                     steps.append(f"Failed to copy to {pi['name']}: {e}")
 
         return jsonify({"ok": True, "steps": steps})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "steps": steps})
+
+
+def _reinit_projector(target):
+    """Force a full projector bring-up on the display Pi over SSH: start_projector.sh sets
+    GPIO ALT2, re-inits the DLPC parallel input (fixes the common blank-projector case), and
+    kills+restarts X. Non-blocking (X starts backgrounded). Returns (ok, last-line-message)."""
+    try:
+        out = _ssh(target, "bash ~/rig/start_projector.sh", timeout=60)
+        return True, (out.strip().splitlines() or ["projector re-initialized"])[-1]
+    except Exception as e:
+        return False, str(e)
 
 
 @app.route("/api/start_calibration", methods=["POST"])
@@ -586,6 +638,12 @@ def api_start_calibration():
                 _scp(str(geo_file), f"{target}:~/rig/calibration/rig_geometry.yaml")
                 steps.append(f"Seeded rig_geometry.yaml from {geo_file.name}")
 
+        # Force a projector re-init so calib_geo opens on a fresh display with the DLPC
+        # parallel input correctly configured (requested: reinit on Calibrate/Stop). If it
+        # fails it's non-fatal — cal_start.sh also inits the projector when X is down.
+        ok, msg = _reinit_projector(target)
+        steps.append(f"Projector re-init: {msg}" if ok else f"WARN projector re-init: {msg}")
+
         out = _ssh(target, "bash ~/rig/calibration/cal_start.sh geo", timeout=45)
         steps.append((out.strip().splitlines() or ["started"])[0])
         return jsonify({"ok": True, "url": f"http://{ip}:5091", "steps": steps})
@@ -603,11 +661,16 @@ def api_stop_calibration():
     if not target_pi:
         return jsonify({"ok": False, "error": "No Pi has the display device"}), 400
     target = f"{target_pi.get('user', 'vruser')}@{target_pi['ip']}"
+    steps = []
     try:
         out = _ssh(target, "bash ~/rig/calibration/cal_stop.sh", timeout=20)
-        return jsonify({"ok": True, "msg": (out.strip() or "stopped")})
+        steps.append((out.strip().splitlines() or ["Calibration tool stopped"])[0])
+        # Re-init the projector so the normal display comes back cleanly (requested).
+        ok, msg = _reinit_projector(target)
+        steps.append(f"Projector re-init: {msg}" if ok else f"WARN projector re-init: {msg}")
+        return jsonify({"ok": True, "msg": (out.strip() or "stopped"), "steps": steps})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
+        return jsonify({"ok": False, "error": str(e), "steps": steps})
 
 
 @app.route("/api/check_warp")

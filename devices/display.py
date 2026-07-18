@@ -41,9 +41,6 @@ class Display(Device):
         self.bg_gray = task_params.get("background_gray", 0.0)
         self._screen = None
         self._warp = None
-        # calibration orientation (flip/offset), read from the warp NPZ at load_warp
-        self._cal = {"flip_h": False, "flip_v": False, "offset_x": 0, "offset_y": 0,
-                     "frame_x": 0, "frame_y": 0}
         self._patch_cache = {}
 
     def start_display(self):
@@ -134,40 +131,9 @@ class Display(Device):
         p = Path(npz_path)
         if p.exists():
             self._warp = np.load(str(p))
-            self._cal = self._read_cal(self._warp)
             self._patch_cache = {}
             return True
         return False
-
-    @staticmethod
-    def _read_cal(warp):
-        """Pull the calibration orientation (flip/offset/frame) stored in the warp NPZ."""
-        def g(k, d):
-            try:
-                return warp[k].item() if k in warp.files else d
-            except Exception:
-                return d
-        return {"flip_h": bool(g("flip_h", False)), "flip_v": bool(g("flip_v", False)),
-                "offset_x": int(g("offset_x", 0)), "offset_y": int(g("offset_y", 0)),
-                "frame_x": int(g("frame_x", 0)), "frame_y": int(g("frame_y", 0))}
-
-    def _orient(self, pixels):
-        """Apply the calibration flip/offset so the framebuffer matches the tuned calib_geo
-        preview (which flips the grid and blits it at (offset_x, -offset_y)).
-        pixels: (H, W, 3) uint8 model-space array -> oriented (H, W, 3)."""
-        import numpy as np
-        c = self._cal
-        out = pixels
-        if c.get("flip_h"):
-            out = out[:, ::-1]
-        if c.get("flip_v"):
-            out = out[::-1, :]
-        ox, oy = int(c.get("offset_x", 0)), int(c.get("offset_y", 0))
-        if ox:
-            out = np.roll(out, ox, axis=1)
-        if oy:
-            out = np.roll(out, -oy, axis=0)
-        return np.ascontiguousarray(out)
 
     def show_patch_spherical(self, az_deg: float, alt_deg: float, size_deg: float,
                              corr_contrast: float, bg_gray: float,
@@ -193,9 +159,10 @@ class Display(Device):
         pygame.display.flip()
 
     def _build_patch_surface(self, az0, alt0, size_deg, corr_contrast, bg_gray):
-        """Compose the full (H, W) framebuffer for one patch: background everywhere, stimulus
-        where the pixel's visual direction is within size_deg/2 (great-circle) of (az0, alt0)
-        and on the screen. Oriented to match calibration."""
+        """Compose the full (H, W) framebuffer for one patch: background across the whole
+        visible screen, stimulus where the pixel's visual direction is within size_deg/2
+        (great-circle) of (az0, alt0) and on the screen. The warp is already oriented
+        (flip/offset baked in) and valid_map == the visible screen."""
         import numpy as np
         import pygame
         az_map = self._warp["az_map"]
@@ -216,7 +183,6 @@ class Display(Device):
         lit = valid & (ang <= size_deg / 2.0)
         pixels = np.full((az_map.shape[0], az_map.shape[1], 3), bg_rgb, dtype=np.uint8)
         pixels[lit] = rgb
-        pixels = self._orient(pixels)
         return pygame.surfarray.make_surface(pixels.transpose(1, 0, 2))
 
     def show_checkers(self, n: int = 8, use_warp: bool = True):
@@ -269,7 +235,6 @@ class Display(Device):
         pixels[valid & checker] = 255
         pixels[valid & ~checker] = 0
 
-        pixels = self._orient(pixels)
         surf = pygame.surfarray.make_surface(pixels.transpose(1, 0, 2))
         self._screen.blit(surf, (0, 0))
         pygame.display.flip()

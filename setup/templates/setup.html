@@ -425,7 +425,18 @@ async function deployPi(idx) {
     });
     const data = await r.json();
     (data.steps || []).forEach(s => log('  ' + s));
-    log(data.ok ? 'Deploy complete.' : 'Deploy failed: ' + data.error);
+    if (data.ok) {
+      log('Deploy complete.');
+      // Deploy restarts pi_api, which drops that Pi's initialized devices. Reset their init
+      // state so the dots/controls aren't stale-green — the user must re-Initialize.
+      (pi.devices || []).forEach(name => {
+        if (deviceState[name]) deviceState[name].initialized = false;
+      });
+      devicesInitialized = false;
+      log('  pi_api restarted — devices dropped; click Initialize to re-init.');
+    } else {
+      log('Deploy failed: ' + data.error);
+    }
   } finally {
     _unlockUI();
   }
@@ -677,6 +688,15 @@ async function intensityCal() {
   log(result.ok ? 'Intensity calibration complete.' : 'Failed: ' + (result.error || ''));
 }
 
+// The Calibrate control is a single toggle: green "Calibrate" starts, red "Stop Calib"
+// stops. Both start and stop re-initialize the projector (handled server-side).
+let calibrating = false;
+
+async function toggleCalibration() {
+  if (calibrating) await stopCalibration();
+  else await startCalibration();
+}
+
 async function startCalibration() {
   const pi = getPiForDevice('display');
   if (!pi) { log('Display not assigned to a Pi'); return; }
@@ -684,8 +704,8 @@ async function startCalibration() {
   // point it at the sliders once the backend confirms the tool is up.
   const win = window.open('', 'geo-calibration', 'width=800,height=940');
   if (win) win.document.write('<body style="font:15px sans-serif;background:#1b1b1b;'
-    + 'color:#eee;padding:22px">Starting geometry calibration on ' + pi.ip + ' …</body>');
-  log('Starting geometry calibration on ' + pi.ip + '...');
+    + 'color:#eee;padding:22px">Re-initializing projector + starting calibration on ' + pi.ip + ' …</body>');
+  log('Re-initializing projector + starting calibration on ' + pi.ip + '...');
   const btn = document.querySelector('.calib-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
   try {
@@ -697,6 +717,7 @@ async function startCalibration() {
     (data.steps || []).forEach(s => log('  ' + s));
     if (data.ok && data.url) {
       log('Calibration running — sliders at ' + data.url);
+      calibrating = true;
       if (win) win.location = data.url; else window.open(data.url, 'geo-calibration');
     } else {
       log('Calibration start failed: ' + (data.error || ''));
@@ -706,20 +727,27 @@ async function startCalibration() {
     log('Calibration error: ' + e);
     if (win) win.close();
   }
-  if (btn) { btn.disabled = false; btn.textContent = 'Calibrate'; }
+  renderDeviceList();   // rebuild the toggle button in its new (green/red) state
 }
 
 async function stopCalibration() {
   const pi = getPiForDevice('display');
   if (!pi) { log('Display not assigned to a Pi'); return; }
-  log('Stopping geometry calibration on ' + pi.ip + '...');
+  log('Stopping calibration + re-initializing projector on ' + pi.ip + '...');
+  const btn = document.querySelector('.calib-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Stopping…'; }
+  let stopped = false;
   try {
     const r = await fetch('/api/stop_calibration', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
     });
     const data = await r.json();
+    (data.steps || []).forEach(s => log('  ' + s));
     log(data.ok ? 'Calibration stopped.' : 'Stop failed: ' + (data.error || ''));
+    stopped = !!data.ok;
   } catch (e) { log('Stop error: ' + e); }
+  if (stopped) calibrating = false;   // keep the red 'Stop' if it failed, so it can be retried
+  renderDeviceList();
 }
 
 async function startLickMonitor() {
@@ -1260,8 +1288,7 @@ function renderDisplayControls(dev) {
 
   return `
     <div class="device-controls">
-      <button class="calib-btn btn btn-green btn-sm" onclick="startCalibration()">Calibrate</button>
-      <button class="btn btn-red btn-sm" onclick="stopCalibration()">Stop Calib</button>
+      <button class="calib-btn btn ${calibrating ? 'btn-red' : 'btn-green'} btn-sm" onclick="toggleCalibration()">${calibrating ? 'Stop Calib' : 'Calibrate'}</button>
       <button class="warp-btn btn ${warpBtnClass} btn-sm" onclick="generateWarp()">${warpBtnText}</button>
       <button class="btn btn-orange btn-sm" onclick="intensityCal()">Intensity Cal</button>
       <button class="btn btn-blue btn-sm" onclick="testCheckers()">Test Checkers</button>

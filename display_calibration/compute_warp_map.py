@@ -242,14 +242,6 @@ def compute_inverse_map(geo, proj):
     A = geo['screen']['parabola_A']
     B = geo['screen']['parabola_B']
     res_w, res_h = proj['res']
-    alt_min = geo['screen']['altitude_min_deg']
-    alt_max = geo['screen']['altitude_max_deg']
-    # Usable-pixel rectangle from the landmark calibrator (where projector light actually
-    # falls on the physical screen). Replaces the old azimuth_max_deg gating — horizontal
-    # extent is now defined by the frame + ±90° landmarks, not a stored max azimuth.
-    cal = geo.get('calibration', {})
-    fx = int(cal.get('frame_x', 0))
-    fy = int(cal.get('frame_y', 0))
 
     az_map  = np.full((res_h, res_w), np.nan)
     alt_map = np.full((res_h, res_w), np.nan)
@@ -324,18 +316,85 @@ def compute_inverse_map(geo, proj):
     az_deg_arr  = np.degrees(az_rad)
     alt_deg_arr = np.degrees(alt_rad)
 
-    # Validity: t finite, in front of mouse, within the altitude band, and inside the
-    # usable-pixel rectangle (the frame marks pixels that land on the physical screen).
-    in_frame = (PX >= fx) & (PX < res_w - fx) & (PY >= fy) & (PY < res_h - fy)
-    hit = (t < 1e9) & disc_ok & in_frame & \
-          (alt_deg_arr >= alt_min) & (alt_deg_arr <= alt_max) & \
-          (ys > 0)   # must be in front of mouse
+    # Validity: the ray hits the screen in front of the mouse. NO azimuth/altitude clipping
+    # and NO frame gating here — the ±90°/altitude lines are references, not clips. The frame
+    # mask and the flip/offset orientation are applied afterwards (orient_maps), in display
+    # space, so the delivered warp fills the whole visible screen the user marked.
+    hit = (t < 1e9) & disc_ok & (ys > 0)
 
     az_map[hit]  = az_deg_arr[hit]
     alt_map[hit] = alt_deg_arr[hit]
     valid[hit]   = True
 
     return az_map, alt_map, valid
+
+
+def _shift_fill(a, dx, dy, fill):
+    """Shift a 2D/3D array by (dx cols, dy rows), filling vacated cells with `fill`
+    (no wrap-around)."""
+    out = np.full_like(a, fill)
+    h, w = a.shape[:2]
+    xs0, xs1 = max(0, -dx), min(w, w - dx)
+    ys0, ys1 = max(0, -dy), min(h, h - dy)
+    xd0, xd1 = max(0, dx), min(w, w + dx)
+    yd0, yd1 = max(0, dy), min(h, h + dy)
+    if xs1 > xs0 and ys1 > ys0:
+        out[yd0:yd1, xd0:xd1] = a[ys0:ys1, xs0:xs1]
+    return out
+
+
+def orient_maps(geo, az_map, alt_map, valid, px_map, py_map):
+    """Bake the calibration orientation into the maps and apply the usable frame in DISPLAY
+    space, exactly matching calib_geo's preview (flip the grid, blit at (offset_x, -offset_y),
+    draw the frame). After this the warp IS the full experiment transformation: az_map/valid
+    are in physical framebuffer space and valid_map == the visible screen the user marked."""
+    cal = geo.get('calibration', {})
+    res_w, res_h = geo['projector']['resolution']
+    flip_h = bool(cal.get('flip_h', False))
+    flip_v = bool(cal.get('flip_v', False))
+    ox = int(cal.get('offset_x', 0))
+    oy = int(cal.get('offset_y', 0))
+    fx = int(cal.get('frame_x', 0))
+    fy = int(cal.get('frame_y', 0))
+
+    def orient2d(a, fill):
+        if flip_h:
+            a = a[:, ::-1]
+        if flip_v:
+            a = a[::-1, :]
+        return _shift_fill(a, ox, -oy, fill)   # blit at (offset_x, -offset_y)
+
+    az_map = orient2d(az_map, np.nan)
+    alt_map = orient2d(alt_map, np.nan)
+    have = orient2d(valid.astype(np.int8), 0).astype(bool)   # where the ray-trace defined an angle
+
+    # The FRAME is the visible screen (user-marked); the ±90°/altitude lines are references,
+    # not clips. Fill EVERY frame pixel with an (az, alt): use the ray-trace where defined and
+    # nearest-extrapolate into the ray-miss / offset-vacated gaps, so the whole visible screen
+    # is covered by the warp (blank, stimulus, and checkers all fill it).
+    PX, PY = np.meshgrid(np.arange(res_w), np.arange(res_h))
+    in_frame = (PX >= fx) & (PX < res_w - fx) & (PY >= fy) & (PY < res_h - fy)
+    try:
+        from scipy import ndimage
+        if have.any():
+            idx = ndimage.distance_transform_edt(
+                ~have, return_distances=False, return_indices=True)
+            az_map = az_map[tuple(idx)]
+            alt_map = alt_map[tuple(idx)]
+        valid = in_frame
+    except Exception:
+        valid = have & in_frame   # no extrapolation available: keep the accurate region only
+    az_map = np.where(valid, az_map, np.nan)
+    alt_map = np.where(valid, alt_map, np.nan)
+
+    # forward pixel coords -> same display space (flip then offset)
+    if flip_h:
+        px_map = (res_w - 1) - px_map
+    if flip_v:
+        py_map = (res_h - 1) - py_map
+    px_map = px_map + ox
+    py_map = py_map - oy
+    return az_map, alt_map, valid, px_map, py_map
 
 
 def compute_forward_map(geo, proj,
@@ -447,21 +506,23 @@ def main(validate=False, geo_path=None):
 
     print("Computing inverse map (pixel → visual angle)...")
     az_map, alt_map, valid_map = compute_inverse_map(geo, proj)
-    coverage = valid_map.sum() / valid_map.size * 100
-    print(f"  Screen coverage: {coverage:.1f}% of pixels hit the screen")
 
     print("Computing forward map (visual angle → pixel)...")
     az_samples, alt_samples, px_map, py_map, fwd_valid = compute_forward_map(geo, proj)
-    fwd_coverage = fwd_valid.sum() / fwd_valid.size * 100
-    print(f"  Forward map coverage: {fwd_coverage:.1f}%")
+
+    print("Baking calibration orientation (flip/offset) + usable frame...")
+    az_map, alt_map, valid_map, px_map, py_map = orient_maps(
+        geo, az_map, alt_map, valid_map, px_map, py_map)
+    coverage = valid_map.sum() / valid_map.size * 100
+    print(f"  Visible-screen coverage: {coverage:.1f}% of pixels")
 
     print("Computing theoretical luminance correction...")
     az_sym = np.linspace(0, 105, 53)
     lum_gain = compute_theoretical_luminance_correction(geo, az_sym)
 
-    # Save. Carry the calibration orientation (flip/offset/frame) so the runtime renderer
-    # reproduces exactly what was tuned in calib_geo (the maps themselves stay model-space).
-    cal = geo.get('calibration', {})
+    # Save. Orientation (flip/offset) + usable frame are already BAKED into the maps by
+    # orient_maps, so warp_map.npz is the complete physical transformation — the runtime
+    # uses az_map/valid_map directly, no further orientation step.
     out_path = CAL_DIR / "warp_map.npz"
     np.savez(out_path,
              az_map=az_map,
@@ -472,23 +533,17 @@ def main(validate=False, geo_path=None):
              az_samples=az_samples,
              alt_samples=alt_samples,
              lum_az=az_sym,
-             lum_gain_theoretical=lum_gain,
-             flip_h=bool(cal.get('flip_h', False)),
-             flip_v=bool(cal.get('flip_v', False)),
-             offset_x=int(cal.get('offset_x', 0)),
-             offset_y=int(cal.get('offset_y', 0)),
-             frame_x=int(cal.get('frame_x', 0)),
-             frame_y=int(cal.get('frame_y', 0)))
+             lum_gain_theoretical=lum_gain)
     print(f"\nSaved: {out_path}")
 
     if validate:
         _plot_validation(az_map, alt_map, valid_map,
-                         az_samples, alt_samples, px_map, py_map,
+                         az_samples, alt_samples, px_map, py_map, fwd_valid,
                          az_sym, lum_gain, geo, proj)
 
 
 def _plot_validation(az_map, alt_map, valid_map,
-                     az_samples, alt_samples, px_map, py_map,
+                     az_samples, alt_samples, px_map, py_map, fwd_valid,
                      az_sym, lum_gain, geo, proj):
     import matplotlib.pyplot as plt
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))

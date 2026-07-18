@@ -396,6 +396,19 @@ def _display_thread_fn():
                     use_warp = cmd.get("apply_warp", True)
                     dev.show_checkers(use_warp=use_warp)
                     _display_result_q.put({"ok": True})
+            elif action == "reload_warp":
+                # Re-read warp_map.npz into the running Display so a freshly Generated warp
+                # takes effect WITHOUT a full re-init (load_warp caches self._warp in memory
+                # and never re-reads the file on its own).
+                warp_path = Path.home() / "rig" / "calibration" / "warp_map.npz"
+                if not dev:
+                    _display_result_q.put({"ok": True, "reloaded": False,
+                                           "message": "display not active"})
+                else:
+                    loaded = dev.load_warp(str(warp_path))
+                    _display_result_q.put({"ok": True, "reloaded": bool(loaded),
+                                           "message": ("warp reloaded" if loaded
+                                                       else "warp_map.npz not found")})
             elif action == "shutdown":
                 if dev:
                     dev.shutdown()
@@ -470,6 +483,16 @@ def test_checkers():
     """Show checkerboard pattern on display."""
     data = request.json or {}
     result = _display_command({"action": "checkers", "apply_warp": data.get("apply_warp", True)})
+    code = 200 if result.get("ok") else 500
+    return jsonify(result), code
+
+
+@app.route("/api/reload_warp", methods=["POST"])
+def reload_warp():
+    """Re-read warp_map.npz into the already-running display (after Generate Warp), without
+    a full re-init. Returns reloaded=False (still ok) if the display thread isn't active —
+    it will pick up the new warp on the next init_display."""
+    result = _display_command({"action": "reload_warp"})
     code = 200 if result.get("ok") else 500
     return jsonify(result), code
 

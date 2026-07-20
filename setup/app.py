@@ -277,6 +277,38 @@ def api_shutdown_pi():
     return jsonify({"ok": True})
 
 
+@app.route("/api/restart_pi", methods=["POST"])
+def api_restart_pi():
+    """Restart pi_api on one Pi (reloads deployed code without a full reboot) and wait for it
+    to respawn. Use when new code was deployed but the running process still has the old
+    modules cached in memory."""
+    data = request.json or {}
+    ip = data.get("ip")
+    if not ip:
+        return jsonify({"ok": False, "error": "no ip"}), 400
+    port = data.get("api_port", 5080)
+    steps = []
+    try:
+        requests.post(f"http://{ip}:{port}/api/restart", timeout=5)
+        steps.append("Restart requested (pi_api self-kills; systemd respawns)")
+        import time as _time
+        _time.sleep(2.0)          # let the old process exit first
+        back = False
+        for _ in range(12):
+            try:
+                if requests.get(f"http://{ip}:{port}/api/logs?n=1", timeout=2).ok:
+                    back = True
+                    break
+            except Exception:
+                pass
+            _time.sleep(1.0)
+        steps.append("pi_api back online" if back else
+                     "WARN pi_api did not respond after restart — re-check the Pi")
+        return jsonify({"ok": back, "steps": steps})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "steps": steps})
+
+
 @app.route("/api/deploy_pi", methods=["POST"])
 def api_deploy_pi():
     """Deploy code to Pi via REST API (after initial SSH install)."""

@@ -3,7 +3,7 @@ last_saved: "2026-04-08"
 
 # ── What to show ──
 stimulus:
-  background_gray: 0.5
+  background_gray: 0.75
   size_deg: 8.0
   duration_s: 2.0
   altitude_deg: 10.0

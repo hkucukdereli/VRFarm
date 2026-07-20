@@ -31,7 +31,7 @@ class Display(Device):
         return {
             "background_gray": {
                 "type": "float", "default": 0.0,
-                "label": "Background gray (-1..1)", "min": -1.0, "max": 1.0,
+                "label": "Background gray (0..1)", "min": 0.0, "max": 1.0,
             },
         }
 
@@ -88,18 +88,19 @@ class Display(Device):
         import pygame
         if self._screen is None:
             return
-        # Color conversion: PsychoPy [-1,1] range -> 8-bit RGB
-        bg_lin = (bg_gray + 1) / 2
+        # Gray = 0..1 luminance (0 = no light, 1 = max). The red LED is off, so fill
+        # green+blue only (R=0); value maps to G=B=value*255.
+        bg_lin = max(0.0, min(1.0, bg_gray))
         stim_lin = bg_lin + corr_contrast * (1 - bg_lin)
         rgb = max(0, min(255, int(stim_lin * 255)))
         bg_rgb = max(0, min(255, int(bg_lin * 255)))
         # Fill background
-        self._screen.fill((bg_rgb, bg_rgb, bg_rgb))
+        self._screen.fill((0, bg_rgb, bg_rgb))
         # Draw stimulus rectangle (centered at px_x, px_y)
         half = px_size / 2
         rect = pygame.Rect(int(px_x - half), int(px_y - half),
                            int(px_size), int(px_size))
-        self._screen.fill((rgb, rgb, rgb), rect)
+        self._screen.fill((0, rgb, rgb), rect)
         # Sync square for photodiode
         self._draw_sync_square(sync_square)
         pygame.display.flip()
@@ -109,19 +110,19 @@ class Display(Device):
         import pygame
         if self._screen is None:
             return
-        bg_lin = (self.bg_gray + 1) / 2
+        bg_lin = max(0.0, min(1.0, self.bg_gray))
         bg_rgb = max(0, min(255, int(bg_lin * 255)))
-        self._screen.fill((bg_rgb, bg_rgb, bg_rgb))
+        self._screen.fill((0, bg_rgb, bg_rgb))
         pygame.display.flip()
 
     def blank_with_gray(self, gray_value: float):
-        """Fill screen with arbitrary gray value (-1..1 range)."""
+        """Fill screen with an arbitrary gray value (0..1: 0 = darkest, 1 = brightest)."""
         import pygame
         if self._screen is None:
             return
-        lin = (gray_value + 1) / 2
+        lin = max(0.0, min(1.0, gray_value))
         rgb = max(0, min(255, int(lin * 255)))
-        self._screen.fill((rgb, rgb, rgb))
+        self._screen.fill((0, rgb, rgb))   # red LED off -> green+blue only
         pygame.display.flip()
 
     def load_warp(self, npz_path: str):
@@ -168,8 +169,8 @@ class Display(Device):
         az_map = self._warp["az_map"]
         alt_map = self._warp["alt_map"]
         valid = self._warp["valid_map"]
-        # PsychoPy [-1, 1] -> 8-bit (same mapping as show_rect)
-        bg_lin = (bg_gray + 1) / 2
+        # Gray 0..1 -> 8-bit (same mapping as show_rect)
+        bg_lin = max(0.0, min(1.0, bg_gray))
         stim_lin = bg_lin + corr_contrast * (1 - bg_lin)
         rgb = max(0, min(255, int(stim_lin * 255)))
         bg_rgb = max(0, min(255, int(bg_lin * 255)))
@@ -183,6 +184,7 @@ class Display(Device):
         lit = valid & (ang <= size_deg / 2.0)
         pixels = np.full((az_map.shape[0], az_map.shape[1], 3), bg_rgb, dtype=np.uint8)
         pixels[lit] = rgb
+        pixels[..., 0] = 0   # red LED off -> green+blue only (R=0)
         return pygame.surfarray.make_surface(pixels.transpose(1, 0, 2))
 
     def show_checkers(self, n: int = 8, use_warp: bool = True):
@@ -240,7 +242,9 @@ class Display(Device):
         pygame.display.flip()
 
     def _draw_sync_square(self, on: bool):
-        """Draw or clear a 40x40 red square at bottom-center (before flip)."""
+        """Draw or clear a 40x40 photodiode sync square at bottom-center (before flip).
+        Green+blue (R=0) so the photodiode actually sees it — the red LED is off, so a red
+        square would emit no light."""
         import pygame
         if self._screen is None:
             return
@@ -248,11 +252,11 @@ class Display(Device):
         sq = 40
         rect = pygame.Rect(w // 2 - sq // 2, h - sq, sq, sq)
         if on:
-            self._screen.fill((255, 0, 0), rect)
+            self._screen.fill((0, 255, 255), rect)   # max green+blue = strongest photodiode signal
         else:
-            bg_lin = (self.bg_gray + 1) / 2
+            bg_lin = max(0.0, min(1.0, self.bg_gray))
             bg_rgb = max(0, min(255, int(bg_lin * 255)))
-            self._screen.fill((bg_rgb, bg_rgb, bg_rgb), rect)
+            self._screen.fill((0, bg_rgb, bg_rgb), rect)
 
     def check(self) -> dict:
         try:

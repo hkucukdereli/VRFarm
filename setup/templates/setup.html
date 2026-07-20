@@ -147,6 +147,7 @@
 <script>
 let rig = null;
 let deviceSchemas = {};
+let catalogSel = '';        // remembered Device Catalog dropdown selection
 let deviceState = {};
 let warpExists = false;
 let piState = {};       // ip -> {checked: bool}
@@ -443,6 +444,29 @@ async function deployPi(idx) {
   }
 }
 
+// Restart pi_api on one Pi (reloads deployed code without a full reboot). Drops that Pi's
+// initialized devices — re-init projector/display after.
+async function restartPiApi(idx) {
+  const pi = rig.pis[idx];
+  if (!confirm(`Restart pi_api on ${pi.name}?\nReloads deployed code and drops its initialized devices (re-init projector + display after).`)) return;
+  _lockUI();
+  log(`Restarting pi_api on ${pi.name}...`);
+  try {
+    const r = await fetch('/api/restart_pi', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ip: pi.ip, api_port: rig.network.api_port})
+    });
+    const data = await r.json();
+    (data.steps || []).forEach(s => log('  ' + s));
+    // the restart drops this Pi's devices — reflect that so dots/controls aren't stale-green
+    (pi.devices || []).forEach(name => { if (deviceState[name]) deviceState[name].initialized = false; });
+    devicesInitialized = false;
+    log(data.ok ? `pi_api back online on ${pi.name} — re-initialize devices.`
+                : `pi_api on ${pi.name} may still be starting — re-check.`);
+  } catch (e) { log('Restart error: ' + e); }
+  finally { _unlockUI(); }
+}
+
 // ── Device management ──
 
 function toggleDevice(devName) {
@@ -554,7 +578,8 @@ async function blankDisplay() {
   const pi = getPiForDevice('display');
   if (!pi) { log('Display not assigned to a Pi'); return; }
   const grayInput = document.getElementById('blank-gray-value');
-  const gray = grayInput ? parseFloat(grayInput.value) : 0.0;
+  // Blank gray is a plain 0..1 value (0 = darkest, 1 = brightest); clamp to the range.
+  const gray = Math.max(0, Math.min(1, grayInput ? parseFloat(grayInput.value) : 0.0));
   const result = await proxyPi(pi.ip, '/api/blank_display', {gray_value: gray});
   log(result.ok ? `Display blanked (gray=${gray}).` : 'Failed: ' + (result.error || ''));
 }
@@ -1183,6 +1208,7 @@ function renderPiList() {
         <button class="btn btn-blue btn-sm" onclick="checkPi('${pi.ip}')">Check</button>
         <button class="btn btn-orange btn-sm" onclick="installPi(${idx})">Install</button>
         <button class="btn btn-green btn-sm" onclick="deployPi(${idx})">Deploy</button>
+        <button class="btn btn-yellow btn-sm" onclick="restartPiApi(${idx})">Restart API</button>
         <button class="btn btn-red btn-sm" onclick="rebootPi(${idx})">Reboot</button>
         <button class="btn btn-red btn-sm" onclick="shutdownPi(${idx})">Shutdown</button>
         <button class="btn btn-red btn-sm" onclick="removePi(${idx})">Remove</button>
@@ -1355,7 +1381,7 @@ function renderDisplayControls(dev) {
       <button class="btn btn-gray btn-sm" onclick="blankDisplay()">Blank</button>
       <div class="device-field">
         <label>Gray</label>
-        <input type="number" id="blank-gray-value" value="0.0" min="-1" max="1" step="0.1" style="width:60px">
+        <input type="number" id="blank-gray-value" value="0.0" min="0" max="1" step="0.01" style="width:60px">
       </div>
       <div class="device-field">
         <label style="display:inline; cursor:pointer">
@@ -1494,14 +1520,58 @@ function renderRewardControls(dev) {
 
 function renderDeviceCatalog() {
   const el = document.getElementById('device-catalog');
-  el.innerHTML = Object.entries(deviceSchemas).map(([name, s]) =>
-    `<div style="margin: 4px 0">
-       <span class="device-chip" onclick="toggleDevice('${name}')" style="cursor:pointer">
-         + ${s.label}
-       </span>
-       <span style="font-size:10px; color:#666">${s.io_type} | ${s.required_packages.join(', ')}</span>
-     </div>`
-  ).join('');
+  if (!el) return;
+  const entries = Object.entries(deviceSchemas);
+  if (!entries.length) { el.innerHTML = '<div style="color:#666">No devices defined</div>'; return; }
+  const opts = entries.map(([name, s]) => {
+    const inRig = (rig && rig.devices && rig.devices[name]) ? ' ✓' : '';
+    return `<option value="${name}">${s.label}${inRig}</option>`;
+  }).join('');
+  el.innerHTML = `
+    <select id="catalog-select" style="width:100%; margin-bottom:6px" onchange="updateCatalogInfo()">${opts}</select>
+    <div>
+      <button class="btn btn-green btn-sm" onclick="addDevice()">Add Device</button>
+      <button class="btn btn-red btn-sm" onclick="removeDevice()">Remove Device</button>
+    </div>
+    <div id="catalog-info" style="font-size:10px; color:#666; margin-top:5px"></div>`;
+  const sel = document.getElementById('catalog-select');
+  if (sel && catalogSel && deviceSchemas[catalogSel]) sel.value = catalogSel;
+  updateCatalogInfo();
+}
+
+function updateCatalogInfo() {
+  const sel = document.getElementById('catalog-select');
+  const info = document.getElementById('catalog-info');
+  if (!sel) return;
+  catalogSel = sel.value;
+  const s = deviceSchemas[catalogSel];
+  const inRig = (rig && rig.devices && rig.devices[catalogSel]) ? ' — already in rig' : '';
+  if (info) info.textContent = s ? `${s.io_type} | ${(s.required_packages || []).join(', ')}${inRig}` : '';
+}
+
+function addDevice() {
+  if (!rig) { log('Load or create a rig first.'); return; }
+  const sel = document.getElementById('catalog-select');
+  if (!sel || !sel.value) return;
+  const name = sel.value; catalogSel = name;
+  if (rig.devices[name]) { log((deviceSchemas[name] ? deviceSchemas[name].label : name) + ' is already in the rig.'); return; }
+  rig.devices[name] = { type: name, enabled: true };
+  log('Added ' + (deviceSchemas[name] ? deviceSchemas[name].label : name) + ' to the rig.');
+  renderDeviceCatalog();
+  renderAll();
+}
+
+function removeDevice() {
+  if (!rig) { log('Load or create a rig first.'); return; }
+  const sel = document.getElementById('catalog-select');
+  if (!sel || !sel.value) return;
+  const name = sel.value; catalogSel = name;
+  if (!rig.devices[name]) { log((deviceSchemas[name] ? deviceSchemas[name].label : name) + ' is not in the rig.'); return; }
+  delete rig.devices[name];
+  (rig.pis || []).forEach(pi => { pi.devices = (pi.devices || []).filter(d => d !== name); });
+  log('Removed ' + (deviceSchemas[name] ? deviceSchemas[name].label : name) + ' from the rig.');
+  renderDeviceCatalog();
+  renderAll();
 }
 
 // ── Log ──

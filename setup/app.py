@@ -673,6 +673,34 @@ def api_stop_calibration():
         return jsonify({"ok": False, "error": str(e), "steps": steps})
 
 
+_cwm_mod = None
+
+
+def _cwm():
+    """Lazily import display_calibration/compute_warp_map.py (numpy/scipy geometry)."""
+    global _cwm_mod
+    if _cwm_mod is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "compute_warp_map", str(GEO_DIR / "compute_warp_map.py"))
+        _cwm_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_cwm_mod)
+    return _cwm_mod
+
+
+@app.route("/api/derived_geometry", methods=["POST"])
+def api_derived_geometry():
+    """Az/alt range the warp actually fills for the given geometry (ray-traced within the
+    frame) — feeds the Display card's derived Az/Alt readouts."""
+    geo = (request.json or {}).get("geometry_data")
+    if not geo:
+        return jsonify({"ok": False, "error": "no geometry_data"}), 400
+    try:
+        return jsonify({"ok": True, **_cwm().derived_angle_ranges(geo)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
 @app.route("/api/check_warp")
 def api_check_warp():
     """Check if warp_map.npz exists on Leader Pi."""

@@ -332,12 +332,15 @@ def compute_inverse_map(geo, proj):
     az_deg_arr  = np.degrees(az_rad)
     alt_deg_arr = np.degrees(alt_rad)
 
-    # Validity: the ray hits the screen in front of the mouse. NO azimuth/altitude clipping
-    # and NO frame gating here — the ±90°/altitude lines are references, not clips. flip+offset
-    # are already baked into the pixel grid above; orient_maps only masks to the frame and
-    # fills any residual ray-miss holes. Angles are TRUE ray-traced values everywhere the
-    # (extrapolated-grid) ray meets the parabola, including the offset-vacated band.
-    hit = (t < 1e9) & disc_ok & (ys > 0)
+    # Validity: the projector ray meets the parabola at a real, in-front-of-the-lens point
+    # (t > 0). We DELIBERATELY allow ys <= 0 (screen points that wrap PAST ±90° azimuth,
+    # curving behind the mouse's coronal plane) — a parabolic screen physically continues
+    # there and a mouse's panoramic field sees it; the old `ys > 0` gate clamped azimuth at
+    # exactly ±90° (a flat band down each side edge). The closest positive-t root is the near
+    # screen surface, so the wrap is filled with true continuous azimuth. NO azimuth/altitude
+    # clipping and NO frame gating here — flip+offset are baked into the grid above; orient_maps
+    # masks to the frame and fills any residual ray-miss holes.
+    hit = (t < 1e9) & disc_ok
 
     az_map[hit]  = az_deg_arr[hit]
     alt_map[hit] = alt_deg_arr[hit]
@@ -388,6 +391,30 @@ def orient_maps(geo, az_map, alt_map, valid, px_map, py_map):
     px_map = px_map + ox
     py_map = py_map - oy
     return az_map, alt_map, valid, px_map, py_map
+
+
+def derived_angle_ranges(geo):
+    """Az/alt range the warp actually FILLS for `geo` — ray-traced within the usable frame.
+    Powers the setup UI's derived readouts. Azimuth is not a simple analytic function like
+    altitude (it comes from where the frame edges land on the parabola, incl. the wrap past
+    ±90°), so we run the real inverse map. Returns az/alt min/max deg (None if nothing fills)."""
+    import copy
+    g = normalize_geo(copy.deepcopy(geo))
+    proj = build_projector(g)
+    az_map, alt_map, valid = compute_inverse_map(g, proj)   # already display-space (flip/offset baked)
+    cal = g.get('calibration', {})
+    res_w, res_h = g['projector']['resolution']
+    fx, fy = int(cal.get('frame_x', 0)), int(cal.get('frame_y', 0))
+    PX, PY = np.meshgrid(np.arange(res_w), np.arange(res_h))
+    m = (valid & np.isfinite(az_map) &
+         (PX >= fx) & (PX < res_w - fx) & (PY >= fy) & (PY < res_h - fy))
+    if not m.any():
+        return {"az_min_deg": None, "az_max_deg": None,
+                "alt_min_deg": None, "alt_max_deg": None}
+    return {"az_min_deg": round(float(az_map[m].min()), 1),
+            "az_max_deg": round(float(az_map[m].max()), 1),
+            "alt_min_deg": round(float(alt_map[m].min()), 1),
+            "alt_max_deg": round(float(alt_map[m].max()), 1)}
 
 
 def compute_forward_map(geo, proj,

@@ -155,6 +155,7 @@ let devicesInitialized = false;
 let geoFiles = [];          // available geometry YAML filenames
 let geoData = null;         // loaded geometry object
 let geoCurrentName = '';    // currently loaded filename
+let derivedAz = { min: null, max: null };  // az range the warp fills (server ray-trace)
 
 fetch('/api/device_schemas').then(r => r.json()).then(schemas => {
   deviceSchemas = schemas;
@@ -607,7 +608,33 @@ async function loadGeometry(name) {
     geoData = data.geometry;
     geoCurrentName = data.name;
     renderDeviceList();
+    refreshDerivedAz();
   } catch (e) { log('Geometry load error: ' + e); }
+}
+
+// Azimuth range the warp fills is not analytic (it's where the frame edges land on the
+// parabola, incl. the wrap past ±90°), so compute it server-side (debounced) and drop it
+// into the disabled Az min/max fields.
+let _derivedAzTimer = null;
+function refreshDerivedAz() {
+  clearTimeout(_derivedAzTimer);
+  _derivedAzTimer = setTimeout(async () => {
+    if (!geoData) return;
+    try {
+      const r = await fetch('/api/derived_geometry', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({geometry_data: geoData})
+      });
+      const d = await r.json();
+      if (d.ok) {
+        derivedAz = {min: d.az_min_deg, max: d.az_max_deg};
+        const a = document.getElementById('az-min-derived');
+        const b = document.getElementById('az-max-derived');
+        if (a) a.value = derivedAz.min ?? '';
+        if (b) b.value = derivedAz.max ?? '';
+      }
+    } catch (e) { /* keep last value */ }
+  }, 400);
 }
 
 async function saveGeometry(name) {
@@ -662,6 +689,7 @@ function updateGeoField(section, key, value) {
     deriveAltitudes();
     renderDeviceList();
   }
+  refreshDerivedAz();   // any screen/projector param can shift the filled azimuth range
 }
 
 // azimuth_height (eye/az-line above screen bottom) DRIVES the visual field:
@@ -678,6 +706,7 @@ function updateAzimuthHeight(h) {
   geoData.screen.azimuth_height = h;
   deriveAltitudes();
   renderDeviceList();
+  refreshDerivedAz();
 }
 
 async function intensityCal() {
@@ -1260,6 +1289,9 @@ function renderDisplayControls(dev) {
           <input type="number" value="${azH}" step="0.1" style="width:70px"
                  onchange="updateAzimuthHeight(parseFloat(this.value))">
         </div>
+      </div>
+      <div class="device-controls">
+        <span style="font-size:10px; color:#888; min-width:60px">VISUAL SPACE</span>
         <div class="device-field">
           <label>Alt min° (derived)</label>
           <input type="number" value="${s.altitude_min_deg ?? ''}" step="1" style="width:70px" disabled>
@@ -1267,6 +1299,14 @@ function renderDisplayControls(dev) {
         <div class="device-field">
           <label>Alt max° (derived)</label>
           <input type="number" value="${s.altitude_max_deg ?? ''}" step="1" style="width:70px" disabled>
+        </div>
+        <div class="device-field">
+          <label>Az min° (derived)</label>
+          <input type="number" id="az-min-derived" value="${derivedAz.min ?? ''}" step="1" style="width:70px" disabled>
+        </div>
+        <div class="device-field">
+          <label>Az max° (derived)</label>
+          <input type="number" id="az-max-derived" value="${derivedAz.max ?? ''}" step="1" style="width:70px" disabled>
         </div>
       </div>
       <div class="device-controls">

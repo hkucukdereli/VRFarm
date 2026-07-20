@@ -74,8 +74,9 @@ class Display(Device):
 
     def show_rect(self, px_x: float, px_y: float, px_size: float,
                   corr_contrast: float, bg_gray: float,
-                  sync_square: bool = False):
-        """Draw a gray rectangle at pixel coordinates and flip."""
+                  sync_square: bool = False, shape: str = "square"):
+        """Draw a stimulus (square or circle) at pixel coordinates and flip. Flat, pixel-space
+        fallback used when no warp is loaded (the spherical path handles the real experiment)."""
         import pygame
         if self._screen is None:
             return
@@ -87,11 +88,14 @@ class Display(Device):
         bg_rgb = max(0, min(255, int(bg_lin * 255)))
         # Fill background
         self._screen.fill((0, bg_rgb, bg_rgb))
-        # Draw stimulus rectangle (centered at px_x, px_y)
+        # Draw stimulus (centered at px_x, px_y)
         half = px_size / 2
         rect = pygame.Rect(int(px_x - half), int(px_y - half),
                            int(px_size), int(px_size))
-        self._screen.fill((0, rgb, rgb), rect)
+        if str(shape).lower() == "circle":
+            pygame.draw.ellipse(self._screen, (0, rgb, rgb), rect)
+        else:
+            self._screen.fill((0, rgb, rgb), rect)
         # Photodiode sync: red flood of the invisible area (no-op if no warp loaded)
         self._draw_sync_border(sync_square)
         pygame.display.flip()
@@ -130,33 +134,35 @@ class Display(Device):
 
     def show_patch_spherical(self, az_deg: float, alt_deg: float, size_deg: float,
                              corr_contrast: float, bg_gray: float,
-                             sync_square: bool = False):
+                             sync_square: bool = False, shape: str = "square"):
         """Render a stimulus patch in true visual-angle space through the warp map, so it
         subtends `size_deg` at any azimuth/altitude and is shaped to the screen curvature.
-        Surfaces are cached per (az, alt, size, contrast, bg) — positions recur every block,
-        so a trial re-blits a prebuilt surface. Silently no-ops if no warp is loaded (the
-        follower falls back to show_rect)."""
+        `shape` is "square" or "circle". Surfaces are cached per (az, alt, size, contrast, bg,
+        shape) — positions recur every block, so a trial re-blits a prebuilt surface. Silently
+        no-ops if no warp is loaded (the follower falls back to show_rect)."""
         import pygame
         if self._screen is None or self._warp is None:
             return
         key = (round(float(az_deg), 2), round(float(alt_deg), 2),
                round(float(size_deg), 2), round(float(corr_contrast), 4),
-               round(float(bg_gray), 4))
+               round(float(bg_gray), 4), str(shape))
         surf = self._patch_cache.get(key)
         if surf is None:
             surf = self._build_patch_surface(az_deg, alt_deg, size_deg,
-                                             corr_contrast, bg_gray)
+                                             corr_contrast, bg_gray, shape)
             self._patch_cache[key] = surf
         self._screen.blit(surf, (0, 0))
         self._draw_sync_border(sync_square)
         pygame.display.flip()
 
-    def _build_patch_surface(self, az0, alt0, size_deg, corr_contrast, bg_gray):
-        """Compose the full (H, W) framebuffer for one patch: a bright SQUARE stimulus over a
-        darker background, both green+blue only (R=0). The square subtends `size_deg` in both
-        azimuth and altitude (a visual-angle square, shaped to the screen curvature by the
-        warp). The invisible area (outside the marked visible screen, ~valid_map) is left BLACK
-        — it's off-screen and reserved for the red photodiode flood (see _draw_sync_border)."""
+    def _build_patch_surface(self, az0, alt0, size_deg, corr_contrast, bg_gray,
+                             shape="square"):
+        """Compose the full (H, W) framebuffer for one patch: a bright stimulus over a darker
+        background, both green+blue only (R=0). `shape` is "square" (within size_deg/2 in BOTH
+        azimuth and altitude) or "circle" (within radius size_deg/2 in the az/alt plane) — a
+        visual-angle shape, warp-shaped to the screen curvature. The invisible area (outside the
+        marked visible screen, ~valid_map) is left BLACK — it's off-screen and reserved for the
+        red photodiode flood (see _draw_sync_border)."""
         import numpy as np
         import pygame
         az_map = self._warp["az_map"]
@@ -167,9 +173,15 @@ class Display(Device):
         stim_lin = bg_lin + corr_contrast * (1 - bg_lin)
         rgb = max(0, min(255, int(stim_lin * 255)))
         bg_rgb = max(0, min(255, int(bg_lin * 255)))
-        # Square in visual-angle space: within size_deg/2 in BOTH azimuth and altitude.
+        # Stimulus shape in visual-angle space, radius/half-side = size_deg/2.
         half = size_deg / 2.0
-        lit = valid & (np.abs(az_map - az0) <= half) & (np.abs(alt_map - alt0) <= half)
+        daz = az_map - az0
+        dalt = alt_map - alt0
+        if str(shape).lower() == "circle":
+            inside = (daz * daz + dalt * dalt) <= half * half
+        else:
+            inside = (np.abs(daz) <= half) & (np.abs(dalt) <= half)
+        lit = valid & inside
         # Green+blue only: G=B=value, R=0. Visible area gets background/stimulus; the invisible
         # off-screen area stays (0,0,0) so the red sync flood has a dark baseline.
         gb = np.where(lit, rgb, bg_rgb).astype(np.uint8)

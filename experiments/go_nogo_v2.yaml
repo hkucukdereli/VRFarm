@@ -6,6 +6,7 @@ last_saved: "2026-04-08"
 stimulus:
   background_gray: 0.5
   size_deg: 8.0
+  shape: square
   duration_s: 2.0
   altitude_deg: 49.0
   go_rule: left

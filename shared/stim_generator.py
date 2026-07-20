@@ -170,6 +170,7 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str) -> dict:
     stim_cfg = task_config["stimulus"]
     bg = stim_cfg.get("background_gray", 0.0)
     duration = stim_cfg.get("duration_s", 2.0)
+    shape = str(stim_cfg.get("shape", "square")).lower()
     proj_res = (1920, 1080)
 
     # Output arrays
@@ -267,6 +268,7 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str) -> dict:
         block_start_indices=block_start_indices,
         global_delay=global_delay,
         background_gray=np.array([bg]),
+        shape=np.array([shape]),
         n_trials=np.array([n]),
         sync_square_every_n=np.array([sync_every_n], dtype=np.int32),
     )

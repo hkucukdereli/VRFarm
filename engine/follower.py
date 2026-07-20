@@ -149,6 +149,7 @@ class Follower:
 
         corr_contrast = float(self.stims["corr_contrast"][trial])
         bg_gray = float(self.stims["background_gray"][0])
+        shape = str(self.stims["shape"][0]) if "shape" in self.stims else "square"
 
         # Duration from stim params (added by updated stim_generator)
         if "duration_s" in self.stims:
@@ -167,7 +168,7 @@ class Follower:
 
             def draw(sync):
                 display.show_patch_spherical(az, alt, size_deg, corr_contrast,
-                                             bg_gray, sync_square=sync)
+                                             bg_gray, sync_square=sync, shape=shape)
         else:
             px_x = float(self.stims["px_x"][trial])
             px_y = float(self.stims["px_y"][trial])
@@ -175,7 +176,7 @@ class Follower:
 
             def draw(sync):
                 display.show_rect(px_x, px_y, px_size, corr_contrast,
-                                  bg_gray, sync_square=sync)
+                                  bg_gray, sync_square=sync, shape=shape)
 
         if self._sync_every_n > 0:
             # Photodiode sync: per-frame loop, patch ON every Nth frame

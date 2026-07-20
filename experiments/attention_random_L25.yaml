@@ -2,6 +2,7 @@ last_saved: '2026-04-08'
 stimulus:
   background_gray: 0.75
   size_deg: 4
+  shape: square
   duration_s: 2
   altitude_deg: 10
   go_rule: all

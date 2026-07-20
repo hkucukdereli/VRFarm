@@ -720,13 +720,18 @@ async function startSession() {
       const snum = document.getElementById('session-num').value;
       document.getElementById('mv-session-id').textContent = `${sid} #${snum}`;
       document.getElementById('session-start-time').textContent = 'started ' + new Date().toLocaleTimeString();
+      // Seed the grace-period countdown inside the GO button; 'countdown' SSE
+      // events tick it down and 'experiment_start' restores it to GO.
+      const grace = parseInt(document.getElementById('grace-period').value) || 0;
+      btn.textContent = grace > 0 ? String(grace) : 'GO';
     } else {
       log('Start failed: ' + (data.error || ''));
+      btn.textContent = 'GO';
     }
   } catch (e) {
     log('Start error: ' + e.message);
+    btn.textContent = 'GO';
   }
-  btn.textContent = 'GO';
   _unlockUI();
 }
 
@@ -741,6 +746,7 @@ async function stopSession() {
   stopAllLive();
   if (eventSource) { eventSource.close(); eventSource = null; }
   btn.textContent = 'STOP';
+  document.getElementById('btn-go').textContent = 'GO';  // clear any leftover countdown
   _unlockUI();
   log('Session stopped.');
 }
@@ -819,6 +825,7 @@ function handleEvent(evt) {
       sessionStartTime = Date.now();
       trialStartTime = null;
       itiStartTime = null;
+      document.getElementById('btn-go').textContent = 'GO';  // grace done
       log('Experiment started.');
       const sid = document.getElementById('subject-id').value;
       const snum = document.getElementById('session-num').value;
@@ -842,12 +849,16 @@ function handleEvent(evt) {
       if (rasterLive) { photodiodeEvents.push({t: evt.t}); updateRasterInfo(); }
       break;
     case 'countdown':
+      // Grace-period tick — show whole seconds remaining inside the GO button.
+      document.getElementById('btn-go').textContent =
+        String(Math.max(0, Math.ceil(evt.remaining)));
       break;
     case 'iti_restart':
       itiStartTime = Date.now();
       log('ITI restarted (excess licking)');
       break;
     case 'session_end':
+      document.getElementById('btn-go').textContent = 'GO';  // clear any leftover countdown
       log(`Session ended (${evt.n_completed}/${evt.n_planned} trials).`);
       setPhase('ended');
       stopClock();
@@ -1220,8 +1231,8 @@ function updateButtons() {
 function log(msg) {
   const el = document.getElementById('log');
   const ts = new Date().toLocaleTimeString();
-  el.innerHTML += `<div>[${ts}] ${msg}</div>`;
-  el.scrollTop = el.scrollHeight;
+  el.insertAdjacentHTML('afterbegin', `<div>[${ts}] ${msg}</div>`);
+  el.scrollTop = 0;
 }
 
 // ── Quit ──

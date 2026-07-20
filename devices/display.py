@@ -12,16 +12,6 @@ from __future__ import annotations
 from .base import Device, DeviceInfo, IOType, register_device
 
 
-def _unit_dir(az_deg, alt_deg):
-    """Unit gaze vector for (azimuth, altitude), matching compute_warp_map's convention
-    (x=lateral, y=forward, z=up; az=0 forward, +right; alt=0 eye level)."""
-    import numpy as np
-    az = np.radians(az_deg)
-    alt = np.radians(alt_deg)
-    ca = np.cos(alt)
-    return (np.sin(az) * ca, np.cos(az) * ca, np.sin(alt))
-
-
 @register_device
 class Display(Device):
     info = DeviceInfo("display", "Stimulus Display", IOType.HDMI, ["pygame"])
@@ -42,6 +32,7 @@ class Display(Device):
         self._screen = None
         self._warp = None
         self._patch_cache = {}
+        self._sync_surf = None   # red photodiode flood for the invisible (off-screen) area
 
     def start_display(self):
         """Initialize pygame and open fullscreen window.
@@ -101,8 +92,8 @@ class Display(Device):
         rect = pygame.Rect(int(px_x - half), int(px_y - half),
                            int(px_size), int(px_size))
         self._screen.fill((0, rgb, rgb), rect)
-        # Sync square for photodiode
-        self._draw_sync_square(sync_square)
+        # Photodiode sync: red flood of the invisible area (no-op if no warp loaded)
+        self._draw_sync_border(sync_square)
         pygame.display.flip()
 
     def blank(self):
@@ -133,6 +124,7 @@ class Display(Device):
         if p.exists():
             self._warp = np.load(str(p))
             self._patch_cache = {}
+            self._sync_surf = None
             return True
         return False
 
@@ -156,14 +148,15 @@ class Display(Device):
                                              corr_contrast, bg_gray)
             self._patch_cache[key] = surf
         self._screen.blit(surf, (0, 0))
-        self._draw_sync_square(sync_square)
+        self._draw_sync_border(sync_square)
         pygame.display.flip()
 
     def _build_patch_surface(self, az0, alt0, size_deg, corr_contrast, bg_gray):
-        """Compose the full (H, W) framebuffer for one patch: background across the whole
-        visible screen, stimulus where the pixel's visual direction is within size_deg/2
-        (great-circle) of (az0, alt0) and on the screen. The warp is already oriented
-        (flip/offset baked in) and valid_map == the visible screen."""
+        """Compose the full (H, W) framebuffer for one patch: a bright SQUARE stimulus over a
+        darker background, both green+blue only (R=0). The square subtends `size_deg` in both
+        azimuth and altitude (a visual-angle square, shaped to the screen curvature by the
+        warp). The invisible area (outside the marked visible screen, ~valid_map) is left BLACK
+        — it's off-screen and reserved for the red photodiode flood (see _draw_sync_border)."""
         import numpy as np
         import pygame
         az_map = self._warp["az_map"]
@@ -174,17 +167,15 @@ class Display(Device):
         stim_lin = bg_lin + corr_contrast * (1 - bg_lin)
         rgb = max(0, min(255, int(stim_lin * 255)))
         bg_rgb = max(0, min(255, int(bg_lin * 255)))
-        # great-circle angular distance from (az0, alt0) to each pixel's (az, alt)
-        d = _unit_dir(az0, alt0)
-        azr = np.radians(np.where(valid, az_map, 0.0))
-        altr = np.radians(np.where(valid, alt_map, 0.0))
-        ca = np.cos(altr)
-        dot = np.sin(azr) * ca * d[0] + np.cos(azr) * ca * d[1] + np.sin(altr) * d[2]
-        ang = np.degrees(np.arccos(np.clip(dot, -1.0, 1.0)))
-        lit = valid & (ang <= size_deg / 2.0)
-        pixels = np.full((az_map.shape[0], az_map.shape[1], 3), bg_rgb, dtype=np.uint8)
-        pixels[lit] = rgb
-        pixels[..., 0] = 0   # red LED off -> green+blue only (R=0)
+        # Square in visual-angle space: within size_deg/2 in BOTH azimuth and altitude.
+        half = size_deg / 2.0
+        lit = valid & (np.abs(az_map - az0) <= half) & (np.abs(alt_map - alt0) <= half)
+        # Green+blue only: G=B=value, R=0. Visible area gets background/stimulus; the invisible
+        # off-screen area stays (0,0,0) so the red sync flood has a dark baseline.
+        gb = np.where(lit, rgb, bg_rgb).astype(np.uint8)
+        pixels = np.zeros((az_map.shape[0], az_map.shape[1], 3), dtype=np.uint8)
+        pixels[valid, 1] = gb[valid]
+        pixels[valid, 2] = gb[valid]
         return pygame.surfarray.make_surface(pixels.transpose(1, 0, 2))
 
     def show_checkers(self, n: int = 8, use_warp: bool = True):
@@ -241,22 +232,37 @@ class Display(Device):
         self._screen.blit(surf, (0, 0))
         pygame.display.flip()
 
-    def _draw_sync_square(self, on: bool):
-        """Draw or clear a 40x40 photodiode sync square at bottom-center (before flip).
-        Green+blue (R=0) so the photodiode actually sees it — the red LED is off, so a red
-        square would emit no light."""
+    def _draw_sync_border(self, on: bool):
+        """Photodiode sync: when `on`, flood the INVISIBLE area (projector pixels outside the
+        marked visible screen, ~valid_map) with max red. The visible stimulus/background is
+        green+blue only (R=0), so red is reserved for the off-screen photodiode zone and never
+        reaches the mouse's visual field. When off, nothing is drawn — the patch surface already
+        left the invisible area black, so the photodiode sees a clean red pulse (see
+        _show_synced: ON every Nth frame). No-op on the flat fallback (no warp/valid_map)."""
         import pygame
-        if self._screen is None:
+        if self._screen is None or self._warp is None or not on:
             return
-        w, h = self.resolution
-        sq = 40
-        rect = pygame.Rect(w // 2 - sq // 2, h - sq, sq, sq)
-        if on:
-            self._screen.fill((0, 255, 255), rect)   # max green+blue = strongest photodiode signal
-        else:
-            bg_lin = max(0.0, min(1.0, self.bg_gray))
-            bg_rgb = max(0, min(255, int(bg_lin * 255)))
-            self._screen.fill((0, bg_rgb, bg_rgb), rect)
+        surf = self._sync_border_surface()
+        if surf is not None:
+            self._screen.blit(surf, (0, 0))
+
+    def _sync_border_surface(self):
+        """Cached full-screen surface: max red where the pixel is off the visible screen
+        (~valid_map), transparent (black colorkey) elsewhere, so one blit reddens only the
+        invisible area and leaves the visible green+blue patch untouched."""
+        import numpy as np
+        import pygame
+        if self._sync_surf is not None:
+            return self._sync_surf
+        if self._warp is None:
+            return None
+        valid = self._warp["valid_map"]
+        px = np.zeros((valid.shape[0], valid.shape[1], 3), dtype=np.uint8)
+        px[~valid, 0] = 255   # max red in the invisible (off-screen) area
+        surf = pygame.surfarray.make_surface(px.transpose(1, 0, 2))
+        surf.set_colorkey((0, 0, 0))   # black = transparent -> only the red border paints
+        self._sync_surf = surf
+        return self._sync_surf
 
     def check(self) -> dict:
         try:

@@ -170,6 +170,7 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str) -> dict:
     stim_cfg = task_config["stimulus"]
     bg = stim_cfg.get("background_gray", 0.0)
     duration = stim_cfg.get("duration_s", 2.0)
+    shape = str(stim_cfg.get("shape", "square")).lower()
     proj_res = (1920, 1080)
 
     # Output arrays
@@ -184,6 +185,9 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str) -> dict:
     corr_contrast = np.zeros(n, dtype=np.float32)
     duration_s = np.full(n, duration, dtype=np.float32)
     bg_gray = np.full(n, bg, dtype=np.float32)
+    # visual-angle size per trial — drives the follower's spherical renderer (px_* is
+    # kept for logging and the no-warp fallback)
+    stim_size_deg = np.full(n, float(stim_cfg.get("size_deg", 10.0)), dtype=np.float32)
 
     for i, t in enumerate(trials):
         trial_idx[i] = t["trial_idx"]
@@ -252,6 +256,7 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str) -> dict:
         px_x=px_x,
         px_y=px_y,
         px_size=px_size,
+        stim_size_deg=stim_size_deg,
         corr_contrast=corr_contrast,
         duration_s=duration_s,
         bg_gray=bg_gray,
@@ -263,6 +268,7 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str) -> dict:
         block_start_indices=block_start_indices,
         global_delay=global_delay,
         background_gray=np.array([bg]),
+        shape=np.array([shape]),
         n_trials=np.array([n]),
         sync_square_every_n=np.array([sync_every_n], dtype=np.int32),
     )

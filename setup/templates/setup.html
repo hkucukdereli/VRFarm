@@ -10,7 +10,7 @@
   h1 { font-size: 18px; margin-bottom: 12px; color: #fff; }
   h3 { font-size: 13px; margin-bottom: 6px; color: #aaa; text-transform: uppercase; letter-spacing: 1px; }
 
-  .grid { display: grid; grid-template-columns: 390px 1fr; gap: 16px; }
+  .grid { display: grid; grid-template-columns: 350px 1fr; gap: 16px; }
 
   .card { background: #16213e; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
   label { display: block; font-size: 11px; color: #888; margin-bottom: 2px; margin-top: 6px; }
@@ -51,10 +51,17 @@
   .device-card { background: #0f3460; border-radius: 6px; padding: 10px; margin-bottom: 8px; }
   .device-card h4 { font-size: 12px; color: #ccc; margin-bottom: 4px; }
   .device-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+  /* Wraps a device's params + action buttons; disabled until Initialize is first pressed */
+  .device-fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+  .device-fieldset:disabled { opacity: 0.55; }
   .device-field { display: inline-flex; align-items: center; gap: 4px; }
   .device-field label { margin: 0; font-size: 10px; white-space: nowrap; }
   .device-field input, .device-field select { width: auto; min-width: 60px; max-width: 120px;
     padding: 3px 6px; font-size: 12px; }
+  /* Geometry param rows (SCREEN/VISUAL SPACE/PROJECTOR): tighter so each fits on one line */
+  .geo-row { gap: 6px; }
+  .geo-row .device-field input { min-width: 0; width: 76px; }
+  .geo-label { font-size: 10px; color: #888; min-width: 42px; }
 
   .cal-table { margin-top: 6px; border-collapse: collapse; font-size: 11px; }
   .cal-table th { color: #888; text-align: left; padding: 2px 6px; font-weight: 500; }
@@ -147,6 +154,7 @@
 <script>
 let rig = null;
 let deviceSchemas = {};
+let catalogSel = '';        // remembered Device Catalog dropdown selection
 let deviceState = {};
 let warpExists = false;
 let piState = {};       // ip -> {checked: bool}
@@ -155,6 +163,7 @@ let devicesInitialized = false;
 let geoFiles = [];          // available geometry YAML filenames
 let geoData = null;         // loaded geometry object
 let geoCurrentName = '';    // currently loaded filename
+let derivedAz = { min: null, max: null };  // az range the warp fills (server ray-trace)
 
 fetch('/api/device_schemas').then(r => r.json()).then(schemas => {
   deviceSchemas = schemas;
@@ -307,11 +316,22 @@ async function createRig() {
 
 async function saveRig() {
   if (!rig) return;
+  // Save rig hardware config (cheese.yaml) ...
   await fetch('/api/save_rig', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(rig)
   });
-  log('Saved rig: ' + rig.name);
+  // ... and any edited geometry to its own file (rig_geometry.yaml), one unified Save.
+  if (geoData && geoCurrentName) {
+    const r = await fetch('/api/save_geometry', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: geoCurrentName, geometry: geoData})
+    });
+    const d = await r.json();
+    log('Saved rig: ' + rig.name + (d.ok ? ' + ' + geoCurrentName : ''));
+  } else {
+    log('Saved rig: ' + rig.name);
+  }
 }
 
 // ── Pi management ──
@@ -414,10 +434,44 @@ async function deployPi(idx) {
     });
     const data = await r.json();
     (data.steps || []).forEach(s => log('  ' + s));
-    log(data.ok ? 'Deploy complete.' : 'Deploy failed: ' + data.error);
+    if (data.ok) {
+      log('Deploy complete.');
+      // Deploy restarts pi_api, which drops that Pi's initialized devices. Reset their init
+      // state so the dots/controls aren't stale-green — the user must re-Initialize.
+      (pi.devices || []).forEach(name => {
+        if (deviceState[name]) deviceState[name].initialized = false;
+      });
+      devicesInitialized = false;
+      log('  pi_api restarted — devices dropped; click Initialize to re-init.');
+    } else {
+      log('Deploy failed: ' + data.error);
+    }
   } finally {
     _unlockUI();
   }
+}
+
+// Restart pi_api on one Pi (reloads deployed code without a full reboot). Drops that Pi's
+// initialized devices — re-init projector/display after.
+async function restartPiApi(idx) {
+  const pi = rig.pis[idx];
+  if (!confirm(`Restart pi_api on ${pi.name}?\nReloads deployed code and drops its initialized devices (re-init projector + display after).`)) return;
+  _lockUI();
+  log(`Restarting pi_api on ${pi.name}...`);
+  try {
+    const r = await fetch('/api/restart_pi', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ip: pi.ip, api_port: rig.network.api_port})
+    });
+    const data = await r.json();
+    (data.steps || []).forEach(s => log('  ' + s));
+    // the restart drops this Pi's devices — reflect that so dots/controls aren't stale-green
+    (pi.devices || []).forEach(name => { if (deviceState[name]) deviceState[name].initialized = false; });
+    devicesInitialized = false;
+    log(data.ok ? `pi_api back online on ${pi.name} — re-initialize devices.`
+                : `pi_api on ${pi.name} may still be starting — re-check.`);
+  } catch (e) { log('Restart error: ' + e); }
+  finally { _unlockUI(); }
 }
 
 // ── Device management ──
@@ -473,6 +527,24 @@ async function initDevices() {
   }
 }
 
+// Reinitialize just one device (display or camera) from its card, without re-initing the rig.
+async function reinitDevice(name) {
+  _lockUI();
+  log('Reinitializing ' + name + '...');
+  try {
+    const r = await fetch('/api/reinit_device', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({device: name})
+    });
+    const data = await r.json();
+    (data.steps || []).forEach(s => log('  ' + s));
+    deviceState[name] = deviceState[name] || {};
+    deviceState[name].initialized = !!data.ok;
+    log(data.ok ? (name + ' reinitialized.') : (name + ' reinit failed: ' + (data.error || '')));
+  } catch (e) { log('Reinit error: ' + e); }
+  finally { _unlockUI(); }
+}
+
 // ── Device-specific actions ──
 
 async function startCameraStream() {
@@ -513,7 +585,8 @@ async function blankDisplay() {
   const pi = getPiForDevice('display');
   if (!pi) { log('Display not assigned to a Pi'); return; }
   const grayInput = document.getElementById('blank-gray-value');
-  const gray = grayInput ? parseFloat(grayInput.value) : 0.0;
+  // Blank gray is a plain 0..1 value (0 = darkest, 1 = brightest); clamp to the range.
+  const gray = Math.max(0, Math.min(1, grayInput ? parseFloat(grayInput.value) : 0.0));
   const result = await proxyPi(pi.ip, '/api/blank_display', {gray_value: gray});
   log(result.ok ? `Display blanked (gray=${gray}).` : 'Failed: ' + (result.error || ''));
 }
@@ -525,21 +598,32 @@ async function checkWarp() {
     warpExists = data.exists;
   } catch (e) { warpExists = false; }
   await loadGeoList();
-  if (!geoData && geoFiles.length) await loadGeometry(geoFiles[0]);
+  // Load the geometry file this rig points to (cheese.yaml -> display.geometry_file).
+  const want = (rig && rig.devices && rig.devices.display
+                && rig.devices.display.geometry_file) || 'rig_geometry.yaml';
+  const name = geoFiles.includes(want) ? want : (geoFiles[0] || 'rig_geometry.yaml');
+  if (geoFiles.length) await loadGeometry(name);
   else renderDeviceList();
+}
+
+// Dropdown: pick which geometry file this rig uses; persisted on Save Rig.
+function selectGeometry(name) {
+  if (rig && rig.devices && rig.devices.display) {
+    rig.devices.display.geometry_file = name;
+  }
+  loadGeometry(name);
 }
 
 async function generateWarp() {
   // Save current geometry first if modified
   if (geoData && geoCurrentName) await saveGeometry();
-  const geoPath = geoCurrentName ? `display_calibration/${geoCurrentName}` : '';
   log('Generating warp map...');
   const btn = document.querySelector('.warp-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Generating...'; }
   try {
     const r = await fetch('/api/generate_warp', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({geometry_path: geoPath || undefined})
+      body: JSON.stringify({geometry: geoCurrentName || undefined})
     });
     const data = await r.json();
     (data.steps || []).forEach(s => log('  ' + s));
@@ -574,7 +658,33 @@ async function loadGeometry(name) {
     geoData = data.geometry;
     geoCurrentName = data.name;
     renderDeviceList();
+    refreshDerivedAz();
   } catch (e) { log('Geometry load error: ' + e); }
+}
+
+// Azimuth range the warp fills is not analytic (it's where the frame edges land on the
+// parabola, incl. the wrap past ±90°), so compute it server-side (debounced) and drop it
+// into the disabled Az min/max fields.
+let _derivedAzTimer = null;
+function refreshDerivedAz() {
+  clearTimeout(_derivedAzTimer);
+  _derivedAzTimer = setTimeout(async () => {
+    if (!geoData) return;
+    try {
+      const r = await fetch('/api/derived_geometry', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({geometry_data: geoData})
+      });
+      const d = await r.json();
+      if (d.ok) {
+        derivedAz = {min: d.az_min_deg, max: d.az_max_deg};
+        const a = document.getElementById('az-min-derived');
+        const b = document.getElementById('az-max-derived');
+        if (a) a.value = derivedAz.min ?? '';
+        if (b) b.value = derivedAz.max ?? '';
+      }
+    } catch (e) { /* keep last value */ }
+  }, 400);
 }
 
 async function saveGeometry(name) {
@@ -595,17 +705,58 @@ async function saveGeometry(name) {
   } catch (e) { log('Save error: ' + e); }
 }
 
-async function saveGeometryAs() {
-  const name = prompt('Save geometry as:', 'rig_geometry_new.yaml');
-  if (!name) return;
-  const fname = name.endsWith('.yaml') ? name : name + '.yaml';
-  await saveGeometry(fname);
+// Reload the geometry file list (picks up calibrations just saved from the projector).
+async function refreshGeoList() {
+  await loadGeoList();
+  renderDeviceList();
+  log('Geometry list reloaded (' + geoFiles.length + ' files).');
+}
+
+// Send the geometry selected in the dropdown to the projector Pi as its rig_geometry.yaml.
+async function sendGeometry() {
+  const sel = document.getElementById('warp-geometry-select');
+  const name = (sel && sel.value) || geoCurrentName;
+  if (!name) { log('No geometry selected'); return; }
+  log('Sending ' + name + ' to projector...');
+  try {
+    const r = await fetch('/api/send_geometry', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name})
+    });
+    const data = await r.json();
+    log(data.ok ? ('Sent ' + data.sent + ' → ' + data.to + ' (as rig_geometry.yaml).')
+                : ('Send failed: ' + (data.error || '')));
+  } catch (e) { log('Send error: ' + e); }
 }
 
 function updateGeoField(section, key, value) {
   if (!geoData) return;
   if (!geoData[section]) geoData[section] = {};
   geoData[section][key] = value;
+  // re-derive the altitudes when their inputs (azimuth_height, parabola_A, height_cm) change
+  if (section === 'screen' && (key === 'parabola_A' || key === 'height_cm' ||
+                               key === 'azimuth_height')) {
+    deriveAltitudes();
+    renderDeviceList();
+  }
+  refreshDerivedAz();   // any screen/projector param can shift the filled azimuth range
+}
+
+// azimuth_height (eye/az-line above screen bottom) DRIVES the visual field:
+//   altitude_min = atan(-h / A),  altitude_max = atan((height - h) / A)
+function deriveAltitudes() {
+  const s = geoData && geoData.screen;
+  if (!s || !s.parabola_A || s.azimuth_height == null) return;
+  const A = s.parabola_A, h = s.azimuth_height, hc = s.height_cm ?? 20;
+  s.altitude_min_deg = +(Math.atan2(-h, A) * 180 / Math.PI).toFixed(2);
+  s.altitude_max_deg = +(Math.atan2(hc - h, A) * 180 / Math.PI).toFixed(2);
+}
+function updateAzimuthHeight(h) {
+  if (!geoData || !geoData.screen || isNaN(h)) return;
+  geoData.screen.azimuth_height = h;
+  deriveAltitudes();
+  renderDeviceList();
+  refreshDerivedAz();
 }
 
 async function intensityCal() {
@@ -614,6 +765,68 @@ async function intensityCal() {
   log('Running intensity calibration...');
   const result = await proxyPi(pi.ip, '/api/calibrate', {device: 'display'});
   log(result.ok ? 'Intensity calibration complete.' : 'Failed: ' + (result.error || ''));
+}
+
+// The Calibrate control is a single toggle: green "Calibrate" starts, red "Stop Calib"
+// stops. Both start and stop re-initialize the projector (handled server-side).
+let calibrating = false;
+
+async function toggleCalibration() {
+  if (calibrating) await stopCalibration();
+  else await startCalibration();
+}
+
+async function startCalibration() {
+  const pi = getPiForDevice('display');
+  if (!pi) { log('Display not assigned to a Pi'); return; }
+  // Open the window synchronously within the click so it isn't popup-blocked;
+  // point it at the sliders once the backend confirms the tool is up.
+  const win = window.open('', 'geo-calibration', 'width=800,height=940');
+  if (win) win.document.write('<body style="font:15px sans-serif;background:#1b1b1b;'
+    + 'color:#eee;padding:22px">Re-initializing projector + starting calibration on ' + pi.ip + ' …</body>');
+  log('Re-initializing projector + starting calibration on ' + pi.ip + '...');
+  const btn = document.querySelector('.calib-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+  try {
+    const r = await fetch('/api/start_calibration', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({geometry: geoCurrentName || undefined, geometry_data: geoData || undefined})
+    });
+    const data = await r.json();
+    (data.steps || []).forEach(s => log('  ' + s));
+    if (data.ok && data.url) {
+      log('Calibration running — sliders at ' + data.url);
+      calibrating = true;
+      if (win) win.location = data.url; else window.open(data.url, 'geo-calibration');
+    } else {
+      log('Calibration start failed: ' + (data.error || ''));
+      if (win) win.close();
+    }
+  } catch (e) {
+    log('Calibration error: ' + e);
+    if (win) win.close();
+  }
+  renderDeviceList();   // rebuild the toggle button in its new (green/red) state
+}
+
+async function stopCalibration() {
+  const pi = getPiForDevice('display');
+  if (!pi) { log('Display not assigned to a Pi'); return; }
+  log('Stopping calibration + re-initializing projector on ' + pi.ip + '...');
+  const btn = document.querySelector('.calib-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Stopping…'; }
+  let stopped = false;
+  try {
+    const r = await fetch('/api/stop_calibration', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+    });
+    const data = await r.json();
+    (data.steps || []).forEach(s => log('  ' + s));
+    log(data.ok ? 'Calibration stopped.' : 'Stop failed: ' + (data.error || ''));
+    stopped = !!data.ok;
+  } catch (e) { log('Stop error: ' + e); }
+  if (stopped) calibrating = false;   // keep the red 'Stop' if it failed, so it can be retried
+  renderDeviceList();
 }
 
 async function startLickMonitor() {
@@ -725,9 +938,28 @@ async function deliverReward() {
   const table = cal.main || [];
   const ms = interpolateCalMs(table, amount);
   const gpio = ((rig.devices.reward || {}).pins || {}).main ? rig.devices.reward.pins.main.gpio : 18;
-  log(`Delivering ${amount} uL (${ms.toFixed(1)} ms, GPIO ${gpio})...`);
-  const result = await proxyPi(pi.ip, '/api/deliver_reward', {duration_ms: ms, gpio: gpio});
-  log(result.ok ? 'Reward delivered.' : 'Failed: ' + (result.error || ''));
+  const nEl = document.getElementById('reward-count-n');
+  const intEl = document.getElementById('reward-interval-s');
+  const n = Math.max(1, nEl ? (parseInt(nEl.value) || 1) : 1);
+  const intervalS = Math.max(0, intEl ? (parseFloat(intEl.value) || 0) : 0);
+  log(`Delivering ${n}× ${amount} uL (${ms.toFixed(1)} ms, GPIO ${gpio})` + (n > 1 ? ` every ${intervalS}s...` : '...'));
+  for (let i = 0; i < n; i++) {
+    const result = await proxyPi(pi.ip, '/api/deliver_reward', {duration_ms: ms, gpio: gpio});
+    if (!result.ok) { log(`Failed at ${i + 1}/${n}: ` + (result.error || '')); return; }
+    if (i < n - 1 && intervalS > 0) await new Promise(r => setTimeout(r, intervalS * 1000));
+  }
+  log(n > 1 ? `Delivered ${n} rewards.` : 'Reward delivered.');
+}
+
+async function homeReward() {
+  const pi = getPiForDevice('reward');
+  if (!pi) { log('Reward not assigned to a Pi'); return; }
+  const homePin = ((rig.devices.reward || {}).pins || {}).home;
+  if (!homePin) { log('No home pin configured'); return; }
+  const gpio = homePin.gpio;
+  log(`Homing (10 ms TTL, GPIO ${gpio})...`);
+  const result = await proxyPi(pi.ip, '/api/deliver_reward', {duration_ms: 10, gpio: gpio});
+  log(result.ok ? 'Home pulse sent.' : 'Failed: ' + (result.error || ''));
 }
 
 // ── Reward live ──
@@ -983,6 +1215,7 @@ function renderPiList() {
         <button class="btn btn-blue btn-sm" onclick="checkPi('${pi.ip}')">Check</button>
         <button class="btn btn-orange btn-sm" onclick="installPi(${idx})">Install</button>
         <button class="btn btn-green btn-sm" onclick="deployPi(${idx})">Deploy</button>
+        <button class="btn btn-yellow btn-sm" onclick="restartPiApi(${idx})">Restart API</button>
         <button class="btn btn-red btn-sm" onclick="rebootPi(${idx})">Reboot</button>
         <button class="btn btn-red btn-sm" onclick="shutdownPi(${idx})">Shutdown</button>
         <button class="btn btn-red btn-sm" onclick="removePi(${idx})">Remove</button>
@@ -1030,7 +1263,8 @@ function renderDeviceList() {
         </span>
         ${assignHtml}
       </h4>
-      ${showControls ? controlsHtml : ''}
+      ${showControls ? `<fieldset class="device-fieldset" ${devicesInitialized ? '' : 'disabled'}>${controlsHtml}</fieldset>` : ''}
+      ${showControls && !devicesInitialized ? '<div style="font-size:10px; color:#888; margin-top:4px">Press Initialize to enable device controls.</div>' : ''}
       ${!pisReady && enabled ? '<div style="font-size:10px; color:#f44336; margin-top:4px">Waiting for Pi check...</div>' : ''}
     </div>`;
   }).join('');
@@ -1063,6 +1297,7 @@ function renderCameraControls(dev) {
       ${streaming
         ? `<button class="btn btn-red btn-sm" onclick="stopCameraStream()">Stop</button>`
         : `<button class="btn btn-blue btn-sm" onclick="startCameraStream()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
+      <button class="btn btn-yellow btn-sm" onclick="reinitDevice('camera')">Reinit</button>
     </div>
     ${streaming ? `<div class="stream-container"><img src="${streamUrl}" alt="Camera stream" style="filter:grayscale(1)"></div>` : ''}`;
 }
@@ -1083,54 +1318,78 @@ function renderDisplayControls(dev) {
     const g = geoData;
     const s = g.screen || {};
     const p = g.projector || {};
-    const m = g.mouse || {};
+    // azimuth_height (eye/az-line above screen bottom) drives the derived altitudes;
+    // fall back to reconstructing it from altitude_min for older geometry files.
+    const azH = (s.azimuth_height != null) ? s.azimuth_height
+      : ((s.parabola_A && s.altitude_min_deg != null)
+         ? +(-s.parabola_A * Math.tan(s.altitude_min_deg * Math.PI / 180)).toFixed(1) : '');
     const gf = (section, key, label, val, step) =>
       `<div class="device-field">
         <label>${label}</label>
-        <input type="number" value="${val}" step="${step || 'any'}" style="width:70px"
+        <input type="number" value="${val}" step="${step || 'any'}"
                onchange="updateGeoField('${section}','${key}',parseFloat(this.value))">
       </div>`;
 
     geoFields = `
     <div style="margin-top:6px; border-top:1px solid #333; padding-top:6px">
-      <div class="device-controls">
-        <span style="font-size:10px; color:#888; min-width:60px">SCREEN</span>
+      <div class="device-controls geo-row">
+        <span class="geo-label">SCREEN</span>
         ${gf('screen','parabola_A','A depth cm',s.parabola_A,0.1)}
         ${gf('screen','parabola_B','B curve',s.parabola_B,0.001)}
-        ${gf('screen','azimuth_max_deg','Az max°',s.azimuth_max_deg,1)}
         ${gf('screen','height_cm','Height cm',s.height_cm,0.1)}
-        ${gf('screen','altitude_min_deg','Alt min°',s.altitude_min_deg,1)}
-        ${gf('screen','altitude_max_deg','Alt max°',s.altitude_max_deg,1)}
+        <div class="device-field">
+          <label>Az height cm</label>
+          <input type="number" value="${azH}" step="0.1"
+                 onchange="updateAzimuthHeight(parseFloat(this.value))">
+        </div>
       </div>
-      <div class="device-controls">
-        <span style="font-size:10px; color:#888; min-width:60px">PROJECTOR</span>
+      <div class="device-controls geo-row">
+        <span class="geo-label">VISUAL SPACE</span>
+        <div class="device-field">
+          <label>Alt min° (derived)</label>
+          <input type="number" value="${s.altitude_min_deg ?? ''}" step="1" disabled>
+        </div>
+        <div class="device-field">
+          <label>Alt max° (derived)</label>
+          <input type="number" value="${s.altitude_max_deg ?? ''}" step="1" disabled>
+        </div>
+        <div class="device-field">
+          <label>Az min° (derived)</label>
+          <input type="number" id="az-min-derived" value="${derivedAz.min ?? ''}" step="1" disabled>
+        </div>
+        <div class="device-field">
+          <label>Az max° (derived)</label>
+          <input type="number" id="az-max-derived" value="${derivedAz.max ?? ''}" step="1" disabled>
+        </div>
+      </div>
+      <div class="device-controls geo-row">
+        <span class="geo-label">PROJECTOR</span>
         ${gf('projector','throw_ratio','Throw ratio',p.throw_ratio,0.1)}
         ${gf('projector','throw_distance_cm','Throw cm',p.throw_distance_cm,1)}
+        ${gf('projector','horizontal_stretch','H stretch',p.horizontal_stretch ?? 1.0,0.05)}
+        ${gf('projector','vertical_stretch','V stretch',p.vertical_stretch ?? 2.4,0.05)}
         ${gf('projector','optical_axis_elevation_deg','Axis elev°',p.optical_axis_elevation_deg,1)}
         ${gf('projector','lens_offset_vertical','Lens offset',p.lens_offset_vertical,0.1)}
         ${gf('projector','lateral_offset_cm','Lat offset cm',p.lateral_offset_cm,0.1)}
       </div>
-      <div class="device-controls">
-        <span style="font-size:10px; color:#888; min-width:60px">MOUSE</span>
-        ${gf('mouse','eye_height_above_ball_cm','Eye height cm',m.eye_height_above_ball_cm,0.1)}
-        ${gf('mouse','ball_diameter_cm','Ball dia cm',m.ball_diameter_cm,0.1)}
-      </div>
-      <div class="btn-row" style="margin-top:6px">
-        <button class="btn btn-green btn-sm" onclick="saveGeometry()">Save</button>
-        <button class="btn btn-blue btn-sm" onclick="saveGeometryAs()">Save As...</button>
+      <div style="font-size:10px; color:#888; margin-top:6px">
+        Edits persist to <b>${geoCurrentName || 'rig_geometry.yaml'}</b> when you click
+        <b>Save Rig</b> (top-left).
       </div>
     </div>`;
   }
 
   return `
     <div class="device-controls">
+      <button class="btn btn-yellow btn-sm" onclick="reinitDevice('display')">Reinit</button>
+      <button class="calib-btn btn ${calibrating ? 'btn-red' : 'btn-green'} btn-sm" onclick="toggleCalibration()">${calibrating ? 'Stop Calib' : 'Calibrate'}</button>
       <button class="warp-btn btn ${warpBtnClass} btn-sm" onclick="generateWarp()">${warpBtnText}</button>
       <button class="btn btn-orange btn-sm" onclick="intensityCal()">Intensity Cal</button>
       <button class="btn btn-blue btn-sm" onclick="testCheckers()">Test Checkers</button>
       <button class="btn btn-gray btn-sm" onclick="blankDisplay()">Blank</button>
       <div class="device-field">
         <label>Gray</label>
-        <input type="number" id="blank-gray-value" value="0.0" min="-1" max="1" step="0.1" style="width:60px">
+        <input type="number" id="blank-gray-value" value="0.0" min="0" max="1" step="0.01" style="width:60px">
       </div>
       <div class="device-field">
         <label style="display:inline; cursor:pointer">
@@ -1144,11 +1403,13 @@ function renderDisplayControls(dev) {
     <div class="device-controls" style="margin-top:4px">
       <div class="device-field">
         <label>Geometry</label>
-        <select id="warp-geometry-select" onchange="loadGeometry(this.value)"
+        <select id="warp-geometry-select" onchange="selectGeometry(this.value)"
                 style="min-width:180px; max-width:280px">
           ${geoOptions}
         </select>
       </div>
+      <button class="btn btn-gray btn-sm" onclick="refreshGeoList()" title="Reload the geometry list (pick up newly saved calibrations)">&#8635;</button>
+      <button class="btn btn-blue btn-sm" onclick="sendGeometry()" title="Copy the selected geometry to the projector Pi as its rig_geometry.yaml">Send to projector</button>
       ${warpExists ? '<span style="font-size:10px; color:#4caf50">warp_map.npz found on Leader</span>' : '<span style="font-size:10px; color:#f44336">warp_map.npz not found on Leader</span>'}
     </div>
     ${geoFields}`;
@@ -1209,6 +1470,7 @@ function renderPhotodiodeControls(dev) {
 
 function renderRewardControls(dev) {
   const rewardType = dev.reward_type || 'water';
+  const homePin = (dev.pins || {}).home;
   const cal = (dev.calibration || {}).main || [];
   const deliverUl = 4.0;
   const computedMs = interpolateCalMs(cal, deliverUl);
@@ -1235,8 +1497,18 @@ function renderRewardControls(dev) {
                style="width:55px" oninput="updateRewardMs()">
         <label>uL</label>
       </div>
+      <div class="device-field">
+        <label>×</label>
+        <input type="number" id="reward-count-n" value="1" min="1" step="1" style="width:45px">
+      </div>
+      <div class="device-field">
+        <label>every</label>
+        <input type="number" id="reward-interval-s" value="0.5" min="0" step="0.1" style="width:50px">
+        <label>s</label>
+      </div>
       <button class="btn btn-green btn-sm" onclick="deliverReward()" ${ds.initialized !== true ? 'disabled' : ''}>Deliver</button>
       <span id="reward-computed-ms" style="font-size:11px; color:#888">${computedMs.toFixed(1)} ms</span>
+      ${homePin ? `<button class="btn btn-orange btn-sm" onclick="homeReward()" ${ds.initialized !== true ? 'disabled' : ''}>Home</button>` : ''}
       ${monitoring
         ? `<button class="btn btn-red btn-sm" onclick="stopRewardLive()">Stop</button>`
         : `<button class="btn btn-blue btn-sm" onclick="startRewardLive()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
@@ -1256,14 +1528,58 @@ function renderRewardControls(dev) {
 
 function renderDeviceCatalog() {
   const el = document.getElementById('device-catalog');
-  el.innerHTML = Object.entries(deviceSchemas).map(([name, s]) =>
-    `<div style="margin: 4px 0">
-       <span class="device-chip" onclick="toggleDevice('${name}')" style="cursor:pointer">
-         + ${s.label}
-       </span>
-       <span style="font-size:10px; color:#666">${s.io_type} | ${s.required_packages.join(', ')}</span>
-     </div>`
-  ).join('');
+  if (!el) return;
+  const entries = Object.entries(deviceSchemas);
+  if (!entries.length) { el.innerHTML = '<div style="color:#666">No devices defined</div>'; return; }
+  const opts = entries.map(([name, s]) => {
+    const inRig = (rig && rig.devices && rig.devices[name]) ? ' ✓' : '';
+    return `<option value="${name}">${s.label}${inRig}</option>`;
+  }).join('');
+  el.innerHTML = `
+    <select id="catalog-select" style="width:100%; margin-bottom:6px" onchange="updateCatalogInfo()">${opts}</select>
+    <div>
+      <button class="btn btn-green" onclick="addDevice()">Add Device</button>
+      <button class="btn btn-red" onclick="removeDevice()">Remove Device</button>
+    </div>
+    <div id="catalog-info" style="font-size:10px; color:#666; margin-top:5px"></div>`;
+  const sel = document.getElementById('catalog-select');
+  if (sel && catalogSel && deviceSchemas[catalogSel]) sel.value = catalogSel;
+  updateCatalogInfo();
+}
+
+function updateCatalogInfo() {
+  const sel = document.getElementById('catalog-select');
+  const info = document.getElementById('catalog-info');
+  if (!sel) return;
+  catalogSel = sel.value;
+  const s = deviceSchemas[catalogSel];
+  const inRig = (rig && rig.devices && rig.devices[catalogSel]) ? ' — already in rig' : '';
+  if (info) info.textContent = s ? `${s.io_type} | ${(s.required_packages || []).join(', ')}${inRig}` : '';
+}
+
+function addDevice() {
+  if (!rig) { log('Load or create a rig first.'); return; }
+  const sel = document.getElementById('catalog-select');
+  if (!sel || !sel.value) return;
+  const name = sel.value; catalogSel = name;
+  if (rig.devices[name]) { log((deviceSchemas[name] ? deviceSchemas[name].label : name) + ' is already in the rig.'); return; }
+  rig.devices[name] = { type: name, enabled: true };
+  log('Added ' + (deviceSchemas[name] ? deviceSchemas[name].label : name) + ' to the rig.');
+  renderDeviceCatalog();
+  renderAll();
+}
+
+function removeDevice() {
+  if (!rig) { log('Load or create a rig first.'); return; }
+  const sel = document.getElementById('catalog-select');
+  if (!sel || !sel.value) return;
+  const name = sel.value; catalogSel = name;
+  if (!rig.devices[name]) { log((deviceSchemas[name] ? deviceSchemas[name].label : name) + ' is not in the rig.'); return; }
+  delete rig.devices[name];
+  (rig.pis || []).forEach(pi => { pi.devices = (pi.devices || []).filter(d => d !== name); });
+  log('Removed ' + (deviceSchemas[name] ? deviceSchemas[name].label : name) + ' from the rig.');
+  renderDeviceCatalog();
+  renderAll();
 }
 
 // ── Log ──
@@ -1271,8 +1587,8 @@ function renderDeviceCatalog() {
 function log(msg) {
   const el = document.getElementById('log');
   const ts = new Date().toLocaleTimeString();
-  el.innerHTML += `<div>[${ts}] ${msg}</div>`;
-  el.scrollTop = el.scrollHeight;
+  el.insertAdjacentHTML('afterbegin', `<div>[${ts}] ${msg}</div>`);
+  el.scrollTop = 0;
 }
 
 async function quitApp() {

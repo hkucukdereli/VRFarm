@@ -162,15 +162,16 @@
 
       <div id="experiment-subsections" style="display:none;">
         <h3 style="font-size:11px; color:#888; margin:10px 0 6px;">STIMULUS</h3>
-        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0 8px;">
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0 8px;">
           <div><label>Size (deg)</label><input type="number" id="p-size_deg" step="0.5" min="0.5" class="task-param"></div>
+          <div><label>Shape</label><select id="p-shape" class="task-param"><option value="square">square</option><option value="circle">circle</option></select></div>
           <div><label>Duration (s)</label><input type="number" id="p-duration_s" step="0.1" min="0.1" class="task-param"></div>
           <div><label>Altitude (deg)</label><input type="number" id="p-altitude_deg" step="1" class="task-param"></div>
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0 8px;">
           <div><label>Contrast</label><input type="text" id="p-contrast_values" class="task-param" title="e.g. [0.25, 0.15, 0.125]"></div>
           <div><label>Proportions</label><input type="text" id="p-contrast_proportions" class="task-param" title="e.g. [0.34, 0.33, 0.33]"></div>
-          <div><label>Background</label><input type="number" id="p-background_gray" step="0.1" min="0" max="1" class="task-param"></div>
+          <div><label>Background</label><input type="number" id="p-background_gray" step="0.01" min="0" max="1" class="task-param"></div>
         </div>
         <div id="photodiode-sync-row" style="display:none; align-items:center; gap:12px; margin-top:4px;">
           <label style="margin:0; display:inline-flex; align-items:center; gap:4px; cursor:pointer;">
@@ -449,6 +450,7 @@ function populateTaskFields(t) {
 
   // Stimulus
   document.getElementById('p-size_deg').value = stim.size_deg ?? '';
+  document.getElementById('p-shape').value = stim.shape || 'square';
   document.getElementById('p-duration_s').value = stim.duration_s ?? '';
   document.getElementById('p-altitude_deg').value = stim.altitude_deg ?? '';
   document.getElementById('p-go_rule').value = stim.go_rule || 'all';
@@ -508,6 +510,7 @@ function collectTaskFields() {
     stimulus: {
       background_gray: parseFloat(document.getElementById('p-background_gray').value) || 0,
       size_deg: parseFloat(document.getElementById('p-size_deg').value) || 8,
+      shape: document.getElementById('p-shape').value || 'square',
       duration_s: parseFloat(document.getElementById('p-duration_s').value) || 2,
       altitude_deg: parseFloat(document.getElementById('p-altitude_deg').value) || 10,
       go_rule: document.getElementById('p-go_rule').value,
@@ -720,13 +723,18 @@ async function startSession() {
       const snum = document.getElementById('session-num').value;
       document.getElementById('mv-session-id').textContent = `${sid} #${snum}`;
       document.getElementById('session-start-time').textContent = 'started ' + new Date().toLocaleTimeString();
+      // Seed the grace-period countdown inside the GO button; 'countdown' SSE
+      // events tick it down and 'experiment_start' restores it to GO.
+      const grace = parseInt(document.getElementById('grace-period').value) || 0;
+      btn.textContent = grace > 0 ? String(grace) : 'GO';
     } else {
       log('Start failed: ' + (data.error || ''));
+      btn.textContent = 'GO';
     }
   } catch (e) {
     log('Start error: ' + e.message);
+    btn.textContent = 'GO';
   }
-  btn.textContent = 'GO';
   _unlockUI();
 }
 
@@ -741,6 +749,7 @@ async function stopSession() {
   stopAllLive();
   if (eventSource) { eventSource.close(); eventSource = null; }
   btn.textContent = 'STOP';
+  document.getElementById('btn-go').textContent = 'GO';  // clear any leftover countdown
   _unlockUI();
   log('Session stopped.');
 }
@@ -819,6 +828,7 @@ function handleEvent(evt) {
       sessionStartTime = Date.now();
       trialStartTime = null;
       itiStartTime = null;
+      document.getElementById('btn-go').textContent = 'GO';  // grace done
       log('Experiment started.');
       const sid = document.getElementById('subject-id').value;
       const snum = document.getElementById('session-num').value;
@@ -842,12 +852,16 @@ function handleEvent(evt) {
       if (rasterLive) { photodiodeEvents.push({t: evt.t}); updateRasterInfo(); }
       break;
     case 'countdown':
+      // Grace-period tick — show whole seconds remaining inside the GO button.
+      document.getElementById('btn-go').textContent =
+        String(Math.max(0, Math.ceil(evt.remaining)));
       break;
     case 'iti_restart':
       itiStartTime = Date.now();
       log('ITI restarted (excess licking)');
       break;
     case 'session_end':
+      document.getElementById('btn-go').textContent = 'GO';  // clear any leftover countdown
       log(`Session ended (${evt.n_completed}/${evt.n_planned} trials).`);
       setPhase('ended');
       stopClock();
@@ -923,8 +937,15 @@ function drawStimScene() {
     const cx = w / 2 + currentStimAz * ppd;
     const cy = h / 2 - (alt - SCREEN_ALT_CENTER) * ppd;
     const side = sz * ppd;
+    const shape = document.getElementById('p-shape')?.value || 'square';
     ctx.fillStyle = '#ffffff';
-    ctx.fillRect(cx - side / 2, cy - side / 2, side, side);
+    if (shape === 'circle') {
+      ctx.beginPath();
+      ctx.arc(cx, cy, side / 2, 0, 2 * Math.PI);
+      ctx.fill();
+    } else {
+      ctx.fillRect(cx - side / 2, cy - side / 2, side, side);
+    }
   }
 
   // Rulers on top
@@ -1220,8 +1241,8 @@ function updateButtons() {
 function log(msg) {
   const el = document.getElementById('log');
   const ts = new Date().toLocaleTimeString();
-  el.innerHTML += `<div>[${ts}] ${msg}</div>`;
-  el.scrollTop = el.scrollHeight;
+  el.insertAdjacentHTML('afterbegin', `<div>[${ts}] ${msg}</div>`);
+  el.scrollTop = 0;
 }
 
 // ── Quit ──

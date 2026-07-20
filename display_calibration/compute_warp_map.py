@@ -37,7 +37,24 @@ GEO_FILE = CAL_DIR / "rig_geometry.yaml"
 
 def load_geometry(path=GEO_FILE):
     with open(path) as f:
-        return yaml.safe_load(f)
+        return normalize_geo(yaml.safe_load(f))
+
+
+def normalize_geo(geo):
+    """Derive screen.altitude_min/max from azimuth_height (eye/az-line above the screen
+    bottom) so this matches the landmark calibrator. The eye sits `h` above the bottom at
+    depth `A`, screen height `hc`:
+      altitude_min = atan(-h / A)   (bottom, below eye)
+      altitude_max = atan((hc-h)/A) (top, above eye)
+    In-place; no-op if azimuth_height is absent (older files keep their stored altitudes)."""
+    s = (geo or {}).get("screen", {})
+    h = s.get("azimuth_height")
+    A = s.get("parabola_A")
+    hc = s.get("height_cm")
+    if h is not None and A and hc is not None:
+        s["altitude_min_deg"] = float(np.degrees(np.arctan2(-h, A)))
+        s["altitude_max_deg"] = float(np.degrees(np.arctan2(hc - h, A)))
+    return geo
 
 # ── Screen intersection ────────────────────────────────────────────────────────
 
@@ -225,24 +242,37 @@ def compute_inverse_map(geo, proj):
     A = geo['screen']['parabola_A']
     B = geo['screen']['parabola_B']
     res_w, res_h = proj['res']
-    alt_min = geo['screen']['altitude_min_deg']
-    alt_max = geo['screen']['altitude_max_deg']
-    az_max = geo['screen']['azimuth_max_deg']
+
+    # Bake the calibration orientation (flip + offset) into the PIXEL GRID rather than
+    # shifting the finished array. Each OUTPUT (display) pixel is mapped back to its SOURCE
+    # image pixel by inverting calib_geo's preview transform (flip, then blit at
+    # (offset_x, -offset_y)). Source coords are deliberately allowed to fall OUTSIDE [0,res]
+    # so the image-plane position extrapolates smoothly — the ray then still traces the real
+    # parabola and yields TRUE angles in the offset-vacated band, preserving angular
+    # continuity (no flat nearest-fill).
+    cal = geo.get('calibration', {})
+    flip_h = bool(cal.get('flip_h', False))
+    flip_v = bool(cal.get('flip_v', False))
+    ox = int(cal.get('offset_x', 0))
+    oy = int(cal.get('offset_y', 0))
 
     az_map  = np.full((res_h, res_w), np.nan)
     alt_map = np.full((res_h, res_w), np.nan)
     valid   = np.zeros((res_h, res_w), dtype=bool)
 
-    # Pixel grid
-    px_arr = np.arange(res_w)
-    py_arr = np.arange(res_h)
-    PX, PY = np.meshgrid(px_arr, py_arr)
+    # OUTPUT (display) pixel grid, then invert flip+offset to the SOURCE image pixel
+    PX, PY = np.meshgrid(np.arange(res_w), np.arange(res_h))
+    SPX = PX - ox
+    SPY = PY + oy
+    if flip_h:
+        SPX = (res_w - 1) - SPX
+    if flip_v:
+        SPY = (res_h - 1) - SPY
 
-    # Pixel → image plane position (inches relative to optical axis)
-    # Lens offset shifts the origin: offset=1 means axis at bottom edge
+    # Source pixel → image plane position (extrapolates for source coords outside [0,res])
     ov = proj.get('lens_offset_v', 0.0)
-    x_img = (PX / res_w - 0.5) * proj['img_w']
-    y_img = (0.5 - PY / res_h + ov * 0.5) * proj['img_h']
+    x_img = (SPX / res_w - 0.5) * proj['img_w']
+    y_img = (0.5 - SPY / res_h + ov * 0.5) * proj['img_h']
 
     # Ray direction from projector (in world coords)
     # ray = forward * throw + right * x_img + up * y_img, then normalize
@@ -302,16 +332,89 @@ def compute_inverse_map(geo, proj):
     az_deg_arr  = np.degrees(az_rad)
     alt_deg_arr = np.degrees(alt_rad)
 
-    # Validity: t finite, point on screen within azimuth/altitude bounds
-    hit = (t < 1e9) & disc_ok & (np.abs(az_deg_arr) <= az_max) & \
-          (alt_deg_arr >= alt_min) & (alt_deg_arr <= alt_max) & \
-          (ys > 0)   # must be in front of mouse
+    # Validity: the projector ray meets the parabola at a real, in-front-of-the-lens point
+    # (t > 0). We DELIBERATELY allow ys <= 0 (screen points that wrap PAST ±90° azimuth,
+    # curving behind the mouse's coronal plane) — a parabolic screen physically continues
+    # there and a mouse's panoramic field sees it; the old `ys > 0` gate clamped azimuth at
+    # exactly ±90° (a flat band down each side edge). The closest positive-t root is the near
+    # screen surface, so the wrap is filled with true continuous azimuth. NO azimuth/altitude
+    # clipping and NO frame gating here — flip+offset are baked into the grid above; orient_maps
+    # masks to the frame and fills any residual ray-miss holes.
+    hit = (t < 1e9) & disc_ok
 
     az_map[hit]  = az_deg_arr[hit]
     alt_map[hit] = alt_deg_arr[hit]
     valid[hit]   = True
 
     return az_map, alt_map, valid
+
+
+def orient_maps(geo, az_map, alt_map, valid, px_map, py_map):
+    """Finalize the warp. Flip+offset are ALREADY baked into az_map/alt_map/valid by
+    compute_inverse_map (via the pixel-grid mapping), so those arrays are already in display
+    space with true ray-traced angles across the offset-vacated band. Here we just: mask to
+    the usable frame (the visible screen the user marked; ±90°/altitude lines are references,
+    not clips), nearest-fill any residual ray-miss holes inside the frame (a thin sliver now,
+    only where the ray genuinely never meets the parabola), and transform the FORWARD pixel
+    map into display space."""
+    cal = geo.get('calibration', {})
+    res_w, res_h = geo['projector']['resolution']
+    flip_h = bool(cal.get('flip_h', False))
+    flip_v = bool(cal.get('flip_v', False))
+    ox = int(cal.get('offset_x', 0))
+    oy = int(cal.get('offset_y', 0))
+    fx = int(cal.get('frame_x', 0))
+    fy = int(cal.get('frame_y', 0))
+
+    PX, PY = np.meshgrid(np.arange(res_w), np.arange(res_h))
+    in_frame = (PX >= fx) & (PX < res_w - fx) & (PY >= fy) & (PY < res_h - fy)
+
+    have = valid & np.isfinite(az_map)
+    try:
+        from scipy import ndimage
+        if have.any() and bool((~have & in_frame).any()):
+            idx = ndimage.distance_transform_edt(
+                ~have, return_distances=False, return_indices=True)
+            az_map = az_map[tuple(idx)]
+            alt_map = alt_map[tuple(idx)]
+        valid = in_frame
+    except Exception:
+        valid = have & in_frame   # no extrapolation available: keep the accurate region only
+    az_map = np.where(valid, az_map, np.nan)
+    alt_map = np.where(valid, alt_map, np.nan)
+
+    # forward pixel coords -> display space (flip then offset), matching the grid mapping
+    if flip_h:
+        px_map = (res_w - 1) - px_map
+    if flip_v:
+        py_map = (res_h - 1) - py_map
+    px_map = px_map + ox
+    py_map = py_map - oy
+    return az_map, alt_map, valid, px_map, py_map
+
+
+def derived_angle_ranges(geo):
+    """Az/alt range the warp actually FILLS for `geo` — ray-traced within the usable frame.
+    Powers the setup UI's derived readouts. Azimuth is not a simple analytic function like
+    altitude (it comes from where the frame edges land on the parabola, incl. the wrap past
+    ±90°), so we run the real inverse map. Returns az/alt min/max deg (None if nothing fills)."""
+    import copy
+    g = normalize_geo(copy.deepcopy(geo))
+    proj = build_projector(g)
+    az_map, alt_map, valid = compute_inverse_map(g, proj)   # already display-space (flip/offset baked)
+    cal = g.get('calibration', {})
+    res_w, res_h = g['projector']['resolution']
+    fx, fy = int(cal.get('frame_x', 0)), int(cal.get('frame_y', 0))
+    PX, PY = np.meshgrid(np.arange(res_w), np.arange(res_h))
+    m = (valid & np.isfinite(az_map) &
+         (PX >= fx) & (PX < res_w - fx) & (PY >= fy) & (PY < res_h - fy))
+    if not m.any():
+        return {"az_min_deg": None, "az_max_deg": None,
+                "alt_min_deg": None, "alt_max_deg": None}
+    return {"az_min_deg": round(float(az_map[m].min()), 1),
+            "az_max_deg": round(float(az_map[m].max()), 1),
+            "alt_min_deg": round(float(alt_map[m].min()), 1),
+            "alt_max_deg": round(float(alt_map[m].max()), 1)}
 
 
 def compute_forward_map(geo, proj,
@@ -412,9 +515,9 @@ def compute_theoretical_luminance_correction(geo, az_samples):
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def main(validate=False):
-    print("Loading rig geometry...")
-    geo = load_geometry()
+def main(validate=False, geo_path=None):
+    print(f"Loading rig geometry from {geo_path or GEO_FILE}...")
+    geo = load_geometry(geo_path or GEO_FILE)
 
     print("Building projector model...")
     proj = build_projector(geo)
@@ -423,19 +526,23 @@ def main(validate=False):
 
     print("Computing inverse map (pixel → visual angle)...")
     az_map, alt_map, valid_map = compute_inverse_map(geo, proj)
-    coverage = valid_map.sum() / valid_map.size * 100
-    print(f"  Screen coverage: {coverage:.1f}% of pixels hit the screen")
 
     print("Computing forward map (visual angle → pixel)...")
     az_samples, alt_samples, px_map, py_map, fwd_valid = compute_forward_map(geo, proj)
-    fwd_coverage = fwd_valid.sum() / fwd_valid.size * 100
-    print(f"  Forward map coverage: {fwd_coverage:.1f}%")
+
+    print("Baking calibration orientation (flip/offset) + usable frame...")
+    az_map, alt_map, valid_map, px_map, py_map = orient_maps(
+        geo, az_map, alt_map, valid_map, px_map, py_map)
+    coverage = valid_map.sum() / valid_map.size * 100
+    print(f"  Visible-screen coverage: {coverage:.1f}% of pixels")
 
     print("Computing theoretical luminance correction...")
     az_sym = np.linspace(0, 105, 53)
     lum_gain = compute_theoretical_luminance_correction(geo, az_sym)
 
-    # Save
+    # Save. Orientation (flip/offset) + usable frame are already BAKED into the maps by
+    # orient_maps, so warp_map.npz is the complete physical transformation — the runtime
+    # uses az_map/valid_map directly, no further orientation step.
     out_path = CAL_DIR / "warp_map.npz"
     np.savez(out_path,
              az_map=az_map,
@@ -451,12 +558,12 @@ def main(validate=False):
 
     if validate:
         _plot_validation(az_map, alt_map, valid_map,
-                         az_samples, alt_samples, px_map, py_map,
+                         az_samples, alt_samples, px_map, py_map, fwd_valid,
                          az_sym, lum_gain, geo, proj)
 
 
 def _plot_validation(az_map, alt_map, valid_map,
-                     az_samples, alt_samples, px_map, py_map,
+                     az_samples, alt_samples, px_map, py_map, fwd_valid,
                      az_sym, lum_gain, geo, proj):
     import matplotlib.pyplot as plt
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
@@ -515,7 +622,9 @@ def _plot_validation(az_map, alt_map, valid_map,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Compute parabolic screen warp map")
+    parser.add_argument('--geo', default=None,
+                        help='geometry YAML to build from (default: ./rig_geometry.yaml)')
     parser.add_argument('--validate', action='store_true',
                         help='Show validation plots after computing')
     args = parser.parse_args()
-    main(validate=args.validate)
+    main(validate=args.validate, geo_path=args.geo)

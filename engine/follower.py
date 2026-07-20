@@ -90,7 +90,16 @@ class Follower:
 
         # Start display if present
         if "display" in self.devices:
-            self.devices["display"].start_display()
+            display = self.devices["display"]
+            display.start_display()
+            # Load the warp so stimuli render through the TRUE SPHERICAL path (fills the
+            # visible screen, correct visual angle). Without this, display._warp stays None
+            # and _handle_show silently falls back to the flat show_rect.
+            warp_path = Path.home() / "rig" / "calibration" / "warp_map.npz"
+            if display.load_warp(str(warp_path)):
+                print(f"  Warp map loaded from {warp_path}")
+            else:
+                print(f"  No warp map at {warp_path} — stimuli use flat fallback")
 
         while self.running:
             try:
@@ -138,11 +147,9 @@ class Follower:
             print(f"  Trial {trial} out of range (0..{n-1})")
             return
 
-        px_x = float(self.stims["px_x"][trial])
-        px_y = float(self.stims["px_y"][trial])
-        px_size = float(self.stims["px_size"][trial])
         corr_contrast = float(self.stims["corr_contrast"][trial])
         bg_gray = float(self.stims["background_gray"][0])
+        shape = str(self.stims["shape"][0]) if "shape" in self.stims else "square"
 
         # Duration from stim params (added by updated stim_generator)
         if "duration_s" in self.stims:
@@ -150,14 +157,33 @@ class Follower:
         else:
             duration = 2.0  # fallback
 
+        # Prefer true spherical rendering (warp loaded + visual-angle size); else flat rect.
+        spherical = (getattr(display, "_warp", None) is not None
+                     and "stim_size_deg" in self.stims
+                     and "stim_az_deg" in self.stims)
+        if spherical:
+            az = float(self.stims["stim_az_deg"][trial])
+            alt = float(self.stims["stim_alt_deg"][trial])
+            size_deg = float(self.stims["stim_size_deg"][trial])
+
+            def draw(sync):
+                display.show_patch_spherical(az, alt, size_deg, corr_contrast,
+                                             bg_gray, sync_square=sync, shape=shape)
+        else:
+            px_x = float(self.stims["px_x"][trial])
+            px_y = float(self.stims["px_y"][trial])
+            px_size = float(self.stims["px_size"][trial])
+
+            def draw(sync):
+                display.show_rect(px_x, px_y, px_size, corr_contrast,
+                                  bg_gray, sync_square=sync, shape=shape)
+
         if self._sync_every_n > 0:
             # Photodiode sync: per-frame loop, patch ON every Nth frame
-            self._show_synced(display, px_x, px_y, px_size,
-                              corr_contrast, bg_gray, duration, trial)
+            self._show_synced(display, draw, duration, trial)
         else:
-            # Single-flip path (unchanged): one render, hold for duration, blank
-            display.show_rect(px_x, px_y, px_size, corr_contrast, bg_gray,
-                              sync_square=False)
+            # Single-flip path: one render, hold for duration, blank
+            draw(False)
             self._send_onset_ack(trial, time.time())
             time.sleep(duration)
             display.blank()
@@ -172,18 +198,16 @@ class Follower:
             except OSError:
                 pass
 
-    def _show_synced(self, display, px_x, px_y, px_size,
-                     corr_contrast, bg_gray, duration, trial):
-        """Per-frame render loop for photodiode sync. Toggles the patch ON every
-        Nth frame starting at frame 0. Relies on vsync-locked flip to pace frames
-        to the display refresh; the wall-clock bound guarantees the stimulus stays
-        up for `duration` regardless of vsync."""
+    def _show_synced(self, display, draw, duration, trial):
+        """Per-frame render loop for photodiode sync. `draw(sync)` renders one frame (rect
+        or spherical patch) with the sync square ON every Nth frame starting at frame 0.
+        Relies on vsync-locked flip to pace frames; the wall-clock bound guarantees the
+        stimulus stays up for `duration` regardless of vsync."""
         onset_t = None
         fi = 0
         while True:
             patch_on = (fi % self._sync_every_n == 0)
-            display.show_rect(px_x, px_y, px_size, corr_contrast, bg_gray,
-                              sync_square=patch_on)
+            draw(patch_on)
             if fi == 0:
                 onset_t = time.time()
                 self._send_onset_ack(trial, onset_t)

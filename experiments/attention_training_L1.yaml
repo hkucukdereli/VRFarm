@@ -1,15 +1,18 @@
-last_saved: '2026-04-14'
+last_saved: '2026-07-20'
 stimulus:
-  background_gray: 0.1
+  background_gray: 0.55
   size_deg: 8
+  shape: square
   duration_s: 2
-  altitude_deg: 10
+  altitude_deg: 80
   go_rule: all
   contrast:
     values:
     - 1
     proportions:
     - 1
+  photodiode_sync_enabled: false
+  photodiode_sync_every_n: 5
 reward:
   amount_ul: 4
   level: 1

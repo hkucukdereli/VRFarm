@@ -1,8 +1,9 @@
 last_saved: "2026-04-08"
 # ── What to show ──
 stimulus:
-  background_gray: 0.5
+  background_gray: 0.75
   size_deg: 8.0
+  shape: square
   duration_s: 2.0          # total projector on-time
   altitude_deg: 10.0
   go_rule: all              # all | left | right

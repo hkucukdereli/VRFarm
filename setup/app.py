@@ -277,6 +277,38 @@ def api_shutdown_pi():
     return jsonify({"ok": True})
 
 
+@app.route("/api/restart_pi", methods=["POST"])
+def api_restart_pi():
+    """Restart pi_api on one Pi (reloads deployed code without a full reboot) and wait for it
+    to respawn. Use when new code was deployed but the running process still has the old
+    modules cached in memory."""
+    data = request.json or {}
+    ip = data.get("ip")
+    if not ip:
+        return jsonify({"ok": False, "error": "no ip"}), 400
+    port = data.get("api_port", 5080)
+    steps = []
+    try:
+        requests.post(f"http://{ip}:{port}/api/restart", timeout=5)
+        steps.append("Restart requested (pi_api self-kills; systemd respawns)")
+        import time as _time
+        _time.sleep(2.0)          # let the old process exit first
+        back = False
+        for _ in range(12):
+            try:
+                if requests.get(f"http://{ip}:{port}/api/logs?n=1", timeout=2).ok:
+                    back = True
+                    break
+            except Exception:
+                pass
+            _time.sleep(1.0)
+        steps.append("pi_api back online" if back else
+                     "WARN pi_api did not respond after restart — re-check the Pi")
+        return jsonify({"ok": back, "steps": steps})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "steps": steps})
+
+
 @app.route("/api/deploy_pi", methods=["POST"])
 def api_deploy_pi():
     """Deploy code to Pi via REST API (after initial SSH install)."""
@@ -300,6 +332,52 @@ def api_deploy_pi():
                     data={"path": remote},
                     timeout=10)
             steps.append(f"Uploaded {remote}")
+
+        # ~/dlp/ (projector DLPC-init SDK) lives OUTSIDE ~/rig, so the REST /api/upload
+        # (restricted to ~/rig) can't reach it — push the vendored copy via scp. Non-fatal:
+        # the projector usually already has it; this just keeps a reflash reproducible.
+        if role == "follower":
+            dlp_local = ROOT / "dlp"
+            if dlp_local.exists():
+                pi = next((p for p in (_rig_config or {}).get("pis", [])
+                           if p.get("ip") == ip), None)
+                target = f"{(pi or {}).get('user', 'vruser')}@{ip}"
+                try:
+                    _ssh(target, "mkdir -p ~/dlp", timeout=15)
+                    items = [str(p) for p in dlp_local.iterdir() if p.name != "__pycache__"]
+                    scp = subprocess.run(
+                        ["scp", "-r", "-o", "ConnectTimeout=5", *items, f"{target}:~/dlp/"],
+                        capture_output=True, text=True, timeout=90)
+                    steps.append("Pushed ~/dlp/ (projector init)" if scp.returncode == 0
+                                 else f"WARN ~/dlp/ scp: {scp.stderr.strip()[:100]}")
+                except Exception as e:
+                    steps.append(f"WARN ~/dlp/ push skipped: {e}")
+
+        # Restart pi_api so the just-uploaded code actually RUNS. A long-running Python
+        # process won't pick up overwritten files on its own — this is why a redeploy alone
+        # left the old code (and stale in-memory warp) in effect. /api/restart self-kills and
+        # systemd (Restart=always) respawns with the new code. Re-init the display afterwards.
+        if data.get("restart", True):
+            try:
+                requests.post(f"http://{ip}:{port}/api/restart", timeout=5)
+                steps.append("Restarted pi_api to load new code")
+                # Wait for it to respawn so the UI isn't left hitting a down Pi. The restart
+                # drops all initialized devices — the client resets their state after deploy.
+                import time as _time
+                _time.sleep(2.0)          # let the old process exit first
+                back = False
+                for _ in range(12):
+                    try:
+                        if requests.get(f"http://{ip}:{port}/api/logs?n=1", timeout=2).ok:
+                            back = True
+                            break
+                    except Exception:
+                        pass
+                    _time.sleep(1.0)
+                steps.append("pi_api back online — re-initialize devices" if back else
+                             "WARN pi_api did not respond after restart — re-check the Pi")
+            except Exception as e:
+                steps.append(f"(pi_api restart skipped: {e})")
 
         return jsonify({"ok": True, "steps": steps})
 
@@ -444,48 +522,256 @@ def api_init_devices():
     return jsonify({"ok": all_ok, "steps": steps, "results": results})
 
 
+@app.route("/api/reinit_device", methods=["POST"])
+def api_reinit_device():
+    """Reinitialize a SINGLE device (display or camera) without touching the others —
+    same per-device flow as /api/init_devices, for the per-card Reinit buttons."""
+    if not _rig_config:
+        return jsonify({"ok": False, "error": "No rig loaded"}), 400
+    dev_name = (request.json or {}).get("device")
+    if dev_name not in ("display", "camera"):
+        return jsonify({"ok": False, "error": f"reinit not supported for '{dev_name}'"}), 400
+    devices = _rig_config.get("devices", {})
+    if dev_name not in devices or not devices[dev_name].get("enabled"):
+        return jsonify({"ok": False, "error": f"{dev_name} is not enabled"}), 400
+    api_port = _rig_config["network"]["api_port"]
+    ip = next((pi["ip"] for pi in _rig_config.get("pis", [])
+               if dev_name in pi.get("devices", [])), None)
+    if not ip:
+        return jsonify({"ok": False, "error": f"{dev_name} is not assigned to a Pi"}), 400
+
+    steps = []
+
+    def _post(endpoint, payload, label, timeout=10):
+        try:
+            r = requests.post(f"http://{ip}:{api_port}{endpoint}", json=payload, timeout=timeout)
+            res = r.json()
+            ok = res.get("ok", False)
+            steps.append(f"{label}: {'OK' if ok else 'FAIL'} {res.get('message', res.get('error', ''))}")
+            return ok
+        except Exception as e:
+            steps.append(f"{label}: FAIL ({e})")
+            return False
+
+    if dev_name == "display":
+        ok1 = _post("/api/init_projector", {}, "Projector", timeout=35)
+        ok2 = _post("/api/init_display", {"rig_config": devices["display"]},
+                    "Display init", timeout=30)
+        ok = ok1 and ok2
+    else:  # camera
+        ok = _post("/api/init_camera", {}, "Camera init", timeout=15)
+    return jsonify({"ok": ok, "device": dev_name, "steps": steps})
+
+
 @app.route("/api/generate_warp", methods=["POST"])
 def api_generate_warp():
     """Generate warp map from rig_geometry.yaml, then SCP to Leader Pi."""
     data = request.json or {}
-    geometry_path = data.get("geometry_path", str(ROOT / "display_calibration" / "rig_geometry.yaml"))
+    # Resolve the geometry file SERVER-SIDE under GEO_DIR (don't trust a client cwd-relative
+    # path). Prefer a bare filename; fall back to a path resolved against the repo root.
+    name = data.get("geometry")
+    if name:
+        geo_file = (GEO_DIR / Path(name).name).resolve()
+    else:
+        gp = data.get("geometry_path", str(GEO_DIR / "rig_geometry.yaml"))
+        geo_file = (Path(gp) if Path(gp).is_absolute() else (ROOT / gp)).resolve()
 
-    if not Path(geometry_path).exists():
-        return jsonify({"ok": False, "error": f"Geometry file not found: {geometry_path}"}), 404
+    if not geo_file.exists():
+        return jsonify({"ok": False, "error": f"Geometry file not found: {geo_file}"}), 404
 
     steps = []
     try:
-        # 1. Run compute_warp_map.py on Mac
+        # 1. Run compute_warp_map.py on Mac, building from the SELECTED geometry file
+        #    (so the warp and the geometry shipped to the Pi are the same source).
         conda_prefix = Path("/opt/homebrew/Caskroom/miniforge/base/envs/vrfarm/bin")
         python = str(conda_prefix / "python")
-        script = str(ROOT / "display_calibration" / "compute_warp_map.py")
+        script = str(GEO_DIR / "compute_warp_map.py")
         r = subprocess.run(
-            [python, script],
+            [python, script, "--geo", str(geo_file)],
             capture_output=True, text=True, timeout=60,
-            cwd=str(ROOT / "display_calibration"))
+            cwd=str(GEO_DIR))
         if r.returncode != 0:
             return jsonify({"ok": False, "error": r.stderr[-500:], "steps": steps})
-        steps.append("Generated warp map on Mac")
+        steps.append(f"Generated warp map on Mac from {geo_file.name}")
 
-        npz_path = ROOT / "display_calibration" / "warp_map.npz"
+        npz_path = GEO_DIR / "warp_map.npz"
         if not npz_path.exists():
             return jsonify({"ok": False, "error": "warp_map.npz not created", "steps": steps})
 
-        # 2. Copy to all Pis
+        # 2. Copy to all Pis — ATOMIC install: scp to a .tmp name, then mv into place.
+        #    A plain scp overwrites the file in place, so a reader (display `init` ->
+        #    load_warp, or stim-gen np.load) that touches it mid-write sees a half-written
+        #    zip -> "Bad CRC-32 for file 'az_map.npy'". mv is atomic, so readers only ever
+        #    see the complete old or complete new file.
         if _rig_config:
             for pi in _rig_config.get("pis", []):
                 user = pi.get("user", "vruser")
                 ip = pi["ip"]
                 try:
                     _ssh(f"{user}@{ip}", "mkdir -p ~/rig/calibration")
-                    _scp(str(npz_path), f"{user}@{ip}:~/rig/calibration/warp_map.npz")
-                    steps.append(f"Copied warp_map.npz to {pi['name']} ({ip})")
+                    _scp(str(npz_path), f"{user}@{ip}:~/rig/calibration/warp_map.npz.tmp")
+                    # Push the SAME geometry the warp was built from, so the live
+                    # calib_geo.py tool on the Pi starts from these values.
+                    _scp(str(geo_file), f"{user}@{ip}:~/rig/calibration/rig_geometry.yaml.tmp")
+                    _ssh(f"{user}@{ip}",
+                         "mv ~/rig/calibration/warp_map.npz.tmp ~/rig/calibration/warp_map.npz && "
+                         "mv ~/rig/calibration/rig_geometry.yaml.tmp ~/rig/calibration/rig_geometry.yaml")
+                    steps.append(f"Copied warp_map.npz + rig_geometry.yaml to {pi['name']} ({ip})")
+                    # Tell the RUNNING display to re-read the new warp — otherwise it keeps the
+                    # old warp cached in memory (load_warp is one-shot at init) and the
+                    # projector looks unchanged despite the new file on disk.
+                    try:
+                        api_port = (_rig_config.get("network") or {}).get("api_port", 5080)
+                        rr = requests.post(
+                            f"http://{ip}:{api_port}/api/reload_warp",
+                            timeout=5)
+                        if rr.ok and rr.json().get("reloaded"):
+                            steps.append(f"Reloaded warp into live display on {pi['name']}")
+                        else:
+                            steps.append(f"Warp saved on {pi['name']} — display not active, "
+                                         f"loads on next Init Display")
+                    except Exception as e:
+                        steps.append(f"(warp reload skipped on {pi['name']}: {e})")
                 except Exception as e:
                     steps.append(f"Failed to copy to {pi['name']}: {e}")
 
         return jsonify({"ok": True, "steps": steps})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "steps": steps})
+
+
+def _reinit_projector(target):
+    """Force a full projector bring-up on the display Pi over SSH: start_projector.sh sets
+    GPIO ALT2, re-inits the DLPC parallel input (fixes the common blank-projector case), and
+    kills+restarts X. Non-blocking (X starts backgrounded). Returns (ok, last-line-message)."""
+    try:
+        out = _ssh(target, "bash ~/rig/start_projector.sh", timeout=60)
+        return True, (out.strip().splitlines() or ["projector re-initialized"])[-1]
+    except Exception as e:
+        return False, str(e)
+
+
+@app.route("/api/start_calibration", methods=["POST"])
+def api_start_calibration():
+    """Deploy the geometry-calibration tools to the display Pi and launch calib_geo
+    (live sliders on :5091). Returns the sliders URL for the browser to open."""
+    if not _rig_config:
+        return jsonify({"ok": False, "error": "No rig loaded"}), 400
+    target_pi = next((pi for pi in _rig_config.get("pis", [])
+                      if "display" in pi.get("devices", [])), None)
+    if not target_pi:
+        return jsonify({"ok": False, "error": "No Pi has the display device"}), 400
+    user = target_pi.get("user", "vruser")
+    ip = target_pi["ip"]
+    target = f"{user}@{ip}"
+
+    name = (request.json or {}).get("geometry") or "rig_geometry.yaml"
+    geo_data = (request.json or {}).get("geometry_data")   # live Display-card params
+    geo_file = (GEO_DIR / Path(name).name).resolve()
+    tools = ["calib_geo.py", "cal_start.sh", "cal_stop.sh",
+             "panel_grid.py", "validate_calibration_pygame.py"]
+    steps = []
+    try:
+        _ssh(target, "mkdir -p ~/rig/calibration")
+        srcs = [str(GEO_DIR / t) for t in tools if (GEO_DIR / t).exists()]
+        if srcs:
+            r = subprocess.run(["scp", "-o", "ConnectTimeout=5", *srcs,
+                                f"{target}:~/rig/calibration/"],
+                               capture_output=True, text=True, timeout=45)
+            if r.returncode != 0:
+                raise RuntimeError(f"scp tools failed: {r.stderr.strip()}")
+        steps.append(f"Deployed calibration tools to {target_pi['name']} ({ip})")
+
+        # Initialize calib_geo with the LIVE Display-card params: overwrite the Pi's
+        # rig_geometry.yaml so Calibrate always starts from what's on the card. (Load
+        # defaults inside the tool stays a separate, manual action.)
+        if geo_data:
+            try:
+                g = dict(geo_data)
+                if isinstance(g.get("projector"), dict) and "resolution" in g["projector"]:
+                    g["projector"]["resolution"] = _FlowList(g["projector"]["resolution"])
+                if "luminance_reference" in g:
+                    g["luminance_reference"] = [_FlowList(p) for p in g["luminance_reference"]]
+                import tempfile
+                fd, tmp = tempfile.mkstemp(suffix=".yaml"); os.close(fd)
+                with open(tmp, "w") as f:
+                    yaml.dump(g, f, default_flow_style=False, sort_keys=True)
+                _scp(tmp, f"{target}:~/rig/calibration/rig_geometry.yaml")
+                os.unlink(tmp)
+                steps.append("Initialized projector geometry from the Display card")
+            except Exception as e:
+                steps.append(f"WARN: geometry init failed ({e}); using the Pi's existing file")
+        else:
+            # Fallback (no live data sent): seed only if the Pi has none — never clobber.
+            chk = subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=5", target,
+                 "test -e ~/rig/calibration/rig_geometry.yaml"],
+                capture_output=True, text=True, timeout=15)
+            if chk.returncode != 0 and geo_file.exists():
+                _scp(str(geo_file), f"{target}:~/rig/calibration/rig_geometry.yaml")
+                steps.append(f"Seeded rig_geometry.yaml from {geo_file.name}")
+
+        # Force a projector re-init so calib_geo opens on a fresh display with the DLPC
+        # parallel input correctly configured (requested: reinit on Calibrate/Stop). If it
+        # fails it's non-fatal — cal_start.sh also inits the projector when X is down.
+        ok, msg = _reinit_projector(target)
+        steps.append(f"Projector re-init: {msg}" if ok else f"WARN projector re-init: {msg}")
+
+        out = _ssh(target, "bash ~/rig/calibration/cal_start.sh geo", timeout=45)
+        steps.append((out.strip().splitlines() or ["started"])[0])
+        return jsonify({"ok": True, "url": f"http://{ip}:5091", "steps": steps})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "steps": steps})
+
+
+@app.route("/api/stop_calibration", methods=["POST"])
+def api_stop_calibration():
+    """Stop the geometry-calibration tool on the display Pi (cal_stop.sh)."""
+    if not _rig_config:
+        return jsonify({"ok": False, "error": "No rig loaded"}), 400
+    target_pi = next((pi for pi in _rig_config.get("pis", [])
+                      if "display" in pi.get("devices", [])), None)
+    if not target_pi:
+        return jsonify({"ok": False, "error": "No Pi has the display device"}), 400
+    target = f"{target_pi.get('user', 'vruser')}@{target_pi['ip']}"
+    steps = []
+    try:
+        out = _ssh(target, "bash ~/rig/calibration/cal_stop.sh", timeout=20)
+        steps.append((out.strip().splitlines() or ["Calibration tool stopped"])[0])
+        # Re-init the projector so the normal display comes back cleanly (requested).
+        ok, msg = _reinit_projector(target)
+        steps.append(f"Projector re-init: {msg}" if ok else f"WARN projector re-init: {msg}")
+        return jsonify({"ok": True, "msg": (out.strip() or "stopped"), "steps": steps})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "steps": steps})
+
+
+_cwm_mod = None
+
+
+def _cwm():
+    """Lazily import display_calibration/compute_warp_map.py (numpy/scipy geometry)."""
+    global _cwm_mod
+    if _cwm_mod is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "compute_warp_map", str(GEO_DIR / "compute_warp_map.py"))
+        _cwm_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_cwm_mod)
+    return _cwm_mod
+
+
+@app.route("/api/derived_geometry", methods=["POST"])
+def api_derived_geometry():
+    """Az/alt range the warp actually fills for the given geometry (ray-traced within the
+    frame) — feeds the Display card's derived Az/Alt readouts."""
+    geo = (request.json or {}).get("geometry_data")
+    if not geo:
+        return jsonify({"ok": False, "error": "no geometry_data"}), 400
+    try:
+        return jsonify({"ok": True, **_cwm().derived_angle_ranges(geo)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
 
 
 @app.route("/api/check_warp")
@@ -555,8 +841,54 @@ def api_save_geometry():
         geo["luminance_reference"] = [_FlowList(p) for p in geo["luminance_reference"]]
     path = GEO_DIR / name
     with open(path, "w") as f:
-        yaml.dump(geo, f, default_flow_style=False, sort_keys=False)
+        # sort_keys=True keeps this writer byte-for-byte consistent with the
+        # standalone calib_geo.py dumper, so saving from either side gives no diff churn.
+        yaml.dump(geo, f, default_flow_style=False, sort_keys=True)
     return jsonify({"ok": True, "name": name})
+
+
+@app.route("/api/receive_geometry", methods=["POST"])
+def api_receive_geometry():
+    """Called by calib_geo on the projector Pi when the user hits Save: lands the tuned
+    geometry in the repo as the canonical rig_geometry.yaml PLUS a timestamped archive
+    (rig_geometry_YYYYMMDD_HHMM.yaml) so the most recent is obvious."""
+    from datetime import datetime
+    text = (request.json or {}).get("yaml")
+    if not text:
+        return jsonify({"ok": False, "error": "No yaml"}), 400
+    try:
+        yaml.safe_load(text)  # validate it parses before writing
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Invalid YAML: {e}"}), 400
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    archive = f"rig_geometry_{stamp}.yaml"
+    (GEO_DIR / archive).write_text(text)
+    (GEO_DIR / "rig_geometry.yaml").write_text(text)
+    print(f"[receive_geometry] archived {archive} + updated canonical rig_geometry.yaml")
+    return jsonify({"ok": True, "archived": archive, "canonical": "rig_geometry.yaml"})
+
+
+@app.route("/api/send_geometry", methods=["POST"])
+def api_send_geometry():
+    """Push a chosen (usually timestamped) geometry from the repo to the projector Pi as
+    its canonical rig_geometry.yaml, so the next warp/deploy uses it."""
+    if not _rig_config:
+        return jsonify({"ok": False, "error": "No rig loaded"}), 400
+    name = Path((request.json or {}).get("name", "")).name
+    src = GEO_DIR / name
+    if not name or not src.exists():
+        return jsonify({"ok": False, "error": f"Not found: {name}"}), 400
+    target_pi = next((pi for pi in _rig_config.get("pis", [])
+                      if "display" in pi.get("devices", [])), None)
+    if not target_pi:
+        return jsonify({"ok": False, "error": "No Pi has the display device"}), 400
+    target = f"{target_pi.get('user', 'vruser')}@{target_pi['ip']}"
+    try:
+        _ssh(target, "mkdir -p ~/rig/calibration")
+        _scp(str(src), f"{target}:~/rig/calibration/rig_geometry.yaml")
+        return jsonify({"ok": True, "sent": name, "to": target_pi["name"]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/quit", methods=["POST"])
@@ -619,6 +951,18 @@ def _get_deploy_files(role: str) -> list[tuple[str, str]]:
         files += [
             ("engine/__init__.py", "engine/__init__.py"),
             ("engine/follower.py", "engine/follower.py"),
+            # The display Pi (follower) also gets projector bring-up + the calibration tools,
+            # so Deploy alone makes it fully self-sufficient. start_projector.sh -> ~/rig/;
+            # the rest -> ~/rig/calibration/ (same place the Calibrate button uses).
+            # NOTE: start_projector.sh still calls ~/dlp/init_parallel_mode.py, an external
+            # dep NOT in this repo — vendor that separately if the SD card is ever reflashed.
+            ("display_calibration/start_projector.sh", "start_projector.sh"),
+            ("display_calibration/calib_geo.py", "calibration/calib_geo.py"),
+            ("display_calibration/cal_start.sh", "calibration/cal_start.sh"),
+            ("display_calibration/cal_stop.sh", "calibration/cal_stop.sh"),
+            ("display_calibration/panel_grid.py", "calibration/panel_grid.py"),
+            ("display_calibration/validate_calibration_pygame.py",
+             "calibration/validate_calibration_pygame.py"),
         ]
     return files
 

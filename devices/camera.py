@@ -44,6 +44,16 @@ class Camera(Device):
         # be dropped (e.g. 3) to fit limited storage such as the SD card. See rig config.
         self.bitrate_mbps = float(task_params.get("bitrate_mbps",
                             rig_config.get("bitrate_mbps", 8)))
+        # IR exposure/gain (rig-hardware calibration, set live from the setup UI). auto_exposure
+        # True => libcamera AEC/AGC; False => fixed ExposureTime + AnalogueGain. Capping the sensor
+        # gain is what suppresses the rolling readout banding on the mono IMX296. Read like
+        # bitrate_mbps (task_params first, then rig_config); not in task_params_schema.
+        self.auto_exposure = bool(task_params.get("auto_exposure",
+                             rig_config.get("auto_exposure", True)))
+        self.exposure_us = int(task_params.get("exposure_us",
+                           rig_config.get("exposure_us", 10000)))
+        self.gain = float(task_params.get("gain",
+                    rig_config.get("gain", 1.0)))
         self._recording = False
         self._is_preview = True   # False once a real session recording starts (see start_recording)
         self._stream_active = False
@@ -78,9 +88,11 @@ class Camera(Device):
         # pre_callback ref cycle) and hangs the next open, unrecoverable via Stop/Reinit.
         try:
             self._cam = Picamera2()
+            controls = {"FrameRate": self.fps, "Saturation": 0.0}
+            controls.update(self._exposure_controls())
             cfg = self._cam.create_video_configuration(
                 main={"size": tuple(self.resolution), "format": "RGB888"},
-                controls={"FrameRate": self.fps, "Saturation": 0.0},
+                controls=controls,
             )
             self._cam.configure(cfg)
             encoder = H264Encoder(bitrate=int(self.bitrate_mbps * 1_000_000))
@@ -102,6 +114,42 @@ class Camera(Device):
                 self._cam = None
                 time.sleep(0.3)   # sensor releases asynchronously; settle before any reopen
             raise
+
+    def _exposure_controls(self) -> dict:
+        """libcamera exposure/gain controls for the current settings. Auto => let AEC/AGC run;
+        manual => fix ExposureTime + AnalogueGain (low gain suppresses the rolling readout
+        banding). Applied both at configure time (start_recording) and live (apply_exposure)."""
+        if self.auto_exposure:
+            return {"AeEnable": True}
+        return {"AeEnable": False,
+                "ExposureTime": int(self.exposure_us),
+                "AnalogueGain": float(self.gain)}
+
+    def set_live_controls(self, ctrls: dict) -> dict:
+        """Apply libcamera controls to the running camera, dropping any keys this libcamera build
+        doesn't support (e.g. on trixie). No-op if the camera isn't open. Returns what was applied."""
+        if self._cam is None:
+            return {}
+        try:
+            supported = set(self._cam.camera_controls)
+        except Exception:
+            supported = None
+        applied = {k: v for k, v in ctrls.items()
+                   if supported is None or k in supported}
+        if applied:
+            self._cam.set_controls(applied)
+        return applied
+
+    def apply_exposure(self, auto_exposure=None, exposure_us=None, gain=None) -> dict:
+        """Update exposure settings (any arg left None is unchanged) and push them to the running
+        camera. Returns the controls applied (empty if the camera isn't open)."""
+        if auto_exposure is not None:
+            self.auto_exposure = bool(auto_exposure)
+        if exposure_us is not None:
+            self.exposure_us = int(exposure_us)
+        if gain is not None:
+            self.gain = float(gain)
+        return self.set_live_controls(self._exposure_controls())
 
     def _on_frame(self, request):
         if self._recording:

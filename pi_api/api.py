@@ -655,6 +655,9 @@ def camera_preview_start():
             "resolution": data.get("resolution", [1280, 720]),
             "fps": data.get("fps", 50),
             "bitrate_mbps": data.get("bitrate_mbps", 8),
+            "auto_exposure": data.get("auto_exposure", True),
+            "exposure_us": data.get("exposure_us", 10000),
+            "gain": data.get("gain", 1.0),
         }
         # Session recording: use real video dir with nested folder structure
         session_id = data.get("session_id")
@@ -715,6 +718,32 @@ def camera_preview_stop():
             dev.stop_recording()
             dev.close()
     return jsonify({"ok": True})
+
+
+@app.route("/api/camera_controls", methods=["POST"])
+def camera_controls():
+    """Apply live exposure/gain to the running camera (setup-UI banding tuning). Serialized with
+    start/stop via _camera_lock so we never set controls on a camera being torn down."""
+    data = request.json or {}
+    with _camera_lock:
+        with _devices_lock:
+            dev = _devices.get("camera")
+        if dev is None or getattr(dev, "_cam", None) is None:
+            return jsonify({"ok": False, "error": "Camera not running"}), 400
+        # Never change exposure/gain mid-experiment: a real session recording must not be mutated
+        # by stale setup-UI tuning (mirrors camera_preview_stop's session guard).
+        if getattr(dev, "_recording", False) and not getattr(dev, "_is_preview", True):
+            return jsonify({"ok": False,
+                            "error": "Session recording in progress; controls locked"}), 409
+        try:
+            applied = dev.apply_exposure(
+                auto_exposure=data.get("auto_exposure"),
+                exposure_us=data.get("exposure_us"),
+                gain=data.get("gain"),
+            )
+            return jsonify({"ok": True, "applied": {k: str(v) for k, v in applied.items()}})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/monitor_photodiode", methods=["POST"])

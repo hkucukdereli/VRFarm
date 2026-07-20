@@ -540,6 +540,12 @@ async function reinitDevice(name) {
     (data.steps || []).forEach(s => log('  ' + s));
     deviceState[name] = deviceState[name] || {};
     deviceState[name].initialized = !!data.ok;
+    // Camera reinit releases the camera server-side (the MJPEG stream closes), so clear the
+    // streaming flag and re-render — otherwise the card keeps a dead, frozen preview <img>.
+    if (name === 'camera') {
+      deviceState.camera.streaming = false;
+      renderDeviceList();
+    }
     log(data.ok ? (name + ' reinitialized.') : (name + ' reinit failed: ' + (data.error || '')));
   } catch (e) { log('Reinit error: ' + e); }
   finally { _unlockUI(); }

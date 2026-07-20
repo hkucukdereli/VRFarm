@@ -628,7 +628,9 @@ def go():
 
     # Start camera recording for session (if camera enabled)
     cam_cfg = rig.get("devices", {}).get("camera", {})
+    cam_recording = False
     if cam_cfg.get("enabled", False):
+        video_dir = rig["data"].get("video_dir", "/media/vruser/ssd/video")
         for pi in rig["pis"]:
             if "camera" in pi.get("devices", []):
                 try:
@@ -640,21 +642,35 @@ def go():
                         f"http://{pi['ip']}:{api_port}/api/camera_preview_start",
                         json={
                             "session_id": state["session_id"],
-                            "video_dir": rig["data"].get("video_dir",
-                                         "/media/vruser/ssd/video"),
+                            "video_dir": video_dir,
                             "resolution": cam_cfg.get("resolution", [1280, 720]),
                             "fps": cam_cfg.get("fps", 50),
+                            "bitrate_mbps": cam_cfg.get("bitrate_mbps", 8),
                         }, timeout=10)
-                    if r.json().get("ok"):
+                    # A failed record start (e.g. HTTP 500 when video_dir is unwritable /
+                    # the SSD isn't mounted) may not return JSON — parse defensively.
+                    ok, err = False, f"HTTP {r.status_code}"
+                    try:
+                        j = r.json()
+                        ok, err = bool(j.get("ok")), j.get("error", err)
+                    except Exception:
+                        pass
+                    if ok:
+                        cam_recording = True
                         steps.append(f"Camera recording on {pi['name']}")
                     else:
-                        steps.append(f"Camera failed on {pi['name']}: "
-                                     f"{r.json().get('error', '?')}")
+                        warn = (f"⚠️  CAMERA NOT RECORDING on {pi['name']}: {err} — "
+                                f"session runs WITHOUT video. Check the SSD / "
+                                f"video_dir ({video_dir}).")
+                        steps.append(warn)
+                        _app_logger.warning(warn)
                 except Exception as e:
-                    steps.append(f"Camera error: {e}")
+                    warn = (f"⚠️  CAMERA NOT RECORDING on {pi['name']}: {e} — "
+                            f"session runs WITHOUT video. Check the SSD / video_dir.")
+                    steps.append(warn)
+                    _app_logger.warning(warn)
                 break
-    if cam_cfg.get("enabled", False):
-        print("[go] Camera recording started")
+        print(f"[go] Camera recording {'started' if cam_recording else 'FAILED — no video'}")
     else:
         print("[go] Camera not enabled — skipping recording")
 
@@ -682,12 +698,13 @@ def stop():
     leader = get_leader_pi(rig)
     api_port = rig["network"]["api_port"]
 
-    # Stop camera recording first (so video file is finalized)
+    # Stop camera recording first (so video file is finalized). force=True: this is the
+    # legitimate end-of-session stop, allowed to finalize a real session recording.
     for pi in rig["pis"]:
         if "camera" in pi.get("devices", []):
             try:
                 requests.post(f"http://{pi['ip']}:{api_port}/api/camera_preview_stop",
-                              json={}, timeout=10)
+                              json={"force": True}, timeout=10)
             except Exception:
                 pass
 
@@ -730,18 +747,42 @@ def manual_reward():
     return jsonify({"ok": True})
 
 
+@app.route("/api/browse_folder", methods=["POST"])
+def browse_folder():
+    """Open a native macOS folder picker (this app runs locally on the Mac) and return the
+    chosen absolute path. Returns ok:False with error 'cancelled' if the dialog is dismissed."""
+    import subprocess
+    try:
+        script = ('POSIX path of (choose folder with prompt '
+                  '"Select data transfer destination")')
+        r = subprocess.run(["osascript", "-e", script],
+                           capture_output=True, text=True, timeout=180)
+        if r.returncode != 0:
+            return jsonify({"ok": False, "error": "cancelled"})
+        return jsonify({"ok": True, "path": r.stdout.strip()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
 @app.route("/api/transfer", methods=["POST"])
 def transfer():
     """Download session data from Pis to Mac."""
+    req = request.get_json(silent=True) or {}
     rig = state["rig_config"]
     api_port = rig["network"]["api_port"]
-    mac_dir = Path(rig["data"]["mac_dir"])
+    default_mac_dir = Path(rig["data"]["mac_dir"])
+    # Optional per-transfer destination override (UI field / Browse picker); blank = rig default.
+    dest_override = str(req.get("dest_dir", "")).strip()
+    mac_dir = Path(dest_override).expanduser() if dest_override else default_mac_dir
     session_id = state["session_id"]
     subject_id = state["session"]["subject_id"]
     date_str = state["session"]["date"]
     subject_date = f"{subject_id}_{date_str}"
     dest = mac_dir / subject_id / subject_date / session_id
-    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return jsonify({"ok": False, "error": f"Cannot create destination {dest}: {e}"})
 
     transferred = []
     for pi in rig["pis"]:
@@ -766,8 +807,9 @@ def transfer():
         except Exception as e:
             transferred.append(f"ERROR ({pi['name']}): {e}")
 
-    # Register in subject database
-    db_dir = mac_dir / "subjects"
+    # Register in subject database — always at the rig-default location so the index stays
+    # consistent even when session files are sent to an override destination.
+    db_dir = default_mac_dir / "subjects"
     register_session(
         subject_id=subject_id,
         session_id=session_id,

@@ -1,9 +1,10 @@
 data:
   leader_dir: /home/vruser/data
   mac_dir: /Users/hakan/VRFarm/data
-  video_dir: /media/vruser/ssd/video
+  video_dir: /home/vruser/data
 devices:
   camera:
+    bitrate_mbps: 3
     enabled: true
     fps: 50
     resolution:

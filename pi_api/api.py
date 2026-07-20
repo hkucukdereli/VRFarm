@@ -32,6 +32,10 @@ _process_log: list[str] = []
 # Persistent device instances (survive across requests)
 _devices: dict = {}  # name -> initialized Device instance
 _devices_lock = threading.Lock()
+# Serializes camera open/close across the whole check→pop→construct sequence so two concurrent
+# camera_preview_start/stop calls can't both open a Picamera2 and hang libcamera. Always acquire
+# this OUTSIDE _devices_lock (never the reverse) to keep a consistent lock order.
+_camera_lock = threading.Lock()
 _lick_events: list = []
 _photodiode_events: list = []
 _reward_events: list = []
@@ -212,17 +216,20 @@ def restart():
 def release_devices():
     """Close all pi_api-managed device instances (before engine takes over)."""
     released = []
-    with _devices_lock:
-        for name, dev in list(_devices.items()):
-            try:
-                if hasattr(dev, 'stop_stream'):
-                    dev.stop_stream()
-                if hasattr(dev, 'close'):
-                    dev.close()
-                released.append(name)
-            except Exception as e:
-                released.append(f"{name} (error: {e})")
-        _devices.clear()
+    # _camera_lock OUTSIDE _devices_lock (consistent order) so closing the camera here can't
+    # race a concurrent camera_preview_start/stop and leave libcamera in a bad state.
+    with _camera_lock:
+        with _devices_lock:
+            for name, dev in list(_devices.items()):
+                try:
+                    if hasattr(dev, 'stop_stream'):
+                        dev.stop_stream()
+                    if hasattr(dev, 'close'):
+                        dev.close()
+                    released.append(name)
+                except Exception as e:
+                    released.append(f"{name} (error: {e})")
+            _devices.clear()
     _lick_events.clear()
     _photodiode_events.clear()
     _reward_events.clear()
@@ -623,36 +630,57 @@ def init_photodiode():
 @app.route("/api/camera_preview_start", methods=["POST"])
 def camera_preview_start():
     """Start camera MJPEG preview (or session recording if session_id given)."""
-    # Don't restart if already recording (e.g. session recording started by Go)
-    with _devices_lock:
-        existing = _devices.get("camera")
-    if existing and existing._recording:
-        return jsonify({"ok": True, "message": "Camera already recording"})
-    _ensure_rig_path()
-    from devices.camera import Camera
     data = request.json or {}
-    rig_cfg = {
-        "resolution": data.get("resolution", [1280, 720]),
-        "fps": data.get("fps", 50),
-    }
-    # Session recording: use real video dir with nested folder structure
-    session_id = data.get("session_id")
-    if session_id and session_id != "preview":
-        video_dir = data.get("video_dir", "/media/vruser/ssd/video")
-        subj, subj_date, _ = _parse_session_id(session_id)
-        output_dir = str(Path(video_dir) / subj / subj_date)
-    else:
-        session_id = "preview"
-        output_dir = "/tmp/vrfarm_preview"
-    try:
-        dev = Camera()
-        dev.init(rig_config=rig_cfg, task_params={})
-        dev.start_recording(session_id=session_id, output_dir=output_dir)
+    # Serialize the whole check→pop→construct so two concurrent starts can't both open a
+    # Picamera2 and hang libcamera.
+    with _camera_lock:
+        # Don't restart if already recording (e.g. session recording started by Go)
         with _devices_lock:
-            _devices["camera"] = dev
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+            existing = _devices.get("camera")
+        if existing and existing._recording:
+            return jsonify({"ok": True, "message": "Camera already recording"})
+        # Tear down any stale (non-recording) camera before reopening. Constructing a new
+        # Picamera2 while a previous sensor handle lingers hangs libcamera — this is what froze
+        # the camera on res/fps changes.
+        with _devices_lock:
+            stale = _devices.pop("camera", None)
+        if stale is not None:
+            try:
+                stale.close()   # close() settles internally so libcamera releases the sensor
+            except Exception:
+                pass
+        _ensure_rig_path()
+        from devices.camera import Camera
+        rig_cfg = {
+            "resolution": data.get("resolution", [1280, 720]),
+            "fps": data.get("fps", 50),
+            "bitrate_mbps": data.get("bitrate_mbps", 8),
+        }
+        # Session recording: use real video dir with nested folder structure
+        session_id = data.get("session_id")
+        if session_id and session_id != "preview":
+            video_dir = data.get("video_dir", "/media/vruser/ssd/video")
+            subj, subj_date, _ = _parse_session_id(session_id)
+            output_dir = str(Path(video_dir) / subj / subj_date)
+        else:
+            session_id = "preview"
+            output_dir = "/tmp/vrfarm_preview"
+        dev = None
+        try:
+            dev = Camera()
+            dev.init(rig_config=rig_cfg, task_params={})
+            dev.start_recording(session_id=session_id, output_dir=output_dir)
+            with _devices_lock:
+                _devices["camera"] = dev
+            return jsonify({"ok": True})
+        except Exception as e:
+            # Never leave a half-opened camera outside _devices — it would hang the next open.
+            if dev is not None:
+                try:
+                    dev.close()
+                except Exception:
+                    pass
+            return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/camera_stream")
@@ -669,12 +697,23 @@ def camera_stream():
 
 @app.route("/api/camera_preview_stop", methods=["POST"])
 def camera_preview_stop():
-    """Stop camera preview."""
-    with _devices_lock:
-        dev = _devices.pop("camera", None)
-    if dev:
-        dev.stop_recording()
-        dev.close()
+    """Stop camera preview. Refuses to stop an active SESSION recording unless force=True, so a
+    setup-UI Reinit/Stop can't silently truncate a running experiment's video — only the
+    experiment UI's own end-of-session stop passes force=True."""
+    data = request.json or {}
+    force = bool(data.get("force", False))
+    with _camera_lock:
+        with _devices_lock:
+            dev = _devices.get("camera")
+        if (dev is not None and getattr(dev, "_recording", False)
+                and not getattr(dev, "_is_preview", True) and not force):
+            return jsonify({"ok": True,
+                            "message": "Session recording in progress; not stopped"})
+        with _devices_lock:
+            dev = _devices.pop("camera", None)
+        if dev:
+            dev.stop_recording()
+            dev.close()
     return jsonify({"ok": True})
 
 

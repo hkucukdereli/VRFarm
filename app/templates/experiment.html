@@ -273,7 +273,10 @@
         <button class="btn btn-green" id="btn-go" onclick="startSession()" disabled>GO</button>
         <button class="btn btn-red" id="btn-stop" onclick="stopSession()" disabled>STOP</button>
         <button class="btn btn-teal" id="btn-transfer" onclick="transferData()" disabled>Transfer</button>
-        <span style="flex:1;"></span>
+        <input type="text" id="transfer-dest" placeholder="transfer destination (rig default)"
+               title="Destination folder for transferred data. Blank = rig config default (data.mac_dir)."
+               style="flex:1; min-width:160px; padding:4px 6px; background:#2a2a2a; color:#ddd; border:1px solid #444; border-radius:3px;">
+        <button class="btn btn-sm btn-blue" id="btn-browse-dest" onclick="browseDest()">Browse…</button>
         <button class="btn btn-sm btn-blue" id="btn-live" onclick="toggleLive()" disabled>Live</button>
       </div>
     </div>
@@ -382,6 +385,11 @@ async function loadRig() {
 
     config = {rig: data.rig, task: null};
     document.getElementById('grace-period').value = data.rig.grace_period_s || 10;
+    // Pre-fill the transfer destination with the rig default (only if the user hasn't set one)
+    const _destField = document.getElementById('transfer-dest');
+    if (_destField && !_destField.value && data.rig.data && data.rig.data.mac_dir) {
+      _destField.value = data.rig.data.mac_dir;
+    }
     updateDevicePanels();
     buildPiStatus();
     for (const [name, res] of Object.entries(data.pi_results)) {
@@ -761,15 +769,19 @@ async function transferData() {
   _lockUI();
   const btn = document.getElementById('btn-transfer');
   btn.textContent = 'Transferring...';
-  log('Transferring data...');
+  const dest = document.getElementById('transfer-dest').value.trim();
+  log('Transferring data...' + (dest ? ' -> ' + dest : ''));
   try {
-    const r = await fetch('/api/transfer', {method: 'POST'});
+    const r = await fetch('/api/transfer', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({dest_dir: dest})
+    });
     const data = await r.json();
     if (data.ok) {
       log(`Transferred ${data.files.length} files.`);
       data.files.forEach(f => log('  ' + f));
     } else {
-      log('Transfer failed.');
+      log('Transfer failed: ' + (data.error || ''));
     }
   } catch (e) {
     log('Transfer error: ' + e.message);
@@ -777,6 +789,22 @@ async function transferData() {
   transferring = false;
   btn.textContent = 'Transfer';
   _unlockUI();
+}
+
+async function browseDest() {
+  log('Opening folder picker...');
+  try {
+    const r = await fetch('/api/browse_folder', {method: 'POST'});
+    const data = await r.json();
+    if (data.ok) {
+      document.getElementById('transfer-dest').value = data.path;
+      log('Destination: ' + data.path);
+    } else if (data.error && data.error !== 'cancelled') {
+      log('Browse failed: ' + data.error);
+    }
+  } catch (e) {
+    log('Browse error: ' + e.message);
+  }
 }
 
 // ── SSE events ──
@@ -1233,6 +1261,7 @@ function updateButtons() {
   document.getElementById('btn-go').disabled = !deployed || busy;
   document.getElementById('btn-stop').disabled = !running;
   document.getElementById('btn-transfer').disabled = !ended || busy;
+  document.getElementById('btn-browse-dest').disabled = busy;
   document.getElementById('btn-live').disabled = !rigLoaded || busy;
 }
 
@@ -1241,7 +1270,8 @@ function updateButtons() {
 function log(msg) {
   const el = document.getElementById('log');
   const ts = new Date().toLocaleTimeString();
-  el.insertAdjacentHTML('afterbegin', `<div>[${ts}] ${msg}</div>`);
+  const style = msg.includes('⚠️') ? ' style="color:#ff6b6b; font-weight:bold;"' : '';
+  el.insertAdjacentHTML('afterbegin', `<div${style}>[${ts}] ${msg}</div>`);
   el.scrollTop = 0;
 }
 

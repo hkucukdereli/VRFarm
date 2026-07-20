@@ -559,7 +559,10 @@ def api_reinit_device():
                     "Display init", timeout=30)
         ok = ok1 and ok2
     else:  # camera
-        ok = _post("/api/init_camera", {}, "Camera init", timeout=15)
+        # Release any stuck/streaming camera first so a frozen preview actually recovers,
+        # then verify the sensor is detected.
+        _post("/api/camera_preview_stop", {}, "Camera release", timeout=15)
+        ok = _post("/api/init_camera", {}, "Camera check", timeout=15)
     return jsonify({"ok": ok, "device": dev_name, "steps": steps})
 
 

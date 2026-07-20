@@ -10,7 +10,7 @@
   h1 { font-size: 18px; margin-bottom: 12px; color: #fff; }
   h3 { font-size: 13px; margin-bottom: 6px; color: #aaa; text-transform: uppercase; letter-spacing: 1px; }
 
-  .grid { display: grid; grid-template-columns: 390px 1fr; gap: 16px; }
+  .grid { display: grid; grid-template-columns: 350px 1fr; gap: 16px; }
 
   .card { background: #16213e; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
   label { display: block; font-size: 11px; color: #888; margin-bottom: 2px; margin-top: 6px; }
@@ -51,10 +51,17 @@
   .device-card { background: #0f3460; border-radius: 6px; padding: 10px; margin-bottom: 8px; }
   .device-card h4 { font-size: 12px; color: #ccc; margin-bottom: 4px; }
   .device-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+  /* Wraps a device's params + action buttons; disabled until Initialize is first pressed */
+  .device-fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+  .device-fieldset:disabled { opacity: 0.55; }
   .device-field { display: inline-flex; align-items: center; gap: 4px; }
   .device-field label { margin: 0; font-size: 10px; white-space: nowrap; }
   .device-field input, .device-field select { width: auto; min-width: 60px; max-width: 120px;
     padding: 3px 6px; font-size: 12px; }
+  /* Geometry param rows (SCREEN/VISUAL SPACE/PROJECTOR): tighter so each fits on one line */
+  .geo-row { gap: 6px; }
+  .geo-row .device-field input { min-width: 0; width: 76px; }
+  .geo-label { font-size: 10px; color: #888; min-width: 42px; }
 
   .cal-table { margin-top: 6px; border-collapse: collapse; font-size: 11px; }
   .cal-table th { color: #888; text-align: left; padding: 2px 6px; font-weight: 500; }
@@ -1256,7 +1263,8 @@ function renderDeviceList() {
         </span>
         ${assignHtml}
       </h4>
-      ${showControls ? controlsHtml : ''}
+      ${showControls ? `<fieldset class="device-fieldset" ${devicesInitialized ? '' : 'disabled'}>${controlsHtml}</fieldset>` : ''}
+      ${showControls && !devicesInitialized ? '<div style="font-size:10px; color:#888; margin-top:4px">Press Initialize to enable device controls.</div>' : ''}
       ${!pisReady && enabled ? '<div style="font-size:10px; color:#f44336; margin-top:4px">Waiting for Pi check...</div>' : ''}
     </div>`;
   }).join('');
@@ -1318,44 +1326,44 @@ function renderDisplayControls(dev) {
     const gf = (section, key, label, val, step) =>
       `<div class="device-field">
         <label>${label}</label>
-        <input type="number" value="${val}" step="${step || 'any'}" style="width:70px"
+        <input type="number" value="${val}" step="${step || 'any'}"
                onchange="updateGeoField('${section}','${key}',parseFloat(this.value))">
       </div>`;
 
     geoFields = `
     <div style="margin-top:6px; border-top:1px solid #333; padding-top:6px">
-      <div class="device-controls">
-        <span style="font-size:10px; color:#888; min-width:60px">SCREEN</span>
+      <div class="device-controls geo-row">
+        <span class="geo-label">SCREEN</span>
         ${gf('screen','parabola_A','A depth cm',s.parabola_A,0.1)}
         ${gf('screen','parabola_B','B curve',s.parabola_B,0.001)}
         ${gf('screen','height_cm','Height cm',s.height_cm,0.1)}
         <div class="device-field">
           <label>Az height cm</label>
-          <input type="number" value="${azH}" step="0.1" style="width:70px"
+          <input type="number" value="${azH}" step="0.1"
                  onchange="updateAzimuthHeight(parseFloat(this.value))">
         </div>
       </div>
-      <div class="device-controls">
-        <span style="font-size:10px; color:#888; min-width:60px">VISUAL SPACE</span>
+      <div class="device-controls geo-row">
+        <span class="geo-label">VISUAL SPACE</span>
         <div class="device-field">
           <label>Alt min° (derived)</label>
-          <input type="number" value="${s.altitude_min_deg ?? ''}" step="1" style="width:70px" disabled>
+          <input type="number" value="${s.altitude_min_deg ?? ''}" step="1" disabled>
         </div>
         <div class="device-field">
           <label>Alt max° (derived)</label>
-          <input type="number" value="${s.altitude_max_deg ?? ''}" step="1" style="width:70px" disabled>
+          <input type="number" value="${s.altitude_max_deg ?? ''}" step="1" disabled>
         </div>
         <div class="device-field">
           <label>Az min° (derived)</label>
-          <input type="number" id="az-min-derived" value="${derivedAz.min ?? ''}" step="1" style="width:70px" disabled>
+          <input type="number" id="az-min-derived" value="${derivedAz.min ?? ''}" step="1" disabled>
         </div>
         <div class="device-field">
           <label>Az max° (derived)</label>
-          <input type="number" id="az-max-derived" value="${derivedAz.max ?? ''}" step="1" style="width:70px" disabled>
+          <input type="number" id="az-max-derived" value="${derivedAz.max ?? ''}" step="1" disabled>
         </div>
       </div>
-      <div class="device-controls">
-        <span style="font-size:10px; color:#888; min-width:60px">PROJECTOR</span>
+      <div class="device-controls geo-row">
+        <span class="geo-label">PROJECTOR</span>
         ${gf('projector','throw_ratio','Throw ratio',p.throw_ratio,0.1)}
         ${gf('projector','throw_distance_cm','Throw cm',p.throw_distance_cm,1)}
         ${gf('projector','horizontal_stretch','H stretch',p.horizontal_stretch ?? 1.0,0.05)}
@@ -1530,8 +1538,8 @@ function renderDeviceCatalog() {
   el.innerHTML = `
     <select id="catalog-select" style="width:100%; margin-bottom:6px" onchange="updateCatalogInfo()">${opts}</select>
     <div>
-      <button class="btn btn-green btn-sm" onclick="addDevice()">Add Device</button>
-      <button class="btn btn-red btn-sm" onclick="removeDevice()">Remove Device</button>
+      <button class="btn btn-green" onclick="addDevice()">Add Device</button>
+      <button class="btn btn-red" onclick="removeDevice()">Remove Device</button>
     </div>
     <div id="catalog-info" style="font-size:10px; color:#666; margin-top:5px"></div>`;
   const sel = document.getElementById('catalog-select');
@@ -1579,8 +1587,8 @@ function removeDevice() {
 function log(msg) {
   const el = document.getElementById('log');
   const ts = new Date().toLocaleTimeString();
-  el.innerHTML += `<div>[${ts}] ${msg}</div>`;
-  el.scrollTop = el.scrollHeight;
+  el.insertAdjacentHTML('afterbegin', `<div>[${ts}] ${msg}</div>`);
+  el.scrollTop = 0;
 }
 
 async function quitApp() {

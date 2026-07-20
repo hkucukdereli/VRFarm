@@ -496,6 +496,24 @@ async function initDevices() {
   }
 }
 
+// Reinitialize just one device (display or camera) from its card, without re-initing the rig.
+async function reinitDevice(name) {
+  _lockUI();
+  log('Reinitializing ' + name + '...');
+  try {
+    const r = await fetch('/api/reinit_device', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({device: name})
+    });
+    const data = await r.json();
+    (data.steps || []).forEach(s => log('  ' + s));
+    deviceState[name] = deviceState[name] || {};
+    deviceState[name].initialized = !!data.ok;
+    log(data.ok ? (name + ' reinitialized.') : (name + ' reinit failed: ' + (data.error || '')));
+  } catch (e) { log('Reinit error: ' + e); }
+  finally { _unlockUI(); }
+}
+
 // ── Device-specific actions ──
 
 async function startCameraStream() {
@@ -1245,6 +1263,7 @@ function renderCameraControls(dev) {
       ${streaming
         ? `<button class="btn btn-red btn-sm" onclick="stopCameraStream()">Stop</button>`
         : `<button class="btn btn-blue btn-sm" onclick="startCameraStream()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
+      <button class="btn btn-yellow btn-sm" onclick="reinitDevice('camera')">Reinit</button>
     </div>
     ${streaming ? `<div class="stream-container"><img src="${streamUrl}" alt="Camera stream" style="filter:grayscale(1)"></div>` : ''}`;
 }
@@ -1328,6 +1347,7 @@ function renderDisplayControls(dev) {
 
   return `
     <div class="device-controls">
+      <button class="btn btn-yellow btn-sm" onclick="reinitDevice('display')">Reinit</button>
       <button class="calib-btn btn ${calibrating ? 'btn-red' : 'btn-green'} btn-sm" onclick="toggleCalibration()">${calibrating ? 'Stop Calib' : 'Calibrate'}</button>
       <button class="warp-btn btn ${warpBtnClass} btn-sm" onclick="generateWarp()">${warpBtnText}</button>
       <button class="btn btn-orange btn-sm" onclick="intensityCal()">Intensity Cal</button>

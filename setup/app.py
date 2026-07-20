@@ -490,6 +490,47 @@ def api_init_devices():
     return jsonify({"ok": all_ok, "steps": steps, "results": results})
 
 
+@app.route("/api/reinit_device", methods=["POST"])
+def api_reinit_device():
+    """Reinitialize a SINGLE device (display or camera) without touching the others —
+    same per-device flow as /api/init_devices, for the per-card Reinit buttons."""
+    if not _rig_config:
+        return jsonify({"ok": False, "error": "No rig loaded"}), 400
+    dev_name = (request.json or {}).get("device")
+    if dev_name not in ("display", "camera"):
+        return jsonify({"ok": False, "error": f"reinit not supported for '{dev_name}'"}), 400
+    devices = _rig_config.get("devices", {})
+    if dev_name not in devices or not devices[dev_name].get("enabled"):
+        return jsonify({"ok": False, "error": f"{dev_name} is not enabled"}), 400
+    api_port = _rig_config["network"]["api_port"]
+    ip = next((pi["ip"] for pi in _rig_config.get("pis", [])
+               if dev_name in pi.get("devices", [])), None)
+    if not ip:
+        return jsonify({"ok": False, "error": f"{dev_name} is not assigned to a Pi"}), 400
+
+    steps = []
+
+    def _post(endpoint, payload, label, timeout=10):
+        try:
+            r = requests.post(f"http://{ip}:{api_port}{endpoint}", json=payload, timeout=timeout)
+            res = r.json()
+            ok = res.get("ok", False)
+            steps.append(f"{label}: {'OK' if ok else 'FAIL'} {res.get('message', res.get('error', ''))}")
+            return ok
+        except Exception as e:
+            steps.append(f"{label}: FAIL ({e})")
+            return False
+
+    if dev_name == "display":
+        ok1 = _post("/api/init_projector", {}, "Projector", timeout=35)
+        ok2 = _post("/api/init_display", {"rig_config": devices["display"]},
+                    "Display init", timeout=30)
+        ok = ok1 and ok2
+    else:  # camera
+        ok = _post("/api/init_camera", {}, "Camera init", timeout=15)
+    return jsonify({"ok": ok, "device": dev_name, "steps": steps})
+
+
 @app.route("/api/generate_warp", methods=["POST"])
 def api_generate_warp():
     """Generate warp map from rig_geometry.yaml, then SCP to Leader Pi."""

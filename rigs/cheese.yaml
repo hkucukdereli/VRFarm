@@ -11,6 +11,8 @@ devices:
     - 1280
     - 720
     type: camera
+    live_preset: low
+    auto_exposure: false
   display:
     apply_warp: true
     enabled: true

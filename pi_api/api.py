@@ -658,6 +658,7 @@ def camera_preview_start():
             "auto_exposure": data.get("auto_exposure", True),
             "exposure_us": data.get("exposure_us", 10000),
             "gain": data.get("gain", 1.0),
+            "live_preset": data.get("live_preset", "med"),
         }
         # A real session_id records to disk; "preview"/none is a setup-UI live view — no file, and
         # a faithful full-fps preview (start_preview runs with no encoder to starve).
@@ -673,7 +674,7 @@ def camera_preview_start():
                 output_dir = str(Path(video_dir) / subj / subj_date)
                 dev.start_recording(session_id=session_id, output_dir=output_dir)
             else:
-                dev.start_preview()
+                dev.start_preview(downsample=bool(data.get("downsample", False)))
             with _devices_lock:
                 _devices["camera"] = dev
             return jsonify({"ok": True})

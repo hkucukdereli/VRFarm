@@ -646,6 +646,10 @@ def go():
                             "resolution": cam_cfg.get("resolution", [1280, 720]),
                             "fps": cam_cfg.get("fps", 50),
                             "bitrate_mbps": cam_cfg.get("bitrate_mbps", 8),
+                            "auto_exposure": cam_cfg.get("auto_exposure", True),
+                            "exposure_us": cam_cfg.get("exposure_us", 10000),
+                            "gain": cam_cfg.get("gain", 1.0),
+                            "live_preset": cam_cfg.get("live_preset", "med"),
                         }, timeout=10)
                     # A failed record start (e.g. HTTP 500 when video_dir is unwritable /
                     # the SSD isn't mounted) may not return JSON — parse defensively.
@@ -887,11 +891,17 @@ def camera_start():
     if not ip:
         return jsonify({"ok": False, "error": "Camera not assigned"}), 400
     try:
-        res = cam_cfg.get("resolution", [1280, 720])
-        # Half resolution for lightweight streaming
+        # Experiment preview: preview-only (no recording), downsampled to the live preset so the view
+        # is light during the run. The Pi derives the preset res/fps from the full recording
+        # resolution; exposure/gain carry over so the preview matches what will be recorded.
         r = requests.post(f"http://{ip}:{api_port}/api/camera_preview_start",
-                          json={"resolution": [res[0] // 2, res[1] // 2],
-                                "fps": min(cam_cfg.get("fps", 25), 25)},
+                          json={"resolution": cam_cfg.get("resolution", [1280, 720]),
+                                "fps": cam_cfg.get("fps", 50),
+                                "downsample": True,
+                                "live_preset": cam_cfg.get("live_preset", "med"),
+                                "auto_exposure": cam_cfg.get("auto_exposure", True),
+                                "exposure_us": cam_cfg.get("exposure_us", 10000),
+                                "gain": cam_cfg.get("gain", 1.0)},
                           timeout=10)
         return jsonify(r.json())
     except Exception as e:

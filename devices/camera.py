@@ -17,6 +17,15 @@ import numpy as np
 from .base import Device, DeviceInfo, IOType, register_device
 
 
+# Experiment live-view presets: downsample ONLY the live preview during a session (fps + a scale of
+# the recording resolution + JPEG quality). The SAVED video always uses the full recording profile.
+PRESETS = {
+    "high": {"fps": 25, "scale": 0.5, "quality": 75},
+    "med":  {"fps": 15, "scale": 0.25, "quality": 60},
+    "low":  {"fps": 10, "scale": 0.25, "quality": 45},
+}
+
+
 @register_device
 class Camera(Device):
     info = DeviceInfo("camera", "Camera", IOType.CSI, ["picamera2"])
@@ -54,6 +63,10 @@ class Camera(Device):
                            rig_config.get("exposure_us", 10000)))
         self.gain = float(task_params.get("gain",
                     rig_config.get("gain", 1.0)))
+        # Experiment live-view preset (high/med/low) — downsamples ONLY the live preview during a
+        # session; the recorded video always uses the full resolution/fps/bitrate above.
+        self.live_preset = str(task_params.get("live_preset",
+                           rig_config.get("live_preset", "med")))
         self._recording = False
         self._is_preview = True   # False once a real session recording starts (see start_recording)
         self._encoding = False    # True while the H264 encoder is running (recording, not preview-only)
@@ -61,6 +74,7 @@ class Camera(Device):
         self._preview_source = "main"       # capture_array stream feeding the mjpeg preview
         self._preview_fps = int(self.fps)   # preview pacing target (faithful for setup, throttled for recording)
         self._preview_quality = 80          # preview JPEG quality
+        self._lores_size = None             # (w,h) of the lores stream when previewing from it
         self._stream_active = False
         # Set = no mjpeg preview loop is inside capture_array(); stop_recording waits on this
         # before close() so we never close the camera mid-capture (a libcamera corruption path).
@@ -87,6 +101,8 @@ class Camera(Device):
         self._frame_log = []
         self._frame_idx = 0
 
+        preset = PRESETS.get(self.live_preset, PRESETS["med"])
+        lores_size = self._scaled_size(preset["scale"])
         # Open + configure + start. If ANY step after the sensor is opened fails (e.g. an
         # unsupported res/fps, encoder error, or unwritable output), release the half-opened
         # camera here — otherwise the open Picamera2 lingers (defeating refcount GC via the
@@ -95,8 +111,12 @@ class Camera(Device):
             self._cam = Picamera2()
             controls = {"FrameRate": self.fps, "Saturation": 0.0}
             controls.update(self._exposure_controls())
+            # Record the full 'main' stream to H264; preview from a small, decoupled 'lores' stream
+            # so capture_array() can't starve the encoder (the N1 buffer-starvation freeze). The
+            # preview runs at the live preset while the saved video stays full resolution/fps.
             cfg = self._cam.create_video_configuration(
                 main={"size": tuple(self.resolution), "format": "RGB888"},
+                lores={"size": lores_size, "format": "YUV420"},
                 controls=controls,
             )
             self._cam.configure(cfg)
@@ -105,12 +125,15 @@ class Camera(Device):
             self._cam.pre_callback = self._on_frame
             self._recording = True
             self._cam.start_recording(encoder, output)
-            # Preview reads the same 'main' stream, THROTTLED so capture_array() can't starve the
-            # H264 encoder (the buffer-starvation freeze). The experiment-UI phase moves this to a
-            # decoupled 'lores' stream so the preview can run at the chosen live preset unthrottled.
-            self._preview_source = "main"
-            self._preview_fps = min(int(self.fps), 10)
-            self._preview_quality = 50
+            self._preview_source = "lores"
+            self._preview_fps = preset["fps"]
+            self._preview_quality = preset["quality"]
+            # Crop the Y-plane with the size libcamera ACTUALLY configured (the ISP may adjust the
+            # requested lores size), so the preview never tears; fall back to the requested size.
+            try:
+                self._lores_size = tuple(self._cam.camera_configuration()["lores"]["size"])
+            except Exception:
+                self._lores_size = lores_size
             self._encoding = True
             self._live = True
         except Exception:
@@ -130,12 +153,22 @@ class Camera(Device):
                 time.sleep(0.3)   # sensor releases asynchronously; settle before any reopen
             raise
 
-    def start_preview(self):
-        """Preview-only live view (setup UI 'Live'): configure + start the camera with NO encoder
-        and write no file, so the mjpeg preview runs at the real capture fps. Freeze-safe: with no
-        H264 encoder competing on the stream, capture_array('main') can run at the sensor fps
-        without the buffer-starvation stall that happens when preview fights the encoder."""
+    def start_preview(self, downsample=False):
+        """Preview-only live view: configure + start the camera with NO encoder and write no file.
+        downsample=False (setup 'Live') runs at the real recording res/fps — faithful. downsample=True
+        (experiment 'Live') runs at the live preset (smaller res, lower fps) to keep the load light.
+        Freeze-safe either way: with no H264 encoder competing on the stream, capture_array('main')
+        can run without the buffer-starvation stall that happens when preview fights the encoder."""
         from picamera2 import Picamera2
+        if downsample:
+            preset = PRESETS.get(self.live_preset, PRESETS["med"])
+            size = self._scaled_size(preset["scale"])
+            fps = preset["fps"]
+            quality = preset["quality"]
+        else:
+            size = tuple(self.resolution)
+            fps = int(self.fps)   # faithful: the real capture fps, not throttled
+            quality = 85
         self._is_preview = True
         self._video_path = None
         self._tslog_path = None
@@ -143,17 +176,18 @@ class Camera(Device):
         self._frame_idx = 0
         try:
             self._cam = Picamera2()
-            controls = {"FrameRate": self.fps, "Saturation": 0.0}
+            controls = {"FrameRate": fps, "Saturation": 0.0}
             controls.update(self._exposure_controls())
             cfg = self._cam.create_video_configuration(
-                main={"size": tuple(self.resolution), "format": "RGB888"},
+                main={"size": size, "format": "RGB888"},
                 controls=controls,
             )
             self._cam.configure(cfg)
             self._cam.start()          # no encoder -> nothing is written
             self._preview_source = "main"
-            self._preview_fps = int(self.fps)   # faithful: the real capture fps, not throttled
-            self._preview_quality = 85
+            self._preview_fps = fps
+            self._preview_quality = quality
+            self._lores_size = None
             self._encoding = False
             self._recording = False
             self._live = True
@@ -167,6 +201,14 @@ class Camera(Device):
                 self._cam = None
                 time.sleep(0.3)
             raise
+
+    def _scaled_size(self, scale):
+        """A (w,h) scaled from the recording resolution, clamped even and >=64 — the lores preview
+        stream size (recording) and the downsampled preview-only size (experiment Live)."""
+        mw, mh = self.resolution
+        lw = max(64, (int(mw * scale) // 2) * 2)
+        lh = max(64, (int(mh * scale) // 2) * 2)
+        return (lw, lh)
 
     def _exposure_controls(self) -> dict:
         """libcamera exposure/gain controls for the current settings. Auto => let AEC/AGC run;
@@ -266,13 +308,18 @@ class Camera(Device):
         self._stream_idle.clear()   # a capture loop is now active; teardown will wait for us
         try:
             source = self._preview_source
+            lores_size = self._lores_size
             quality = self._preview_quality
             period = 1.0 / max(1, self._preview_fps)
             while self._live and self._cam is not None:
                 t0 = time.time()
                 try:
                     arr = self._cam.capture_array(source)
-                    img = Image.fromarray(arr).convert("L")
+                    if source == "lores" and lores_size is not None:
+                        lw, lh = lores_size
+                        img = Image.fromarray(arr[:lh, :lw], mode="L")   # Y plane = free grayscale
+                    else:
+                        img = Image.fromarray(arr).convert("L")
                     buf = io.BytesIO()
                     img.save(buf, format="JPEG", quality=quality)
                     yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"

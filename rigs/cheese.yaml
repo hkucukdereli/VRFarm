@@ -4,15 +4,15 @@ data:
   video_dir: /home/vruser/data
 devices:
   camera:
+    auto_exposure: false
     bitrate_mbps: 3
     enabled: true
     fps: 50
+    live_preset: low
     resolution:
     - 1280
     - 720
     type: camera
-    live_preset: low
-    auto_exposure: false
   display:
     apply_warp: true
     enabled: true

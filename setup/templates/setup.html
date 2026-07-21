@@ -597,6 +597,13 @@ function onCamExpChange() {
   _camApply();
 }
 
+function onCamFpsChange() {
+  rig.devices.camera = rig.devices.camera || {};
+  const el = document.getElementById('cam-fps');
+  if (el) rig.devices.camera.fps = parseInt(el.value) || 50;
+  renderDeviceList();   // re-render so the Exp µs max (1e6/fps) re-syncs to the new fps
+}
+
 async function startCameraStream() {
   const pi = getPiForDevice('camera');
   if (!pi) { log('Camera not assigned to a Pi'); return; }
@@ -1331,8 +1338,11 @@ function renderCameraControls(dev) {
   const maxExp = Math.floor(1e6 / fps);   // exposure is bounded by the frame period at this fps
   const expUs = Math.max(100, Math.min(dev.exposure_us ?? 10000, maxExp));
   const gainVal = dev.gain ?? 1.0;
+  const bitrate = dev.bitrate_mbps ?? 8;
+  const livePreset = dev.live_preset ?? 'med';
   const ds = deviceState.camera || {};
   const streaming = ds.streaming;
+  const lock = streaming ? 'disabled' : '';   // res/fps/bitrate reconfigure the camera -> lock while live
   const pi = getPiForDevice('camera');
   const streamUrl = pi ? `http://${pi.ip}:${rig.network.api_port}/api/camera_stream` : '';
 
@@ -1340,7 +1350,7 @@ function renderCameraControls(dev) {
     <div class="device-controls">
       <div class="device-field">
         <label>Resolution</label>
-        <select onchange="rig.devices.camera.resolution = this.value.split('x').map(Number)">
+        <select ${lock} onchange="rig.devices.camera.resolution = this.value.split('x').map(Number)">
           <option value="640x480" ${resStr === '640x480' ? 'selected' : ''}>640x480</option>
           <option value="1280x720" ${resStr === '1280x720' ? 'selected' : ''}>1280x720</option>
           <option value="1920x1080" ${resStr === '1920x1080' ? 'selected' : ''}>1920x1080</option>
@@ -1348,8 +1358,16 @@ function renderCameraControls(dev) {
       </div>
       <div class="device-field">
         <label>FPS</label>
-        <input type="number" value="${fps}" min="10" max="120" style="width:55px"
-               onchange="rig.devices.camera.fps = parseInt(this.value)">
+        <input type="number" id="cam-fps" value="${fps}" min="10" max="120" style="width:55px"
+               ${lock} onchange="onCamFpsChange()">
+      </div>
+      <div class="device-field">
+        <label>Bitrate</label>
+        <select ${lock} onchange="rig.devices.camera.bitrate_mbps = parseInt(this.value)">
+          <option value="12" ${bitrate === 12 ? 'selected' : ''}>High (12)</option>
+          <option value="8" ${bitrate === 8 ? 'selected' : ''}>Med (8)</option>
+          <option value="3" ${bitrate === 3 ? 'selected' : ''}>Low (3)</option>
+        </select>
       </div>
       <div class="device-field">
         <label>Auto exp</label>
@@ -1370,6 +1388,18 @@ function renderCameraControls(dev) {
         ? `<button class="btn btn-red btn-sm" onclick="stopCameraStream()">Stop</button>`
         : `<button class="btn btn-blue btn-sm" onclick="startCameraStream()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
       <button class="btn btn-yellow btn-sm" onclick="reinitDevice('camera')">Reinit</button>
+    </div>
+    ${streaming ? '<div style="font-size:10px; color:#888; margin-top:2px">Stop the stream to change resolution / FPS / bitrate.</div>' : ''}
+    <div class="device-controls" style="margin-top:4px">
+      <span style="font-size:11px; color:#888;">Experiment live view (saved video unaffected):</span>
+      <div class="device-field">
+        <label>Quality</label>
+        <select onchange="rig.devices.camera.live_preset = this.value">
+          <option value="high" ${livePreset === 'high' ? 'selected' : ''}>High (25fps)</option>
+          <option value="med" ${livePreset === 'med' ? 'selected' : ''}>Med (15fps)</option>
+          <option value="low" ${livePreset === 'low' ? 'selected' : ''}>Low (10fps)</option>
+        </select>
+      </div>
     </div>
     ${streaming ? `<div class="stream-container"><img src="${streamUrl}" alt="Camera stream" style="filter:grayscale(1)"></div>` : ''}`;
 }

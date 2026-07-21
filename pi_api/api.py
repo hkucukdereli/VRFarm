@@ -630,7 +630,7 @@ def init_photodiode():
 @app.route("/api/camera_preview_start", methods=["POST"])
 def camera_preview_start():
     """Start camera MJPEG preview (or session recording if session_id given)."""
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}   # tolerate a body-less POST (no 415)
     # Serialize the whole check→pop→construct so two concurrent starts can't both open a
     # Picamera2 and hang libcamera.
     with _camera_lock:
@@ -659,20 +659,21 @@ def camera_preview_start():
             "exposure_us": data.get("exposure_us", 10000),
             "gain": data.get("gain", 1.0),
         }
-        # Session recording: use real video dir with nested folder structure
+        # A real session_id records to disk; "preview"/none is a setup-UI live view — no file, and
+        # a faithful full-fps preview (start_preview runs with no encoder to starve).
         session_id = data.get("session_id")
-        if session_id and session_id != "preview":
-            video_dir = data.get("video_dir", "/media/vruser/ssd/video")
-            subj, subj_date, _ = _parse_session_id(session_id)
-            output_dir = str(Path(video_dir) / subj / subj_date)
-        else:
-            session_id = "preview"
-            output_dir = "/tmp/vrfarm_preview"
+        recording = bool(session_id and session_id != "preview")
         dev = None
         try:
             dev = Camera()
             dev.init(rig_config=rig_cfg, task_params={})
-            dev.start_recording(session_id=session_id, output_dir=output_dir)
+            if recording:
+                video_dir = data.get("video_dir", "/media/vruser/ssd/video")
+                subj, subj_date, _ = _parse_session_id(session_id)
+                output_dir = str(Path(video_dir) / subj / subj_date)
+                dev.start_recording(session_id=session_id, output_dir=output_dir)
+            else:
+                dev.start_preview()
             with _devices_lock:
                 _devices["camera"] = dev
             return jsonify({"ok": True})
@@ -703,7 +704,7 @@ def camera_preview_stop():
     """Stop camera preview. Refuses to stop an active SESSION recording unless force=True, so a
     setup-UI Reinit/Stop can't silently truncate a running experiment's video — only the
     experiment UI's own end-of-session stop passes force=True."""
-    data = request.json or {}
+    data = request.get_json(silent=True) or {}   # tolerate a body-less POST (no 415)
     force = bool(data.get("force", False))
     with _camera_lock:
         with _devices_lock:

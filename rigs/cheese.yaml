@@ -1,11 +1,14 @@
 data:
   leader_dir: /home/vruser/data
   mac_dir: /Users/hakan/VRFarm/data
-  video_dir: /media/vruser/ssd/video
+  video_dir: /home/vruser/data
 devices:
   camera:
+    auto_exposure: false
+    bitrate_mbps: 3
     enabled: true
     fps: 50
+    live_preset: low
     resolution:
     - 1280
     - 720
@@ -13,7 +16,7 @@ devices:
   display:
     apply_warp: true
     enabled: true
-    geometry_file: rig_geometry.yaml
+    geometry_file: rig_geometry_20260721_1513.yaml
     refresh_hz: 60
     resolution:
     - 1920

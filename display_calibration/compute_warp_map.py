@@ -364,10 +364,12 @@ def orient_maps(geo, az_map, alt_map, valid, px_map, py_map):
     ox = int(cal.get('offset_x', 0))
     oy = int(cal.get('offset_y', 0))
     fx = int(cal.get('frame_x', 0))
-    fy = int(cal.get('frame_y', 0))
+    _fy = int(cal.get('frame_y', 0))                    # legacy symmetric inset (fallback)
+    fy_top = int(cal.get('frame_y_top', _fy))
+    fy_bot = int(cal.get('frame_y_bottom', _fy))
 
     PX, PY = np.meshgrid(np.arange(res_w), np.arange(res_h))
-    in_frame = (PX >= fx) & (PX < res_w - fx) & (PY >= fy) & (PY < res_h - fy)
+    in_frame = (PX >= fx) & (PX < res_w - fx) & (PY >= fy_top) & (PY < res_h - fy_bot)
 
     have = valid & np.isfinite(az_map)
     try:
@@ -404,10 +406,13 @@ def derived_angle_ranges(geo):
     az_map, alt_map, valid = compute_inverse_map(g, proj)   # already display-space (flip/offset baked)
     cal = g.get('calibration', {})
     res_w, res_h = g['projector']['resolution']
-    fx, fy = int(cal.get('frame_x', 0)), int(cal.get('frame_y', 0))
+    fx = int(cal.get('frame_x', 0))
+    _fy = int(cal.get('frame_y', 0))                    # legacy symmetric inset (fallback)
+    fy_top = int(cal.get('frame_y_top', _fy))
+    fy_bot = int(cal.get('frame_y_bottom', _fy))
     PX, PY = np.meshgrid(np.arange(res_w), np.arange(res_h))
     m = (valid & np.isfinite(az_map) &
-         (PX >= fx) & (PX < res_w - fx) & (PY >= fy) & (PY < res_h - fy))
+         (PX >= fx) & (PX < res_w - fx) & (PY >= fy_top) & (PY < res_h - fy_bot))
     if not m.any():
         return {"az_min_deg": None, "az_max_deg": None,
                 "alt_min_deg": None, "alt_max_deg": None}

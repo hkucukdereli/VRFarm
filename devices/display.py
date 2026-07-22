@@ -9,6 +9,15 @@ auto-blanks after stim duration.
 
 from __future__ import annotations
 
+import os
+
+# SDL installs its own SIGINT/SIGTERM handlers when the video subsystem inits, which makes the
+# host process (pi_api) swallow SIGTERM — so graceful restarts (self-SIGTERM via /api/restart,
+# Deploy, Restart-API) silently no-op and the process keeps running stale code until a SIGKILL.
+# Tell SDL to leave signals to Python so systemd's SIGTERM restarts pi_api cleanly. Must be set
+# before pygame.init() (pygame is imported lazily in start_display).
+os.environ["SDL_HINT_NO_SIGNAL_HANDLERS"] = "1"
+
 from .base import Device, DeviceInfo, IOType, register_device
 
 

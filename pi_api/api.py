@@ -203,10 +203,14 @@ def logs():
 
 @app.route("/api/restart", methods=["POST"])
 def restart():
-    """Restart the pi_api process (systemd will auto-restart)."""
+    """Restart the pi_api process (systemd Restart=always respawns it). Graceful SIGTERM first,
+    then FORCE-exit if still alive after 2s: with the display up, SDL (pygame) can swallow SIGTERM,
+    which used to leave stale code running and make Deploy / Restart-API silently no-op."""
     def _shutdown():
         time.sleep(0.5)
-        os.kill(os.getpid(), signal.SIGTERM)
+        os.kill(os.getpid(), signal.SIGTERM)   # graceful
+        time.sleep(2.0)
+        os._exit(0)                            # forced: SIGTERM was swallowed (e.g. SDL)
 
     threading.Thread(target=_shutdown, daemon=True).start()
     return jsonify({"ok": True, "message": "Restarting..."})

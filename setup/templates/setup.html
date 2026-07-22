@@ -1693,9 +1693,7 @@ function renderDisplayControls(dev) {
       <span class="disp-label">CALIBRATION</span>
       <div class="device-controls">
         <button class="calib-btn btn ${calibrating ? 'btn-red' : 'btn-green'} btn-sm" onclick="toggleCalibration()">${calibrating ? 'Stop Calib' : 'Calibrate'}</button>
-        <button class="warp-btn btn ${warpBtnClass} btn-sm" onclick="generateWarp()">${warpBtnText}</button>
         <button class="btn btn-orange btn-sm" onclick="intensityCal()">Intensity Cal</button>
-        ${warpExists ? '<span style="font-size:10px; color:#4caf50">warp_map.npz found on Leader</span>' : '<span style="font-size:10px; color:#f44336">warp_map.npz not found on Leader</span>'}
       </div>
     </div>
 
@@ -1711,6 +1709,8 @@ function renderDisplayControls(dev) {
         </div>
         <button class="btn btn-gray btn-sm" onclick="refreshGeoList()" title="Reload the geometry list (pick up newly saved calibrations)">&#8635;</button>
         <button class="btn btn-blue btn-sm" onclick="sendGeometry()" title="Copy the selected geometry to the projector Pi as its rig_geometry.yaml">Send to projector</button>
+        <button class="warp-btn btn ${warpBtnClass} btn-sm" onclick="generateWarp()" title="Ray-trace the selected geometry into warp_map.npz and deploy it to the Leader">${warpBtnText}</button>
+        ${warpExists ? '<span style="font-size:10px; color:#4caf50">warp_map.npz found on Leader</span>' : '<span style="font-size:10px; color:#f44336">warp_map.npz not found on Leader</span>'}
       </div>
       ${geoFields}
     </div>`;

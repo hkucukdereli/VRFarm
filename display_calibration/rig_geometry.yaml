@@ -3,7 +3,8 @@ calibration:
   flip_h: false
   flip_v: true
   frame_x: 207
-  frame_y: 3
+  frame_y_bottom: 3
+  frame_y_top: 3
   offset_x: 0
   offset_y: -405
 luminance_reference:
@@ -15,7 +16,7 @@ luminance_reference:
 - [100, 0.35]
 - [105, 0.3]
 projector:
-  horizontal_stretch: 1.5474813535393845
+  horizontal_stretch: 1.5474813535393852
   lateral_offset_cm: 0
   lens_offset_vertical: 1
   optical_axis_elevation_deg: -7.0

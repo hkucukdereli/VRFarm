@@ -4,8 +4,10 @@ calib_geo.py — LANDMARK-registration geometry calibration.
 Instead of eyeballing abstract stretch factors, you register the projected grid to
 physical reality and the tool back-solves the geometry:
 
-  1. frame_x / frame_y : slide the thin cyan boundary lines onto where the projector
-     light actually meets the physical screen. The enclosed rectangle = USABLE PIXELS.
+  1. frame_x / frame_y_top / frame_y_bottom : slide the thin cyan boundary lines onto
+     where the projector light actually meets the physical screen. frame_x is a single
+     symmetric left/right inset; the top and bottom insets are independent (the screen is
+     symmetric in azimuth but not in altitude). The enclosed rectangle = USABLE PIXELS.
   2. offset_x / offset_y : move the GREEN 0° cross (vertical = az 0 meridian,
      horizontal = alt 0 "azimuth line" / eye level) onto physical straight-ahead. That
      intersection is the coordinate origin.
@@ -62,11 +64,12 @@ GEO_SLIDERS = {
 }
 # Landmark / orientation controls. Written to rig_geometry.yaml `calibration:` AND the
 # sidecar. These DO reach the deployed warp (usable area + orientation), unlike before.
-DISPLAY_KEYS = ["offset_x", "offset_y", "flip_h", "flip_v", "frame_x", "frame_y", "az90_x"]
+DISPLAY_KEYS = ["offset_x", "offset_y", "flip_h", "flip_v", "frame_x",
+                "frame_y_top", "frame_y_bottom", "az90_x"]
 
 # Changing any of these re-anchors the solved stretches to the landmarks.
-SOLVE_TRIGGERS = {"az90_x", "offset_x", "frame_y", "azimuth_height", "parabola_A",
-                  "parabola_B", "throw_ratio", "optical_axis_elevation_deg",
+SOLVE_TRIGGERS = {"az90_x", "offset_x", "frame_y_top", "frame_y_bottom", "azimuth_height",
+                  "parabola_A", "parabola_B", "throw_ratio", "optical_axis_elevation_deg",
                   "lens_offset_vertical"}
 
 # Defaults — only fill gaps if rig_geometry.yaml is missing a key.
@@ -86,7 +89,8 @@ PARAMS = {"parabola_A": 12.7, "parabola_B": 0.044, "throw_ratio": 1.2,
           "optical_axis_elevation_deg": -3.0, "lens_offset_vertical": 1.0,
           "azimuth_height": 14.4,   # cm, eye/az-line above screen bottom -> drives altitudes
           "offset_x": 0, "offset_y": 0, "flip_h": False, "flip_v": True,
-          "frame_x": 40, "frame_y": 40,   # usable-area insets (px), symmetric L/R and T/B
+          "frame_x": 40,                  # usable-area inset (px), symmetric L/R
+          "frame_y_top": 40, "frame_y_bottom": 40,   # usable-area insets (px), independent T/B
           "az90_x": 1720}                 # display column of the +90° azimuth landmark line
 LOCK = threading.Lock()
 
@@ -134,19 +138,21 @@ def load_geometry():
                 float(-PARAMS["parabola_A"] * np.tan(np.radians(sc["altitude_min_deg"]))), 1)
         except Exception:
             pass
-    # landmark/orientation controls: calibration block first, then sidecar
-    cal = GEO.get("calibration", {})
-    for k in DISPLAY_KEYS:
-        if k in cal:
-            PARAMS[k] = cal[k]
+    # landmark/orientation controls: calibration block first, then sidecar override.
+    sources = [GEO.get("calibration", {})]
     if PREVIEW_PATH.exists():
         try:
-            pv = json.loads(PREVIEW_PATH.read_text())
-            for k in DISPLAY_KEYS:
-                if k in pv:
-                    PARAMS[k] = pv[k]
+            sources.append(json.loads(PREVIEW_PATH.read_text()))
         except Exception:
             pass
+    for src in sources:
+        for k in DISPLAY_KEYS:
+            if k in src:
+                PARAMS[k] = src[k]
+        # migrate a legacy symmetric frame_y -> independent top/bottom insets
+        if "frame_y" in src and "frame_y_top" not in src and "frame_y_bottom" not in src:
+            PARAMS["frame_y_top"] = int(src["frame_y"])
+            PARAMS["frame_y_bottom"] = int(src["frame_y"])
     _coerce_types()
     _apply_visual_field()
     _solve_stretches()
@@ -155,7 +161,7 @@ def load_geometry():
 def _coerce_types():
     for k in ("flip_h", "flip_v"):
         PARAMS[k] = bool(PARAMS[k])
-    for k in ("offset_x", "offset_y", "frame_x", "frame_y", "az90_x"):
+    for k in ("offset_x", "offset_y", "frame_x", "frame_y_top", "frame_y_bottom", "az90_x"):
         PARAMS[k] = int(round(float(PARAMS[k])))
 
 
@@ -325,7 +331,8 @@ def _solve_stretches():
     img_h ∝ 1/vstretch, and az=0 stays at the panel center column), so a single
     proportional rescale hits the target with no iteration:
       - horizontal: model |px(±90)-px(0)| span -> the marked ±90 half-span in display px.
-      - vertical:   model |py(alt_max)-py(alt_min)| span -> the usable height (res_h-2*frame_y).
+      - vertical:   model |py(alt_max)-py(alt_min)| span -> the usable height
+                    (res_h - frame_y_top - frame_y_bottom).
     """
     geo = _params_to_geo()
     try:
@@ -352,7 +359,7 @@ def _solve_stretches():
     pbot = _model_pixel(0.0, almin, geo, proj)
     if ptop and pbot:
         cur = abs(pbot[1] - ptop[1])
-        tgt = abs(res_h - 2 * PARAMS["frame_y"])
+        tgt = abs(res_h - PARAMS["frame_y_top"] - PARAMS["frame_y_bottom"])
         if cur > 1.0 and tgt > 1.0:
             PARAMS["vertical_stretch"] = float(
                 np.clip(PARAMS["vertical_stretch"] * tgt / cur, 0.1, 6.0))
@@ -420,7 +427,8 @@ def grid_lines(p):
     res_w, res_h = geo["projector"]["resolution"]
     out = {"res": [res_w, res_h], "almin": almin, "almax": almax,
            "azmin": -90, "azmax": 90,
-           "frame_x": p["frame_x"], "frame_y": p["frame_y"],
+           "frame_x": p["frame_x"], "frame_y_top": p["frame_y_top"],
+           "frame_y_bottom": p["frame_y_bottom"],
            "hstretch": round(p["horizontal_stretch"], 4),
            "vstretch": round(p["vertical_stretch"], 4),
            "alt_lines": [], "az_lines": []}
@@ -488,13 +496,15 @@ const S=[
 ['horizontal_stretch',0.05,6.0,0.01,'Solved from landmarks'],['vertical_stretch',0.1,6.0,0.01,''],
 ['offset_x',-1000,1000,1,'Landmarks — origin cross'],['offset_y',-1000,1000,1,''],
 ['az90_x',0,1920,1,'Landmark — ±90° lines'],
-['frame_x',0,600,1,'Usable area (px insets)'],['frame_y',0,400,1,'']];
+['frame_x',0,600,1,'Usable area (px insets)'],
+['frame_y_top',0,540,1,''],['frame_y_bottom',0,540,1,'']];
 const T=['flip_h','flip_v'];let P={};
 const DEC={};for(const r of S)DEC[r[0]]=Math.max(0,-Math.floor(Math.log10(r[3])+1e-9));
 function fmt(k,v){return (+v).toFixed(DEC[k]??2);}
 function outLabel(k,v){v=+v;
   if(k==='frame_x')return v+'px  usable x: '+v+'..'+(RES[0]-v)+' ('+(RES[0]-2*v)+')';
-  if(k==='frame_y')return v+'px  usable y: '+v+'..'+(RES[1]-v)+' ('+(RES[1]-2*v)+')';
+  if(k==='frame_y_top')return v+'px  top edge y='+v+'  (usable h '+(RES[1]-v-(+P.frame_y_bottom||0))+')';
+  if(k==='frame_y_bottom')return v+'px  bottom edge y='+(RES[1]-v)+'  (usable h '+(RES[1]-(+P.frame_y_top||0)-v)+')';
   if(k==='az90_x')return 'col '+v;
   return fmt(k,v);}
 const SOLVED=new Set(['horizontal_stretch','vertical_stretch']);
@@ -504,12 +514,14 @@ function draw(){let h='';for(const[k,a,b,s,sec] of S){
   const ro=SOLVED.has(k)?' disabled':'';
   h+=`<div class=row><label ${SOLVED.has(k)?'class=solved':''}>${k}</label>
 <input type=range min=${a} max=${b} step=${s} value=${P[k]}${ro} oninput="set('${k}',this.value,1)">
-<output id=o_${k} style="${(k==='frame_x'||k==='frame_y')?'min-width:200px':''}">${outLabel(k,P[k])}</output></div>`;}
+<output id=o_${k} style="${(k==='frame_x'||k==='frame_y_top'||k==='frame_y_bottom')?'min-width:230px':''}">${outLabel(k,P[k])}</output></div>`;}
 for(const k of T)h+=`<div class=row><label>${k}</label>
 <input type=checkbox ${P[k]?'checked':''} onchange="set('${k}',this.checked?1:0,0)"></div>`;
 document.getElementById('ctrls').innerHTML=h;
 document.getElementById('azh').value=(+P['azimuth_height']).toFixed(1);}
-async function set(k,v,num){if(num)document.getElementById('o_'+k).textContent=outLabel(k,v);
+async function set(k,v,num){if(num){P[k]=+v;document.getElementById('o_'+k).textContent=outLabel(k,v);
+  if(k==='frame_y_top'||k==='frame_y_bottom'){const o=(k==='frame_y_top')?'frame_y_bottom':'frame_y_top';
+    const e=document.getElementById('o_'+o);if(e)e.textContent=outLabel(o,P[o]);}}
 await fetch('/set?k='+k+'&v='+v);schedulePreview();}
 function flash(t){let m=document.getElementById('msg');m.textContent=t;setTimeout(()=>m.textContent='',2500);}
 async function save(){let r=await(await fetch('/save')).json();
@@ -533,7 +545,7 @@ for(const l of d.alt_lines){ctx.strokeStyle=altcol(l.t);ctx.lineWidth=l.t===0?3:
 for(const l of d.az_lines){ctx.strokeStyle=azcol(l.t);ctx.lineWidth=(l.t===0||Math.abs(l.t)===90)?3:1.5;poly(ctx,l.pts,sx,sy);}
 // usable-area frame
 ctx.strokeStyle='#0ff';ctx.lineWidth=1.5;
-ctx.strokeRect(d.frame_x*sx,d.frame_y*sy,(d.res[0]-2*d.frame_x)*sx,(d.res[1]-2*d.frame_y)*sy);}
+ctx.strokeRect(d.frame_x*sx,d.frame_y_top*sy,(d.res[0]-2*d.frame_x)*sx,(d.res[1]-d.frame_y_top-d.frame_y_bottom)*sy);}
 async function refreshPreview(){const d=await(await fetch('/preview')).json();drawIdeal(d);drawWarp(d);
 // reflect solved stretches + derived altitude range
 P.horizontal_stretch=d.hstretch;P.vertical_stretch=d.vstretch;
@@ -564,7 +576,8 @@ def start_web(port):
         with LOCK:
             if k in ("flip_h", "flip_v"):
                 PARAMS[k] = (v == "1")
-            elif k in ("offset_x", "offset_y", "frame_x", "frame_y", "az90_x"):
+            elif k in ("offset_x", "offset_y", "frame_x", "frame_y_top",
+                       "frame_y_bottom", "az90_x"):
                 PARAMS[k] = int(float(v))
             elif k in PARAMS:
                 PARAMS[k] = float(v)
@@ -641,11 +654,12 @@ def run(port, geo_path=None):
             grid = pygame.transform.flip(grid, p["flip_h"], p["flip_v"])
             composed.fill((0, 0, 0))
             composed.blit(grid, (p["offset_x"], -p["offset_y"]))
-            # thin cyan usable-area frame lines (symmetric insets; not filled bars)
-            fx, fy = int(p["frame_x"]), int(p["frame_y"])
+            # thin cyan usable-area frame lines (x symmetric; y independent top/bottom)
+            fx = int(p["frame_x"])
+            fyt, fyb = int(p["frame_y_top"]), int(p["frame_y_bottom"])
             for x in (fx, SW - fx):
                 pygame.draw.line(composed, FRAME_COL, (x, 0), (x, SH), 2)
-            for y in (fy, SH - fy):
+            for y in (fyt, SH - fyb):
                 pygame.draw.line(composed, FRAME_COL, (0, y), (SW, y), 2)
         screen.blit(composed, (0, 0))
         pygame.display.flip()

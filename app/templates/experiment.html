@@ -169,9 +169,15 @@
           <div><label>Altitude (deg)</label><input type="number" id="p-altitude_deg" step="1" class="task-param"></div>
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0 8px;">
-          <div><label>Contrast</label><input type="text" id="p-contrast_values" class="task-param" title="e.g. [0.25, 0.15, 0.125]"></div>
+          <div>
+            <label>Contrast <span id="contrast-metric-label" style="color:#7bd">(Weber)</span> <span id="contrast-ceiling-hint" style="color:#888; font-size:10px"></span></label>
+            <div style="display:flex; gap:4px; align-items:center;">
+              <input type="text" id="p-contrast_values" class="task-param" title="values in the active metric, 0..1 — e.g. [0.25, 0.15, 0.125]" style="flex:1; min-width:0;">
+              <button type="button" id="btn-correct-contrast" class="btn btn-sm btn-blue" onclick="correctContrast()" title="Clamp values to the achievable ceiling (uniform across the session's azimuths)">Correct</button>
+            </div>
+          </div>
           <div><label>Proportions</label><input type="text" id="p-contrast_proportions" class="task-param" title="e.g. [0.34, 0.33, 0.33]"></div>
-          <div><label>Background</label><input type="number" id="p-background_gray" step="0.01" min="0" max="1" class="task-param"></div>
+          <div><label>Background</label><input type="number" id="p-background_gray" step="0.01" min="0" max="1" class="task-param" oninput="updateContrastHint()"></div>
         </div>
         <div id="photodiode-sync-row" style="display:none; align-items:center; gap:12px; margin-top:4px;">
           <label style="margin:0; display:inline-flex; align-items:center; gap:4px; cursor:pointer;">
@@ -469,6 +475,7 @@ function populateTaskFields(t) {
   document.getElementById('p-contrast_proportions').value = JSON.stringify(c.proportions || [1]);
   document.getElementById('p-photodiode_sync_enabled').checked = !!stim.photodiode_sync_enabled;
   document.getElementById('p-photodiode_sync_every_n').value = stim.photodiode_sync_every_n ?? 5;
+  refreshContrastMetric();
 
   // Reward
   document.getElementById('p-level').value = String(rew.level ?? 1);
@@ -644,6 +651,79 @@ function updateDevicePanels() {
   const pdOn = !!(devs['photodiode'] && devs['photodiode'].enabled);
   const syncRow = document.getElementById('photodiode-sync-row');
   if (syncRow) syncRow.style.display = pdOn ? 'flex' : 'none';
+  refreshContrastMetric();
+}
+
+// ── Contrast metric ──
+
+function _activeMetric() {
+  return (config && config.rig && config.rig.devices && config.rig.devices.display
+          && config.rig.devices.display.contrast_metric) || 'weber';
+}
+
+// Normalized headroom fraction f -> value in `metric` units (mirrors shared/stim_generator.py).
+function fractionToMetric(f, bg, metric) {
+  if (metric === 'normalized' || bg < 0.004) return f;
+  if (metric === 'weber') return f * (1 - bg) / bg;
+  if (metric === 'michelson') { const d = 2 * bg + f * (1 - bg); return d > 0 ? f * (1 - bg) / d : 0; }
+  return f;
+}
+
+function refreshContrastMetric() {
+  const metric = _activeMetric();
+  const name = {weber: 'Weber', michelson: 'Michelson', normalized: 'Normalized'}[metric] || metric;
+  const lbl = document.getElementById('contrast-metric-label');
+  if (lbl) lbl.textContent = '(' + name + ')';
+  updateContrastHint();
+}
+
+// Live hint: the display ceiling (f=1) in the active metric at the current background.
+function updateContrastHint() {
+  const el = document.getElementById('contrast-ceiling-hint');
+  if (!el) return;
+  const bg = parseFloat(document.getElementById('p-background_gray')?.value);
+  if (!isFinite(bg)) { el.textContent = ''; return; }
+  // Input is capped at 1.0; the metric display ceiling only matters when it falls BELOW 1
+  // (upper part of 0..1 would clip to white). When it's >=1 the whole 0..1 range is usable.
+  const cmax = Math.min(fractionToMetric(1, bg, _activeMetric()), 1);
+  el.textContent = (cmax < 0.999) ? ('max ' + cmax.toFixed(2) + ' @ this bg') : '';
+}
+
+// "Correct" button: clamp entered contrast(s) to the achievable uniform ceiling (server-computed
+// from the geometry's per-azimuth luminance falloff), and write the corrected values back.
+async function correctContrast() {
+  let values;
+  try { values = JSON.parse(document.getElementById('p-contrast_values').value); }
+  catch (e) { log('Correct: contrast must be a list, e.g. [0.25, 0.15]'); return; }
+  if (!Array.isArray(values)) values = [values];
+  const bg = parseFloat(document.getElementById('p-background_gray').value) || 0;
+  let blockSeq;
+  try { blockSeq = JSON.parse(document.getElementById('p-block_sequence').value); }
+  catch (e) { blockSeq = [0]; }
+  try {
+    const r = await fetch('/api/correct_contrast', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({values, background_gray: bg, block_sequence: blockSeq})
+    });
+    const data = await r.json();
+    if (data.ok) {
+      document.getElementById('p-contrast_values').value = JSON.stringify(data.corrected);
+      log(`Contrast corrected -> ${JSON.stringify(data.corrected)} `
+          + `(ceiling ${data.ceiling}, ${data.metric})` + (data.note ? ' — ' + data.note : ''));
+      // Corrected values change the stimuli -> sync to the server (sets deployed=False) so a prior
+      // Deploy is invalidated and Go greys out until the user re-deploys.
+      try {
+        await fetch('/api/update_task', {method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(collectTaskFields())});
+      } catch (e) {}
+      if (phase === 'deployed') setPhase('connected');
+      updateButtons();
+    } else {
+      log('Correct failed: ' + (data.error || ''));
+    }
+  } catch (e) {
+    log('Correct error: ' + e.message);
+  }
 }
 
 // ── Pi status ──
@@ -1262,6 +1342,7 @@ function updateButtons() {
   document.getElementById('btn-stop').disabled = !running;
   document.getElementById('btn-transfer').disabled = !ended || busy;
   document.getElementById('btn-browse-dest').disabled = busy;
+  document.getElementById('btn-correct-contrast').disabled = !taskLoaded || busy;
   document.getElementById('btn-live').disabled = !rigLoaded || busy;
 }
 

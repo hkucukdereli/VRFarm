@@ -632,7 +632,9 @@ class Leader:
             warp_path = Path.home() / "rig" / "calibration" / "warp_map.npz"
             if warp_path.exists():
                 warp_map = np.load(str(warp_path))
-            return generate_stimuli(self.task, warp_map, str(stim_dir))
+            metric = self.rig["devices"].get("display", {}).get("contrast_metric", "weber")
+            return generate_stimuli(self.task, warp_map, str(stim_dir),
+                                    contrast_metric=metric)
         except Exception as e:
             print(f"  Stim generation failed: {e}")
             return None

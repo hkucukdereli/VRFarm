@@ -1,6 +1,6 @@
-last_saved: '2026-07-21'
+last_saved: '2026-07-22'
 stimulus:
-  background_gray: 0.1
+  background_gray: 0.075
   size_deg: 4
   shape: square
   duration_s: 6
@@ -8,7 +8,7 @@ stimulus:
   go_rule: all
   contrast:
     values:
-    - 1
+    - 0.852
     proportions:
     - 1
   photodiode_sync_enabled: true

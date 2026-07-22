@@ -272,7 +272,9 @@ def generate_stims():
         else:
             stim_dir = DATA_DIR / session_id
         stim_dir.mkdir(parents=True, exist_ok=True)
-        arrays = generate_stimuli(task_config, warp_map, str(stim_dir))
+        contrast_metric = data.get("contrast_metric", "weber")
+        arrays = generate_stimuli(task_config, warp_map, str(stim_dir),
+                                  contrast_metric=contrast_metric)
 
         result = {
             "ok": True,

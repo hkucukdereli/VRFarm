@@ -1406,6 +1406,7 @@ function renderCameraControls(dev) {
 
 function renderDisplayControls(dev) {
   const warp = dev.apply_warp || false;
+  const contrastMetric = dev.contrast_metric || 'weber';
   const warpBtnClass = warpExists ? 'btn-yellow' : 'btn-orange';
   const warpBtnText = warpExists ? 'Regenerate Warp' : 'Generate Warp';
 
@@ -1500,6 +1501,14 @@ function renderDisplayControls(dev) {
                  style="width:auto; min-width:auto; margin-right:3px; vertical-align:middle">
           Apply warp
         </label>
+      </div>
+      <div class="device-field">
+        <label>Contrast metric</label>
+        <select onchange="rig.devices.display.contrast_metric = this.value" style="width:auto">
+          <option value="weber" ${contrastMetric === 'weber' ? 'selected' : ''}>Weber</option>
+          <option value="michelson" ${contrastMetric === 'michelson' ? 'selected' : ''}>Michelson</option>
+          <option value="normalized" ${contrastMetric === 'normalized' ? 'selected' : ''}>Normalized</option>
+        </select>
       </div>
     </div>
     <div class="device-controls" style="margin-top:4px">

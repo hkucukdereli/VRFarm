@@ -104,12 +104,13 @@
               border-radius: 50%; border: none; background: #c62828; color: #fff;
               font-size: 14px; font-weight: 700; cursor: pointer; opacity: 0.5;
               transition: opacity 0.2s; z-index: 999; line-height: 32px; text-align: center; }
-  .quit-btn:hover { opacity: 1; }
+  .quit-btn:hover:not(:disabled) { opacity: 1; }
+  .quit-btn:disabled { opacity: 0.2; cursor: not-allowed; }
 </style>
 </head>
 <body>
 
-<button class="quit-btn" onclick="quitApp()" title="Quit server">&times;</button>
+<button class="quit-btn" id="btn-quit" onclick="quitApp()" title="Quit server">&times;</button>
 <h1>VRFarm Experiment</h1>
 
 <div class="phase-bar" id="phase-bar">
@@ -1318,6 +1319,7 @@ function setPhase(p) {
 function _lockUI() {
   uiBusy = true;
   document.querySelectorAll('.btn').forEach(b => b.disabled = true);
+  updateButtons();   // also locks Quit (not a .btn) via the busy state
 }
 function _unlockUI() {
   uiBusy = false;
@@ -1344,6 +1346,10 @@ function updateButtons() {
   document.getElementById('btn-browse-dest').disabled = busy;
   document.getElementById('btn-correct-contrast').disabled = !taskLoaded || busy;
   document.getElementById('btn-live').disabled = !rigLoaded || busy;
+  // Lock Quit only during a *running* session — Stop first (Stop stays enabled), then Quit.
+  // Deliberately NOT during transfer/transient ops: those have no Cancel, so Quit must stay
+  // available as the escape hatch (a stalled transfer would otherwise freeze the whole UI).
+  document.getElementById('btn-quit').disabled = running;
 }
 
 // ── Log ──

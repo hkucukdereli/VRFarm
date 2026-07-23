@@ -9,10 +9,12 @@ Measurements come from the setup UI's intensity-cal panel (or the legacy manual 
 reading is a relative light value — a Thorlabs PM100D power reading (W) or a photometer cd/m² —
 the units cancel because the gain is normalized to 1.0 at screen center.
 
-The correction gain G(az) is defined such that:
-  actual_luminance(az) = intended_luminance × G(az)
-To display a stimulus at target contrast C at azimuth az, set:
-  stimulus_contrast = C / G(az)   (clamped to [0, 1])
+G(az) is the relative delivered luminance (1.0 at center, lower toward the edges). To make the
+DELIVERED luminance uniform we ATTENUATE the drive (never boost, so nothing clips):
+  correction(az)     = min(G) / G(az)        # 1.0 at the dimmest/outermost az, <1 at bright center
+  stimulus_drive(az) = requested × correction(az)
+so delivered = drive × G = requested × min(G) is identical at every azimuth. The bright center is
+darkened down to match the dim edges.
 
 Standalone use:
   python fit_luminance_correction.py [luminance_measurements_YYYY-MM-DD.yaml]
@@ -45,8 +47,10 @@ def fit_luminance(measurements):
     altitude per |azimuth| (the correction is 1D along azimuth).
 
     Returns (az_full, gain_fit, correction) as numpy arrays over az 0..105°:
-      - gain_fit:   relative luminance, 1.0 at center (az=0)
-      - correction: 1/gain renormalized to 1.0 at center (multiply requested contrast by this)
+      - gain_fit:   relative luminance, 1.0 at center (az=0), lower toward the edges
+      - correction: min(gain)/gain — 1.0 (full drive) at the dimmest/outermost az and < 1.0
+        (darker) at center. Multiply requested contrast by this: it attenuates the bright center
+        down to the dim edge so delivered luminance is uniform and never clips.
     """
     az_vals = defaultdict(list)
     for m in measurements:
@@ -67,8 +71,11 @@ def fit_luminance(measurements):
     else:
         gain_fit = np.interp(az_full, az_arr, gain)
 
-    correction = 1.0 / np.maximum(gain_fit, 0.05)
-    correction = correction / correction[0]   # normalize to 1 at center
+    # Equalize by attenuating the bright center DOWN to the dim outermost azimuth: correction is
+    # 1.0 (full drive) at the dimmest/outermost az and < 1 (darker) toward center, so delivered
+    # luminance is uniform and never exceeds the panel range (no clipping).
+    gf = np.maximum(gain_fit, 0.05)
+    correction = np.min(gf) / gf
     return az_full, gain_fit, correction
 
 

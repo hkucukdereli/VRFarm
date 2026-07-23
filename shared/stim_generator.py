@@ -63,11 +63,16 @@ def visual_angle_to_pixels(az_deg, alt_deg, size_deg, warp,
 
 
 def gain_to_correction_curve(gain):
-    """Normalize a per-azimuth luminance GAIN curve into a CORRECTION curve: corr = 1/gain, floored
-    and renormalized so corr[0] == 1 (no boost at center). Shared by get_luminance_correction's
-    theoretical branch and the Correct-contrast endpoint so the two can't drift."""
-    corr = 1.0 / np.maximum(gain, 0.05)
-    return corr / corr[0]
+    """Turn a per-azimuth luminance GAIN curve (bright at center az 0, dim toward the ±90° edges)
+    into a CORRECTION curve that EQUALIZES delivered luminance by attenuating the bright center
+    DOWN to the dim outermost azimuth:
+        corr = min(gain) / gain
+    So corr == 1.0 (full drive) at the dimmest/outermost az, and < 1.0 (darker) at center — the
+    delivered luminance (drive × gain = requested × min(gain)) is then the same at every azimuth.
+    Because it only ever attenuates (corr <= 1) it never needs clipping. Shared by
+    get_luminance_correction's theoretical branch and the Correct-contrast endpoint so they can't drift."""
+    g = np.maximum(gain, 0.05)
+    return np.min(g) / g
 
 
 def get_luminance_correction(warp, az_deg):

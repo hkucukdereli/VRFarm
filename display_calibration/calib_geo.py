@@ -7,7 +7,9 @@ physical reality and the tool back-solves the geometry:
   1. frame_x / frame_y_top / frame_y_bottom : slide the thin cyan boundary lines onto
      where the projector light actually meets the physical screen. frame_x is a single
      symmetric left/right inset; the top and bottom insets are independent (the screen is
-     symmetric in azimuth but not in altitude). The enclosed rectangle = USABLE PIXELS.
+     symmetric in azimuth but not in altitude). frame_y_top/bottom track the physical
+     top/bottom of the screen even when flip_v is on (they mirror with the content), and
+     compute_warp_map applies the same flip-aware masking. The enclosed rectangle = USABLE PIXELS.
   2. offset_x / offset_y : move the GREEN 0° cross (vertical = az 0 meridian,
      horizontal = alt 0 "azimuth line" / eye level) onto physical straight-ahead. That
      intersection is the coordinate origin.
@@ -652,12 +654,16 @@ def run(port, geo_path=None):
             grid = pygame.transform.flip(grid, p["flip_h"], p["flip_v"])
             composed.fill((0, 0, 0))
             composed.blit(grid, (p["offset_x"], -p["offset_y"]))
-            # thin cyan usable-area frame lines (x symmetric; y independent top/bottom)
+            # thin cyan usable-area frame lines (x symmetric; y independent top/bottom).
+            # frame_y_top/bottom are insets from the TOP/BOTTOM of the VISUAL FIELD; flip_v
+            # mirrors the content vertically, so the top-of-field crop lands on the panel bottom
+            # (and vice-versa) — mirror the line positions so "top" tracks the physical top.
             fx = int(p["frame_x"])
             fyt, fyb = int(p["frame_y_top"]), int(p["frame_y_bottom"])
+            top_y, bot_y = (SH - fyt, fyb) if p["flip_v"] else (fyt, SH - fyb)
             for x in (fx, SW - fx):
                 pygame.draw.line(composed, FRAME_COL, (x, 0), (x, SH), 2)
-            for y in (fyt, SH - fyb):
+            for y in (top_y, bot_y):
                 pygame.draw.line(composed, FRAME_COL, (0, y), (SW, y), 2)
         screen.blit(composed, (0, 0))
         pygame.display.flip()

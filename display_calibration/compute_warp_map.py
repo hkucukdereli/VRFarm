@@ -349,6 +349,21 @@ def compute_inverse_map(geo, proj):
     return az_map, alt_map, valid
 
 
+def _frame_y_bounds(cal, res_h):
+    """Usable-area vertical bounds (y_lo, y_hi) in OUTPUT/panel rows; usable rows are [y_lo, y_hi).
+    `frame_y_top`/`frame_y_bottom` are insets from the TOP/BOTTOM of the VISUAL FIELD (physical
+    screen). `flip_v` mirrors the content vertically, so the top-of-field inset lands on the panel
+    BOTTOM and the bottom-of-field inset on the panel TOP — swap them when flip_v is set, so the
+    warp masks the same physical edges the calibrator drew. Falls back to legacy symmetric
+    `frame_y`."""
+    _fy = int(cal.get('frame_y', 0))
+    fy_top = int(cal.get('frame_y_top', _fy))
+    fy_bot = int(cal.get('frame_y_bottom', _fy))
+    if bool(cal.get('flip_v', False)):
+        return fy_bot, res_h - fy_top
+    return fy_top, res_h - fy_bot
+
+
 def orient_maps(geo, az_map, alt_map, valid, px_map, py_map):
     """Finalize the warp. Flip+offset are ALREADY baked into az_map/alt_map/valid by
     compute_inverse_map (via the pixel-grid mapping), so those arrays are already in display
@@ -364,12 +379,10 @@ def orient_maps(geo, az_map, alt_map, valid, px_map, py_map):
     ox = int(cal.get('offset_x', 0))
     oy = int(cal.get('offset_y', 0))
     fx = int(cal.get('frame_x', 0))
-    _fy = int(cal.get('frame_y', 0))                    # legacy symmetric inset (fallback)
-    fy_top = int(cal.get('frame_y_top', _fy))
-    fy_bot = int(cal.get('frame_y_bottom', _fy))
+    y_lo, y_hi = _frame_y_bounds(cal, res_h)            # flip_v-aware top/bottom insets
 
     PX, PY = np.meshgrid(np.arange(res_w), np.arange(res_h))
-    in_frame = (PX >= fx) & (PX < res_w - fx) & (PY >= fy_top) & (PY < res_h - fy_bot)
+    in_frame = (PX >= fx) & (PX < res_w - fx) & (PY >= y_lo) & (PY < y_hi)
 
     have = valid & np.isfinite(az_map)
     try:
@@ -407,12 +420,10 @@ def derived_angle_ranges(geo):
     cal = g.get('calibration', {})
     res_w, res_h = g['projector']['resolution']
     fx = int(cal.get('frame_x', 0))
-    _fy = int(cal.get('frame_y', 0))                    # legacy symmetric inset (fallback)
-    fy_top = int(cal.get('frame_y_top', _fy))
-    fy_bot = int(cal.get('frame_y_bottom', _fy))
+    y_lo, y_hi = _frame_y_bounds(cal, res_h)            # flip_v-aware top/bottom insets
     PX, PY = np.meshgrid(np.arange(res_w), np.arange(res_h))
     m = (valid & np.isfinite(az_map) &
-         (PX >= fx) & (PX < res_w - fx) & (PY >= fy_top) & (PY < res_h - fy_bot))
+         (PX >= fx) & (PX < res_w - fx) & (PY >= y_lo) & (PY < y_hi))
     if not m.any():
         return {"az_min_deg": None, "az_max_deg": None,
                 "alt_min_deg": None, "alt_max_deg": None}

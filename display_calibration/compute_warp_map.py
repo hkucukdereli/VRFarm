@@ -469,58 +469,77 @@ def compute_forward_map(geo, proj,
 
 # ── Luminance correction ───────────────────────────────────────────────────────
 
-def compute_theoretical_luminance_correction(geo, az_samples):
+def compute_theoretical_luminance_correction(geo, az_samples, proj):
     """
-    Theoretical luminance correction based on screen geometry.
+    Approximate per-azimuth luminance gain (1.0 at az=0) from projector geometry — the FALLBACK
+    used when no empirical measurement exists (the measured curve is the source of truth).
 
-    Two effects:
-    1. Cosine falloff: luminance ∝ cos(angle of incidence on screen)
-    2. Foreshortening: pixel covers more screen area at oblique angles
+    Models the projector-beam incidence on the screen: at azimuth az (mid altitude) the beam from
+    the projector meets the curved screen at angle `incidence` to the surface normal, spreading
+    over ~1/cos(incidence) more screen area and dimming it (the "foreshortening" effect). Gain ∝
+    cos(incidence), using the true projector→screen ray (NOT the eye ray, which the old buggy
+    version used). Normalized to 1.0 at center, with a monotone-non-increasing envelope so the
+    curve only ever dims toward the edges — small upticks where the parabola curves back toward
+    the projector are geometry artifacts, not real gain, and this is only a rough prior.
 
-    Returns normalized gain (1.0 at az=0) for each azimuth sample.
-    Apply as: corrected_contrast = desired_contrast / gain
+    Returns normalized gain (1.0 at az=0). Apply as: corrected_contrast = desired_contrast / gain.
     """
     A = geo['screen']['parabola_A']
     B = geo['screen']['parabola_B']
+    alt_mid = (geo['screen']['altitude_min_deg'] +
+               geo['screen']['altitude_max_deg']) / 2
+    ppos = np.asarray(proj['pos'], dtype=float)   # projector position (eye is at the origin)
 
-    gains = np.zeros_like(az_samples)
+    gains = np.zeros_like(az_samples, dtype=float)
     for i, az_deg in enumerate(az_samples):
-        az = np.radians(az_deg)
-        # Screen intersection at this azimuth (mid altitude)
-        alt_mid = np.radians((geo['screen']['altitude_min_deg'] +
-                               geo['screen']['altitude_max_deg']) / 2)
-        pt = ray_screen_intersection(az_deg, np.degrees(alt_mid), A, B)
+        pt = ray_screen_intersection(az_deg, alt_mid, A, B)
         if pt is None:
             continue
-        x_s, y_s, z_s = pt
-
-        # Screen surface normal at (x_s, y_s) on parabola y = A - B*x²
-        # dy/dx = -2*B*x, so normal (unnormalized) in horiz plane = (2Bx, 1)
-        nx = 2 * B * x_s
-        ny = 1.0
-        nz = 0.0
-        n = np.array([nx, ny, nz])
+        pt = np.asarray(pt, dtype=float)
+        # Screen surface normal on parabola y = A - B*x² (horizontal plane): (2Bx, 1, 0)
+        n = np.array([2 * B * pt[0], 1.0, 0.0])
         n = n / np.linalg.norm(n)
-
-        # Projector direction to screen point
-        proj_vec = np.array(pt) - np.array([0, 0, 0])  # approx: from mouse eye
-        proj_vec = proj_vec / np.linalg.norm(proj_vec)
-
-        # Cosine of incidence angle
-        cos_inc = abs(np.dot(n, proj_vec))
-        gains[i] = cos_inc
+        # Projector → screen-point beam (the ray that actually lights this spot)
+        beam = pt - ppos
+        dist = float(np.linalg.norm(beam))
+        if dist < 1e-9:
+            continue
+        beam = beam / dist
+        gains[i] = abs(float(np.dot(n, beam)))   # cos(incidence)
 
     # Normalize so gain = 1.0 at az = 0
-    center_idx = np.argmin(np.abs(az_samples))
+    center_idx = int(np.argmin(np.abs(az_samples)))
     if gains[center_idx] > 0:
         gains = gains / gains[center_idx]
 
+    # Monotone non-increasing from center outward: only ever dim toward the edges.
+    order = np.argsort(np.abs(az_samples))
+    gains[order] = np.minimum.accumulate(gains[order])
     return gains
+
+
+def _load_empirical_cal():
+    """Load the latest empirical luminance fit (az/gain/correction) from
+    luminance_cal_latest.yaml, if present, for re-injection into warp_map.npz. Returns a dict
+    {az, gain, correction, source} or None. This is what lets a measured correction survive
+    every warp regeneration instead of being clobbered."""
+    path = CAL_DIR / "luminance_cal_latest.yaml"
+    if not path.exists():
+        return None
+    try:
+        d = yaml.safe_load(path.read_text()) or {}
+        return {"az": np.asarray(d["az_degrees"], dtype=float),
+                "gain": np.asarray(d["gain"], dtype=float),
+                "correction": np.asarray(d["correction"], dtype=float),
+                "source": path.name}
+    except Exception as e:
+        print(f"  [warn] could not read {path.name}: {e}")
+        return None
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def main(validate=False, geo_path=None):
+def main(validate=False, geo_path=None, lum_mode="theoretical"):
     print(f"Loading rig geometry from {geo_path or GEO_FILE}...")
     geo = load_geometry(geo_path or GEO_FILE)
 
@@ -543,23 +562,32 @@ def main(validate=False, geo_path=None):
 
     print("Computing theoretical luminance correction...")
     az_sym = np.linspace(0, 105, 53)
-    lum_gain = compute_theoretical_luminance_correction(geo, az_sym)
+    lum_gain = compute_theoretical_luminance_correction(geo, az_sym, proj)
 
     # Save. Orientation (flip/offset) + usable frame are already BAKED into the maps by
     # orient_maps, so warp_map.npz is the complete physical transformation — the runtime
-    # uses az_map/valid_map directly, no further orientation step.
+    # uses az_map/valid_map directly, no further orientation step. `lum_correction_mode` tells
+    # the runtime (get_luminance_correction) which correction to apply.
     out_path = CAL_DIR / "warp_map.npz"
-    np.savez(out_path,
-             az_map=az_map,
-             alt_map=alt_map,
-             valid_map=valid_map,
-             px_from_az=px_map,
-             py_from_az=py_map,
-             az_samples=az_samples,
-             alt_samples=alt_samples,
-             lum_az=az_sym,
-             lum_gain_theoretical=lum_gain)
-    print(f"\nSaved: {out_path}")
+    arrays = dict(
+        az_map=az_map, alt_map=alt_map, valid_map=valid_map,
+        px_from_az=px_map, py_from_az=py_map,
+        az_samples=az_samples, alt_samples=alt_samples,
+        lum_az=az_sym, lum_gain_theoretical=lum_gain,
+        lum_correction_mode=lum_mode)
+    # Empirical mode: re-inject the measured curve so it survives every regeneration.
+    if lum_mode == "empirical":
+        cal = _load_empirical_cal()
+        if cal is not None:
+            arrays["lum_az_empirical"] = cal["az"]
+            arrays["lum_gain_empirical"] = cal["gain"]
+            arrays["lum_correction_empirical"] = cal["correction"]
+            print(f"  Injected empirical luminance correction from {cal['source']}")
+        else:
+            print("  [warn] lum-mode=empirical but no luminance_cal_latest.yaml found — "
+                  "runtime falls back to the theoretical curve")
+    np.savez(out_path, **arrays)
+    print(f"\nSaved: {out_path} (luminance mode: {lum_mode})")
 
     if validate:
         _plot_validation(az_map, alt_map, valid_map,
@@ -631,5 +659,9 @@ if __name__ == "__main__":
                         help='geometry YAML to build from (default: ./rig_geometry.yaml)')
     parser.add_argument('--validate', action='store_true',
                         help='Show validation plots after computing')
+    parser.add_argument('--lum-mode', default='theoretical',
+                        choices=['empirical', 'theoretical', 'none'],
+                        help='luminance correction baked into the warp (default: theoretical). '
+                             'empirical re-injects luminance_cal_latest.yaml.')
     args = parser.parse_args()
-    main(validate=args.validate, geo_path=args.geo)
+    main(validate=args.validate, geo_path=args.geo, lum_mode=args.lum_mode)

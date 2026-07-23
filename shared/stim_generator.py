@@ -71,15 +71,23 @@ def gain_to_correction_curve(gain):
 
 
 def get_luminance_correction(warp, az_deg):
-    """Return luminance correction factor at az_deg."""
-    if "lum_az_empirical" in (warp.files if hasattr(warp, "files")
-                              else warp.keys()):
-        az_arr = warp["lum_az_empirical"]
-        corr = warp["lum_correction_empirical"]
-    else:
-        az_arr = warp["lum_az"]
-        corr = gain_to_correction_curve(warp["lum_gain_theoretical"])
-    return float(np.interp(abs(az_deg), az_arr, corr))
+    """Return the per-azimuth luminance correction factor at az_deg, honoring the NPZ's
+    `lum_correction_mode` set at warp-build time:
+      - "none"        -> 1.0 (no correction)
+      - "empirical"   -> measured lum_correction_empirical (fall back to theoretical if absent)
+      - "theoretical" -> theoretical cos-incidence curve
+    An NPZ with no mode key uses the legacy behavior (empirical-if-present, else theoretical)."""
+    keys = warp.files if hasattr(warp, "files") else warp.keys()
+    mode = str(warp["lum_correction_mode"]) if "lum_correction_mode" in keys else None
+    if mode == "none":
+        return 1.0
+    want_empirical = (mode == "empirical") or (mode is None and "lum_az_empirical" in keys)
+    if want_empirical and "lum_az_empirical" in keys:
+        return float(np.interp(abs(az_deg), warp["lum_az_empirical"],
+                               warp["lum_correction_empirical"]))
+    # theoretical (explicit, or empirical requested but not measured yet)
+    return float(np.interp(abs(az_deg), warp["lum_az"],
+                           gain_to_correction_curve(warp["lum_gain_theoretical"])))
 
 
 # ── Contrast metric conversions ──

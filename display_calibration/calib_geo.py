@@ -202,8 +202,6 @@ def _dump_geo(geo):
     g = copy.deepcopy(geo)
     if "projector" in g and "resolution" in g["projector"]:
         g["projector"]["resolution"] = _Flow(g["projector"]["resolution"])
-    if "luminance_reference" in g:
-        g["luminance_reference"] = [_Flow(p) for p in g["luminance_reference"]]
     return yaml.dump(g, default_flow_style=False, sort_keys=True)
 
 

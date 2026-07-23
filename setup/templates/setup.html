@@ -943,15 +943,185 @@ function updateAzimuthHeight(h) {
   refreshDerivedAz();
 }
 
-async function intensityCal() {
+// ── Intensity (luminance) calibration ──
+// The "Intensity" dropdown chooses what the Intensity Cal button does:
+//   auto/manual  = measure per-azimuth luminance with the PM100D (auto- vs manual-advance),
+//   theoretical  = apply the corrected theoretical model, none = no correction.
+// auto/manual both produce the stored mode 'empirical'; theoretical/none store themselves.
+// The stored mode lives in rig.devices.display.luminance_correction (persisted by Save Rig).
+let lumMethod = 'auto';   // UI-only: which measurement advance style auto/manual maps to
+let lumMeasure = null;    // active measurement session, or null
+
+function lumStoredMode() {
+  return (rig && rig.devices && rig.devices.display &&
+          rig.devices.display.luminance_correction) || 'theoretical';
+}
+function lumSelectValue() {
+  const m = lumStoredMode();
+  return m === 'empirical' ? lumMethod : m;   // auto/manual | theoretical | none
+}
+function lumStatusText() {
+  const m = lumStoredMode();
+  if (m === 'none') return 'active: none';
+  if (m === 'theoretical') return 'active: theoretical';
+  return 'active: empirical';
+}
+function onLumModeChange(val) {
+  if (uiBusy || !rig.devices.display) return;
+  if (val === 'auto' || val === 'manual') {
+    lumMethod = val;
+    rig.devices.display.luminance_correction = 'empirical';
+  } else {
+    rig.devices.display.luminance_correction = val;   // theoretical | none
+    closeLumPanel();
+  }
+  const s = document.getElementById('lum-status');
+  if (s) s.textContent = lumStatusText();
+}
+
+// Button: auto/manual open the measurement panel; theoretical/none apply + redeploy directly.
+async function applyIntensity() {
+  if (uiBusy) return;
   const pi = getPiForDevice('display');
   if (!pi) { log('Display not assigned to a Pi'); return; }
-  _lockUI();   // long Pi-side luminance sweep — gate the UI + Quit while it runs
+  const sel = lumSelectValue();
+  if (sel === 'auto' || sel === 'manual') { openLumPanel(sel); return; }
+  if (sel === 'none' &&
+      !confirm('Disable luminance correction (none) and redeploy the warp?')) return;
+  _lockUI();
   try {
-    log('Running intensity calibration...');
-    const result = await proxyPi(pi.ip, '/api/calibrate', {device: 'display'});
-    log(result.ok ? 'Intensity calibration complete.' : 'Failed: ' + (result.error || ''));
-  } finally { _unlockUI(); }
+    log('Applying luminance correction: ' + sel + '...');
+    const geo = document.getElementById('warp-geometry-select');
+    const r = await fetch('/api/lum_apply', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode: sel, geometry: geo ? geo.value : undefined})
+    }).then(x => x.json());
+    (r.steps || []).forEach(s => log('  ' + s));
+    log(r.ok ? ('Applied ' + sel + ' correction.')
+             : ('Intensity apply failed: ' + (r.error || '')));
+  } catch (e) { log('Intensity apply error: ' + e); }
+  finally { _unlockUI(); }
+}
+
+const LUM_AZIMUTHS = [0, 20, 40, 60, 80, 100];
+function openLumPanel(method) {
+  const p = document.getElementById('lum-panel');
+  if (!p) return;
+  lumMeasure = {method, azs: LUM_AZIMUTHS.slice(), idx: 0, size: 15, alt: 0, readings: {}};
+  renderLumPanel();
+  showLumPatch();   // light the first patch so the operator sees where to aim
+}
+function closeLumPanel() {
+  lumMeasure = null;
+  const p = document.getElementById('lum-panel');
+  if (p) { p.style.display = 'none'; p.innerHTML = ''; }
+}
+function renderLumPanel() {
+  const p = document.getElementById('lum-panel');
+  if (!p || !lumMeasure) return;
+  const m = lumMeasure;
+  const rows = m.azs.map((az, i) => {
+    const val = (az in m.readings) ? m.readings[az] : '';
+    const hl = (i === m.idx) ? ' style="background:#2d2d2d"' : '';
+    const showBtn = (m.method === 'manual')
+      ? `<button class="btn btn-blue btn-sm" onclick="lumShow(${i})">Show</button>` : '';
+    const mark = (i === m.idx) ? '◀' : ((az in m.readings) ? '✓' : '');
+    return `<tr${hl}>
+      <td style="padding:2px 8px">${az}°</td>
+      <td>${showBtn}</td>
+      <td><button class="btn btn-gray btn-sm" onclick="lumRead(${i})">Read</button></td>
+      <td><input type="number" step="any" style="width:96px" value="${val}"
+                 oninput="lumSetReading(${i}, this.value)"></td>
+      <td style="color:#6f6; width:14px">${mark}</td></tr>`;
+  }).join('');
+  p.style.display = 'block';
+  p.innerHTML = `
+    <div style="font-size:11px; color:#bbb; margin-bottom:4px">
+      Measuring (${m.method}) — aim the PM100D at each white patch, Read (or type), then Fit &amp; Apply.
+      Patch size <input type="number" value="${m.size}" min="1" step="1" style="width:52px"
+        onchange="lumMeasure.size=parseFloat(this.value)||15; showLumPatch()">°
+    </div>
+    <table style="font-size:12px; border-collapse:collapse">${rows}</table>
+    <div style="margin-top:6px; display:flex; align-items:center; gap:8px">
+      <button class="btn btn-green btn-sm" onclick="lumFitApply()">Fit &amp; Apply</button>
+      <button class="btn btn-gray btn-sm" onclick="closeLumPanel()">Cancel</button>
+      <span style="font-size:10px; color:#888">${Object.keys(m.readings).length}/${m.azs.length} measured</span>
+    </div>`;
+}
+async function showLumPatch() {
+  if (!lumMeasure) return;
+  const pi = getPiForDevice('display');
+  if (!pi) { log('Display not assigned to a Pi'); return; }
+  const az = lumMeasure.azs[lumMeasure.idx];
+  // White square (contrast 1 on a black bg, normalized) = max drive, unwarped by generation-time
+  // correction — measures the raw delivered luminance through the live renderer.
+  await proxyPi(pi.ip, '/api/test_stimulus', {
+    shape: 'square', az_deg: az, alt_deg: lumMeasure.alt, size_deg: lumMeasure.size,
+    contrast: 1, bg_gray: 0, contrast_metric: 'normalized',
+  });
+}
+async function lumShow(i) {
+  if (!lumMeasure) return;
+  lumMeasure.idx = i;
+  renderLumPanel();
+  await showLumPatch();
+}
+function lumSetReading(i, val) {
+  if (!lumMeasure) return;
+  const az = lumMeasure.azs[i];
+  if (val === '' || val == null) delete lumMeasure.readings[az];
+  else lumMeasure.readings[az] = parseFloat(val);
+}
+async function lumRead(i) {
+  if (!lumMeasure) return;
+  lumMeasure.idx = i;
+  const r = await fetch('/api/lum_read', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+  }).then(x => x.json()).catch(e => ({ok: false, error: String(e)}));
+  if (!r.ok) { log('Meter read failed (' + (r.error || '') + ') — type the value manually'); return; }
+  lumSetReading(i, r.value);
+  log('az ' + lumMeasure.azs[i] + '°: ' + (+r.value).toPrecision(4));
+  if (lumMeasure.method === 'auto') await lumAdvance();
+  else renderLumPanel();
+}
+async function lumAdvance() {
+  if (!lumMeasure) return;
+  const m = lumMeasure;
+  let next = -1;
+  for (let k = 1; k <= m.azs.length; k++) {
+    const j = (m.idx + k) % m.azs.length;
+    if (!(m.azs[j] in m.readings)) { next = j; break; }
+  }
+  if (next === -1) { log('All azimuths measured — click Fit & Apply.'); renderLumPanel(); return; }
+  m.idx = next;
+  renderLumPanel();
+  await showLumPatch();
+}
+async function lumFitApply() {
+  if (!lumMeasure) return;
+  const measurements = Object.keys(lumMeasure.readings).map(az => ({
+    az_deg: parseFloat(az), alt_deg: lumMeasure.alt, reading: lumMeasure.readings[az],
+  }));
+  if (measurements.length < 2) { log('Need at least 2 readings to fit.'); return; }
+  _lockUI();
+  try {
+    log('Fitting ' + measurements.length + ' readings and deploying...');
+    const geo = document.getElementById('warp-geometry-select');
+    const r = await fetch('/api/lum_apply', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode: 'empirical', measurements, geometry: geo ? geo.value : undefined})
+    }).then(x => x.json());
+    (r.steps || []).forEach(s => log('  ' + s));
+    if (r.ok) {
+      if (rig.devices.display) rig.devices.display.luminance_correction = 'empirical';
+      warpExists = true;
+      log('Empirical luminance correction applied.');
+      closeLumPanel();
+    } else {
+      log('Fit & apply failed: ' + (r.error || ''));
+    }
+  } catch (e) { log('Fit & apply error: ' + e); }
+  finally { _unlockUI(); }
 }
 
 // The Calibrate control is a single toggle: green "Calibrate" starts, red "Stop Calib"
@@ -1476,6 +1646,7 @@ function renderDeviceList() {
       ${!pisReady && enabled ? '<div style="font-size:10px; color:#f44336; margin-top:4px">Waiting for Pi check...</div>' : ''}
     </div>`;
   }).join('');
+  if (lumMeasure) renderLumPanel();   // re-hydrate an open intensity-cal panel after a re-render
 }
 
 function renderCameraControls(dev) {
@@ -1693,8 +1864,19 @@ function renderDisplayControls(dev) {
       <span class="disp-label">CALIBRATION</span>
       <div class="device-controls">
         <button class="calib-btn btn ${calibrating ? 'btn-red' : 'btn-green'} btn-sm" onclick="toggleCalibration()">${calibrating ? 'Stop Calib' : 'Calibrate'}</button>
-        <button class="btn btn-orange btn-sm" onclick="intensityCal()">Intensity Cal</button>
+        <div class="device-field">
+          <label>Intensity</label>
+          <select id="lum-mode-select" onchange="onLumModeChange(this.value)" style="width:auto">
+            <option value="auto" ${lumSelectValue()==='auto'?'selected':''}>auto (measure)</option>
+            <option value="manual" ${lumSelectValue()==='manual'?'selected':''}>manual (measure)</option>
+            <option value="theoretical" ${lumSelectValue()==='theoretical'?'selected':''}>theoretical</option>
+            <option value="none" ${lumSelectValue()==='none'?'selected':''}>none</option>
+          </select>
+        </div>
+        <button class="btn btn-orange btn-sm" onclick="applyIntensity()">Intensity Cal</button>
+        <span id="lum-status" style="font-size:10px; color:#888">${lumStatusText()}</span>
       </div>
+      <div id="lum-panel" style="display:none; margin-top:8px"></div>
     </div>
 
     <div class="disp-section">

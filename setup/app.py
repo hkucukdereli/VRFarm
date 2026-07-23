@@ -566,6 +566,70 @@ def api_reinit_device():
     return jsonify({"ok": ok, "device": dev_name, "steps": steps})
 
 
+def _display_lum_mode():
+    """The rig's stored display luminance-correction mode (empirical|theoretical|none)."""
+    try:
+        return (_rig_config or {}).get("devices", {}).get("display", {}).get(
+            "luminance_correction", "theoretical")
+    except Exception:
+        return "theoretical"
+
+
+def _generate_and_deploy_warp(geo_file, lum_mode="theoretical"):
+    """Build warp_map.npz on the Mac from `geo_file` with the given luminance mode, then
+    ATOMICALLY scp it + the geometry to every Pi and reload the live display. Shared by the
+    Regenerate Warp button and the intensity-cal Apply. Returns (ok, steps, error)."""
+    steps = []
+    # 1. Run compute_warp_map.py on the Mac, from the SELECTED geometry file, baking in the
+    #    luminance mode (empirical re-injects luminance_cal_latest.yaml, so a measured
+    #    correction survives regeneration).
+    conda_prefix = Path("/opt/homebrew/Caskroom/miniforge/base/envs/vrfarm/bin")
+    python = str(conda_prefix / "python")
+    script = str(GEO_DIR / "compute_warp_map.py")
+    r = subprocess.run(
+        [python, script, "--geo", str(geo_file), "--lum-mode", lum_mode],
+        capture_output=True, text=True, timeout=60, cwd=str(GEO_DIR))
+    if r.returncode != 0:
+        return False, steps, r.stderr[-500:]
+    steps.append(f"Generated warp map on Mac from {geo_file.name} (luminance: {lum_mode})")
+
+    npz_path = GEO_DIR / "warp_map.npz"
+    if not npz_path.exists():
+        return False, steps, "warp_map.npz not created"
+
+    # 2. Copy to all Pis — ATOMIC install: scp to a .tmp name, then mv into place. A plain scp
+    #    overwrites in place, so a reader (display init -> load_warp, or stim-gen np.load) that
+    #    touches it mid-write sees a half-written zip -> "Bad CRC-32". mv is atomic.
+    if _rig_config:
+        for pi in _rig_config.get("pis", []):
+            user = pi.get("user", "vruser")
+            ip = pi["ip"]
+            try:
+                _ssh(f"{user}@{ip}", "mkdir -p ~/rig/calibration")
+                _scp(str(npz_path), f"{user}@{ip}:~/rig/calibration/warp_map.npz.tmp")
+                # Push the SAME geometry the warp was built from, so the live calib_geo.py
+                # tool on the Pi starts from these values.
+                _scp(str(geo_file), f"{user}@{ip}:~/rig/calibration/rig_geometry.yaml.tmp")
+                _ssh(f"{user}@{ip}",
+                     "mv ~/rig/calibration/warp_map.npz.tmp ~/rig/calibration/warp_map.npz && "
+                     "mv ~/rig/calibration/rig_geometry.yaml.tmp ~/rig/calibration/rig_geometry.yaml")
+                steps.append(f"Copied warp_map.npz + rig_geometry.yaml to {pi['name']} ({ip})")
+                # Tell the RUNNING display to re-read the new warp (load_warp is one-shot at init).
+                try:
+                    api_port = (_rig_config.get("network") or {}).get("api_port", 5080)
+                    rr = requests.post(f"http://{ip}:{api_port}/api/reload_warp", timeout=5)
+                    if rr.ok and rr.json().get("reloaded"):
+                        steps.append(f"Reloaded warp into live display on {pi['name']}")
+                    else:
+                        steps.append(f"Warp saved on {pi['name']} — display not active, "
+                                     f"loads on next Init Display")
+                except Exception as e:
+                    steps.append(f"(warp reload skipped on {pi['name']}: {e})")
+            except Exception as e:
+                steps.append(f"Failed to copy to {pi['name']}: {e}")
+    return True, steps, None
+
+
 @app.route("/api/generate_warp", methods=["POST"])
 def api_generate_warp():
     """Generate warp map from rig_geometry.yaml, then SCP to Leader Pi."""
@@ -582,65 +646,99 @@ def api_generate_warp():
     if not geo_file.exists():
         return jsonify({"ok": False, "error": f"Geometry file not found: {geo_file}"}), 404
 
-    steps = []
+    # Luminance mode: an explicit request wins, else the rig's stored display setting.
+    lum_mode = data.get("lum_mode") or _display_lum_mode()
     try:
-        # 1. Run compute_warp_map.py on Mac, building from the SELECTED geometry file
-        #    (so the warp and the geometry shipped to the Pi are the same source).
-        conda_prefix = Path("/opt/homebrew/Caskroom/miniforge/base/envs/vrfarm/bin")
-        python = str(conda_prefix / "python")
-        script = str(GEO_DIR / "compute_warp_map.py")
-        r = subprocess.run(
-            [python, script, "--geo", str(geo_file)],
-            capture_output=True, text=True, timeout=60,
-            cwd=str(GEO_DIR))
-        if r.returncode != 0:
-            return jsonify({"ok": False, "error": r.stderr[-500:], "steps": steps})
-        steps.append(f"Generated warp map on Mac from {geo_file.name}")
+        ok, steps, err = _generate_and_deploy_warp(geo_file, lum_mode)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "steps": []})
+    return jsonify({"ok": ok, "error": err, "steps": steps})
 
-        npz_path = GEO_DIR / "warp_map.npz"
-        if not npz_path.exists():
-            return jsonify({"ok": False, "error": "warp_map.npz not created", "steps": steps})
 
-        # 2. Copy to all Pis — ATOMIC install: scp to a .tmp name, then mv into place.
-        #    A plain scp overwrites the file in place, so a reader (display `init` ->
-        #    load_warp, or stim-gen np.load) that touches it mid-write sees a half-written
-        #    zip -> "Bad CRC-32 for file 'az_map.npy'". mv is atomic, so readers only ever
-        #    see the complete old or complete new file.
-        if _rig_config:
-            for pi in _rig_config.get("pis", []):
-                user = pi.get("user", "vruser")
-                ip = pi["ip"]
-                try:
-                    _ssh(f"{user}@{ip}", "mkdir -p ~/rig/calibration")
-                    _scp(str(npz_path), f"{user}@{ip}:~/rig/calibration/warp_map.npz.tmp")
-                    # Push the SAME geometry the warp was built from, so the live
-                    # calib_geo.py tool on the Pi starts from these values.
-                    _scp(str(geo_file), f"{user}@{ip}:~/rig/calibration/rig_geometry.yaml.tmp")
-                    _ssh(f"{user}@{ip}",
-                         "mv ~/rig/calibration/warp_map.npz.tmp ~/rig/calibration/warp_map.npz && "
-                         "mv ~/rig/calibration/rig_geometry.yaml.tmp ~/rig/calibration/rig_geometry.yaml")
-                    steps.append(f"Copied warp_map.npz + rig_geometry.yaml to {pi['name']} ({ip})")
-                    # Tell the RUNNING display to re-read the new warp — otherwise it keeps the
-                    # old warp cached in memory (load_warp is one-shot at init) and the
-                    # projector looks unchanged despite the new file on disk.
-                    try:
-                        api_port = (_rig_config.get("network") or {}).get("api_port", 5080)
-                        rr = requests.post(
-                            f"http://{ip}:{api_port}/api/reload_warp",
-                            timeout=5)
-                        if rr.ok and rr.json().get("reloaded"):
-                            steps.append(f"Reloaded warp into live display on {pi['name']}")
-                        else:
-                            steps.append(f"Warp saved on {pi['name']} — display not active, "
-                                         f"loads on next Init Display")
-                    except Exception as e:
-                        steps.append(f"(warp reload skipped on {pi['name']}: {e})")
-                except Exception as e:
-                    steps.append(f"Failed to copy to {pi['name']}: {e}")
+# ── Intensity (luminance) calibration ──
 
-        return jsonify({"ok": True, "steps": steps})
+def _read_pm100d():
+    """Return one power reading (W) from a USB-connected Thorlabs PM100D on the Mac. Optional
+    dependency (pyvisa + ThorlabsPM100); raises on any failure so the caller degrades to manual
+    entry. Thorlabs USB vendor id is 0x1313."""
+    import pyvisa
+    from ThorlabsPM100 import ThorlabsPM100
+    rm = pyvisa.ResourceManager()
+    resources = list(rm.list_resources())
+    thor = [r for r in resources if "0x1313" in r.upper() or "::1313::" in r]
+    candidates = thor or [r for r in resources if "USB" in r.upper()]
+    if not candidates:
+        raise RuntimeError("no USB instrument found (is the PM100D connected?)")
+    inst = rm.open_resource(candidates[0], timeout=3000)
+    try:
+        return float(ThorlabsPM100(inst=inst).read)
+    finally:
+        inst.close()
+
+
+@app.route("/api/lum_read", methods=["POST"])
+def api_lum_read():
+    """Read the PM100D once. Returns {ok, value}. On any failure returns {ok:false} so the
+    intensity-cal panel silently falls back to manual entry — the USB driver is not required."""
+    try:
+        return jsonify({"ok": True, "value": _read_pm100d()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/lum_apply", methods=["POST"])
+def api_lum_apply():
+    """Apply a luminance-correction mode and redeploy the warp. Body:
+      {mode: empirical|theoretical|none, measurements?: [{az_deg, reading}], geometry?: <file>}
+    For `empirical`, fit the measurements → luminance_cal_latest.yaml first; then rebuild the
+    warp with --lum-mode and ship it to the Pis via the shared deploy helper."""
+    if not _rig_config:
+        return jsonify({"ok": False, "error": "No rig loaded"}), 400
+    data = request.json or {}
+    mode = data.get("mode", "theoretical")
+    if mode not in ("empirical", "theoretical", "none"):
+        return jsonify({"ok": False, "error": f"Unknown mode: {mode}"}), 400
+
+    name = data.get("geometry")
+    geo_file = ((GEO_DIR / Path(name).name) if name
+                else (GEO_DIR / "rig_geometry.yaml")).resolve()
+    if not geo_file.exists():
+        return jsonify({"ok": False, "error": f"Geometry file not found: {geo_file}"}), 404
+
+    steps = []
+    fit = None
+    if mode == "empirical":
+        valid = [m for m in (data.get("measurements") or [])
+                 if m.get("reading") not in (None, "") and m.get("az_deg") is not None]
+        if len(valid) < 2:
+            return jsonify({"ok": False,
+                            "error": "Need at least 2 azimuth readings to fit."}), 400
+        try:
+            sys.path.insert(0, str(GEO_DIR))
+            from fit_luminance_correction import fit_luminance, save_luminance_cal
+            az, gain, corr = fit_luminance(valid)
+            out = save_luminance_cal(az, gain, corr, source_file="setup-ui")
+            steps.append(f"Fitted {len(valid)} readings → {out.name}")
+            fit = {"az": [float(x) for x in az],
+                   "gain": [float(x) for x in gain],
+                   "correction": [float(x) for x in corr]}
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"Fit failed: {e}", "steps": steps}), 500
+
+    try:
+        ok, dsteps, err = _generate_and_deploy_warp(geo_file, mode)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "steps": steps})
+    steps += dsteps
+
+    # Reflect the applied mode in the in-memory rig so a later Regenerate Warp matches; the
+    # client also sets it in the rig object and Save Rig persists it to disk.
+    try:
+        _rig_config["devices"]["display"]["luminance_correction"] = mode
+    except Exception:
+        pass
+
+    return jsonify({"ok": ok, "error": err, "mode": mode, "fit": fit, "steps": steps})
 
 
 def _reinit_projector(target):
@@ -693,8 +791,6 @@ def api_start_calibration():
                 g = dict(geo_data)
                 if isinstance(g.get("projector"), dict) and "resolution" in g["projector"]:
                     g["projector"]["resolution"] = _FlowList(g["projector"]["resolution"])
-                if "luminance_reference" in g:
-                    g["luminance_reference"] = [_FlowList(p) for p in g["luminance_reference"]]
                 import tempfile
                 fd, tmp = tempfile.mkstemp(suffix=".yaml"); os.close(fd)
                 with open(tmp, "w") as f:
@@ -840,8 +936,6 @@ def api_save_geometry():
     # Keep short lists inline in YAML output
     if "projector" in geo and "resolution" in geo["projector"]:
         geo["projector"]["resolution"] = _FlowList(geo["projector"]["resolution"])
-    if "luminance_reference" in geo:
-        geo["luminance_reference"] = [_FlowList(p) for p in geo["luminance_reference"]]
     path = GEO_DIR / name
     with open(path, "w") as f:
         # sort_keys=True keeps this writer byte-for-byte consistent with the

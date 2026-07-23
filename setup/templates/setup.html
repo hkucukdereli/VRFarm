@@ -284,6 +284,7 @@ function _unlockUI() {
   const q = document.getElementById('btn-quit'); if (q) q.disabled = false;
   // Re-apply contextual disabling
   if (!allPisOk()) document.getElementById('init-btn').disabled = true;
+  renderPiList();   // re-apply the offline-Pi button lockdown the blanket enable above cleared
   renderDeviceList();
 }
 
@@ -1558,6 +1559,7 @@ function renderPiList() {
   el.innerHTML = rig.pis.map((pi, idx) => {
     const ps = piState[pi.ip] || {};
     const dotClass = ps.checked ? (ps.ok ? 'dot-green' : 'dot-red') : 'dot-gray';
+    const offline = ps.checked && !ps.ok;   // confirmed offline (red dot) -> disable all but Check
     return `
     <div class="pi-card">
       <div class="pi-header">
@@ -1573,11 +1575,11 @@ function renderPiList() {
       </div>
       <div class="btn-row">
         <button class="btn btn-blue btn-sm" onclick="checkPi('${pi.ip}')">Check</button>
-        <button class="btn btn-orange btn-sm" onclick="installPi(${idx})">Install</button>
-        <button class="btn btn-green btn-sm" onclick="deployPi(${idx})">Deploy</button>
-        <button class="btn btn-yellow btn-sm" onclick="restartPiApi(${idx})">Restart API</button>
-        <button class="btn btn-red btn-sm" onclick="rebootPi(${idx})">Reboot</button>
-        <button class="btn btn-red btn-sm" onclick="shutdownPi(${idx})">Shutdown</button>
+        <button class="btn btn-orange btn-sm" onclick="installPi(${idx})" ${offline ? 'disabled' : ''}>Install</button>
+        <button class="btn btn-green btn-sm" onclick="deployPi(${idx})" ${offline ? 'disabled' : ''}>Deploy</button>
+        <button class="btn btn-yellow btn-sm" onclick="restartPiApi(${idx})" ${offline ? 'disabled' : ''}>Restart API</button>
+        <button class="btn btn-red btn-sm" onclick="rebootPi(${idx})" ${offline ? 'disabled' : ''}>Reboot</button>
+        <button class="btn btn-red btn-sm" onclick="shutdownPi(${idx})" ${offline ? 'disabled' : ''}>Shutdown</button>
       </div>
     </div>`;
   }).join('');

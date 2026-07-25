@@ -14,6 +14,7 @@ import logging
 import os
 import queue
 import socket
+import struct
 import sys
 import threading
 import time
@@ -848,13 +849,24 @@ def browse_folder():
         return jsonify({"ok": False, "error": str(e)})
 
 
+def _resolve_mac_dir(rig) -> Path:
+    """Base directory for downloaded session data. Use the configured data.mac_dir if it's
+    meaningful on this OS, else fall back to ~/VRFarm/data. This lets one rig config (whose
+    mac_dir is a POSIX path like /Users/...) work unchanged on a Windows controller, where
+    such a path has no drive letter and is unusable."""
+    configured = Path(rig["data"]["mac_dir"]).expanduser()
+    if os.name == "nt" and not configured.drive:
+        return Path.home() / "VRFarm" / "data"
+    return configured
+
+
 @app.route("/api/transfer", methods=["POST"])
 def transfer():
     """Download session data from Pis to Mac."""
     req = request.get_json(silent=True) or {}
     rig = state["rig_config"]
     api_port = rig["network"]["api_port"]
-    default_mac_dir = Path(rig["data"]["mac_dir"])
+    default_mac_dir = _resolve_mac_dir(rig)
     # Optional per-transfer destination override (UI field / Browse picker); blank = rig default.
     dest_override = str(req.get("dest_dir", "")).strip()
     mac_dir = Path(dest_override).expanduser() if dest_override else default_mac_dir
@@ -932,7 +944,7 @@ def subject_history(subject_id):
     rig = state["rig_config"]
     if not rig:
         return jsonify([])
-    db_dir = Path(rig["data"]["mac_dir"]) / "subjects"
+    db_dir = _resolve_mac_dir(rig) / "subjects"
     return jsonify(get_subject_history(subject_id, db_dir))
 
 
@@ -1066,12 +1078,38 @@ def event_stream():
 
 # ── UDP communication ──
 
+def _disable_udp_conn_reset(sock):
+    """Windows only: stop a prior ICMP 'port unreachable' (e.g. a command sent while the
+    Leader engine is down) from poisoning this UDP socket so the next recv/send raises
+    ConnectionResetError (WSAECONNRESET). macOS/Linux ignore the ICMP error, so this is a
+    no-op there and the whole thing is wrapped defensively."""
+    if sys.platform != "win32":
+        return
+    try:
+        sock.ioctl(socket.SIO_UDP_CONNRESET, struct.pack("I", 0))
+    except (AttributeError, OSError):
+        pass
+
+
 def _send_command(ip: str, port: int, msg: dict):
-    """Send a UDP command to Leader."""
+    """Send a UDP command to Leader. Tolerant of a Windows ConnectionResetError left by a
+    previous packet to a closed port: rebuild the socket and retry once (UDP is best-effort
+    anyway), so one dropped command can't 500 the operator or wedge the command socket."""
     global _cmd_sock
     if _cmd_sock is None:
         _cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    _cmd_sock.sendto(json.dumps(msg).encode(), (ip, port))
+        _disable_udp_conn_reset(_cmd_sock)
+    payload = json.dumps(msg).encode()
+    try:
+        _cmd_sock.sendto(payload, (ip, port))
+    except ConnectionResetError:
+        try:
+            _cmd_sock.close()
+        except OSError:
+            pass
+        _cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _disable_udp_conn_reset(_cmd_sock)
+        _cmd_sock.sendto(payload, (ip, port))
 
 
 def _start_udp_listener(event_port: int):
@@ -1085,6 +1123,7 @@ def _start_udp_listener(event_port: int):
     def listen():
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(("0.0.0.0", event_port))
+        _disable_udp_conn_reset(sock)
         sock.settimeout(1.0)
         while _udp_running:
             try:
@@ -1104,6 +1143,9 @@ def _start_udp_listener(event_port: int):
                     print("[UDP] Queue full, dropped oldest event")
                     _event_queue.put_nowait(event)
             except socket.timeout:
+                continue
+            except ConnectionResetError:
+                # Windows: a stray ICMP unreachable poisoned the socket — keep listening.
                 continue
             except OSError:
                 break

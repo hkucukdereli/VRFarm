@@ -445,7 +445,8 @@ def deploy():
             f"http://{leader['ip']}:{api_port}/api/generate_stims",
             json={"task_config": remote_task_path,
                   "session_id": state["session_id"],
-                  "apply_warp": rig.get("devices", {}).get("display", {}).get("apply_warp", False)},
+                  "apply_warp": rig.get("devices", {}).get("display", {}).get("apply_warp", False),
+                  "contrast_metric": rig.get("devices", {}).get("display", {}).get("contrast_metric", "weber")},
             timeout=30)
         if r.status_code != 200:
             raise RuntimeError(f"Stim generation failed (HTTP {r.status_code}): {r.text[:500]}")
@@ -504,6 +505,85 @@ def deploy():
     except Exception as e:
         _app_logger.error(f"DEPLOY failed session={state.get('session_id')} error={e}")
         return jsonify({"ok": False, "error": str(e), "steps": steps})
+
+
+_cwm_mod = None
+
+
+def _cwm():
+    """Lazily import display_calibration/compute_warp_map.py (numpy/scipy geometry)."""
+    global _cwm_mod
+    if _cwm_mod is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "compute_warp_map", str(ROOT / "display_calibration" / "compute_warp_map.py"))
+        _cwm_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_cwm_mod)
+    return _cwm_mod
+
+
+@app.route("/api/correct_contrast", methods=["POST"])
+def correct_contrast():
+    """Clamp entered contrast value(s) to the achievable ceiling in the active metric.
+
+    When apply_warp is on and the warp map exists, the ceiling is the UNIFORM value achievable across
+    the session's azimuths, using the SAME per-azimuth luminance curve generation bakes in
+    (get_luminance_correction on warp_map.npz — empirical if the warp carries it, else theoretical).
+    When apply_warp is off (or no warp), generation applies no per-azimuth correction, so the ceiling
+    is the plain display ceiling at the background. Values in and out are in the active metric, 0..1.
+    """
+    import numpy as np
+    from shared.stim_generator import (get_luminance_correction, fraction_to_metric,
+                                       snap_contrast_to_bitcode)
+
+    data = request.get_json(silent=True) or {}
+    try:
+        values = [float(v) for v in (data.get("values") or [])]
+        bg = float(data.get("background_gray") or 0.0)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "invalid values or background_gray"}), 400
+    block_seq = data.get("block_sequence") or [0.0]
+    rig = state.get("rig_config") or {}
+    display_cfg = rig.get("devices", {}).get("display", {})
+    metric = display_cfg.get("contrast_metric", "weber")
+    apply_warp = display_cfg.get("apply_warp", False)
+
+    # Match generation exactly: the per-azimuth luminance boost is applied ONLY when apply_warp is on
+    # AND a warp map exists (else generation uses corr_contrast = min(f, 1.0), no boost). Use the same
+    # warp + get_luminance_correction (empirical-preferring) so the reported ceiling can't drift from
+    # what generation bakes in.
+    max_lum = 1.0
+    note = ("apply_warp off; global display ceiling" if not apply_warp
+            else "no warp map; global display ceiling")
+    warp_path = ROOT / "display_calibration" / "warp_map.npz"
+    if apply_warp and warp_path.exists():
+        try:
+            warp = np.load(str(warp_path))
+            azs = set()
+            for az in block_seq:
+                try:
+                    azs.add(abs(float(az)))
+                except (TypeError, ValueError):
+                    pass
+            azs = azs or {0.0}
+            max_lum = max(get_luminance_correction(warp, az) for az in azs)
+            note = ("per-azimuth luminance (empirical)" if "lum_az_empirical" in warp.files
+                    else "per-azimuth luminance (theoretical)")
+        except Exception as e:
+            note = f"luminance unavailable ({e}); global display ceiling"
+            max_lum = 1.0
+
+    f_ceiling = 1.0 / max_lum if max_lum > 0 else 1.0
+    # Contrast input is 0..1: cap at 1.0 so a metric ceiling above 1 (e.g. Weber at a dim bg) just
+    # means the whole 0..1 range is usable, and the global/no-calibration case still clamps within
+    # 0..1 rather than being a no-op.
+    c_ceiling = min(fraction_to_metric(f_ceiling, bg, metric), 1.0)
+    # Clamp to the ceiling, then snap DOWN to the nearest achievable 8-bit code (perceived contrast
+    # can't be finer than one code; floor => never exceed the ceiling).
+    corrected = [round(snap_contrast_to_bitcode(min(v, c_ceiling), bg, metric), 4) for v in values]
+    c_ceiling = snap_contrast_to_bitcode(c_ceiling, bg, metric)
+    return jsonify({"ok": True, "corrected": corrected,
+                    "ceiling": round(float(c_ceiling), 4), "metric": metric, "note": note})
 
 
 @app.route("/api/trial_table")

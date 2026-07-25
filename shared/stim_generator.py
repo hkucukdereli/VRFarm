@@ -62,18 +62,108 @@ def visual_angle_to_pixels(az_deg, alt_deg, size_deg, warp,
         return max(4, int(size_deg * px_per_deg))
 
 
+def gain_to_correction_curve(gain):
+    """Turn a per-azimuth luminance GAIN curve (bright at center az 0, dim toward the ±90° edges)
+    into a CORRECTION curve that EQUALIZES delivered luminance by attenuating the bright center
+    DOWN to the dim outermost azimuth:
+        corr = min(gain) / gain
+    So corr == 1.0 (full drive) at the dimmest/outermost az, and < 1.0 (darker) at center — the
+    delivered luminance (drive × gain = requested × min(gain)) is then the same at every azimuth.
+    Because it only ever attenuates (corr <= 1) it never needs clipping. Shared by
+    get_luminance_correction's theoretical branch and the Correct-contrast endpoint so they can't drift."""
+    g = np.maximum(gain, 0.05)
+    return np.min(g) / g
+
+
+def luminance_correction_curve(warp):
+    """Return (az_arr, corr_arr): the per-azimuth luminance CORRECTION curve (<= 1, attenuate-down)
+    honoring the NPZ's `lum_correction_mode` set at warp-build time:
+      - "none"        -> all 1.0 (no correction)
+      - "empirical"   -> measured lum_correction_empirical (fall back to theoretical if absent)
+      - "theoretical" -> min(gain)/gain of the theoretical curve
+    (No mode key -> legacy: empirical-if-present, else theoretical.) corr == 1.0 at the dimmest/
+    outermost az and < 1 at the bright center. The renderer (devices/display.py `_build_corr_map`)
+    interpolates this over az_map for the per-pixel, full-field correction — keep the two in sync."""
+    keys = warp.files if hasattr(warp, "files") else warp.keys()
+    mode = str(warp["lum_correction_mode"]) if "lum_correction_mode" in keys else None
+    if mode == "none":
+        az = np.asarray(warp["lum_az"], dtype=float)
+        return az, np.ones_like(az)
+    want_empirical = (mode == "empirical") or (mode is None and "lum_az_empirical" in keys)
+    if want_empirical and "lum_az_empirical" in keys:
+        return (np.asarray(warp["lum_az_empirical"], dtype=float),
+                np.asarray(warp["lum_correction_empirical"], dtype=float))
+    return (np.asarray(warp["lum_az"], dtype=float),
+            gain_to_correction_curve(warp["lum_gain_theoretical"]))
+
+
 def get_luminance_correction(warp, az_deg):
-    """Return luminance correction factor at az_deg."""
-    if "lum_az_empirical" in (warp.files if hasattr(warp, "files")
-                              else warp.keys()):
-        az_arr = warp["lum_az_empirical"]
-        corr = warp["lum_correction_empirical"]
-    else:
-        az_arr = warp["lum_az"]
-        gain = warp["lum_gain_theoretical"]
-        corr = 1.0 / np.maximum(gain, 0.05)
-        corr = corr / corr[0]
+    """Scalar per-azimuth luminance correction at az_deg (used by the experiment-UI Correct
+    button). Mode handling lives in luminance_correction_curve; the renderer applies the full
+    per-pixel version. Returns 1.0 for mode 'none'."""
+    az_arr, corr = luminance_correction_curve(warp)
     return float(np.interp(abs(az_deg), az_arr, corr))
+
+
+# ── Contrast metric conversions ──
+# bg = background 0..1; c = contrast in the named metric; f = the "normalized headroom fraction" the
+# renderer consumes (stimulus luminance = bg + f*(1-bg)). Below ~1 code of background, Weber/Michelson
+# divide-by-bg degenerates, so we fall back to the normalized identity.
+_MIN_BG = 0.004
+
+
+def metric_to_fraction(c, bg, metric="weber"):
+    """Contrast value in `metric` (weber|michelson|normalized) -> normalized headroom fraction f."""
+    c = float(c)
+    bg = float(bg)
+    metric = str(metric).lower()
+    if metric == "normalized" or bg < _MIN_BG or bg > 1.0 - _MIN_BG:
+        return c
+    if metric == "weber":
+        return c * bg / (1.0 - bg)
+    if metric == "michelson":
+        c = min(c, 0.999)   # c -> 1 diverges
+        return 2.0 * bg * c / ((1.0 - c) * (1.0 - bg))
+    return c   # unknown metric -> normalized
+
+
+def fraction_to_metric(f, bg, metric="weber"):
+    """Inverse of metric_to_fraction: normalized fraction f -> contrast in `metric` units (used to
+    report a ceiling in the metric the user typed)."""
+    f = float(f)
+    bg = float(bg)
+    metric = str(metric).lower()
+    if metric == "normalized" or bg < _MIN_BG or bg > 1.0 - _MIN_BG:
+        return f
+    if metric == "weber":
+        return f * (1.0 - bg) / bg
+    if metric == "michelson":
+        denom = 2.0 * bg + f * (1.0 - bg)
+        return f * (1.0 - bg) / denom if denom > 0 else 0.0
+    return f
+
+
+def snap_contrast_to_bitcode(c, bg, metric="weber"):
+    """Round a contrast value DOWN to the nearest one whose center-azimuth stimulus luminance is an
+    exact 8-bit code — perceived contrast can't be finer than one code, so this makes the reported
+    value match what the renderer (which does int(stim_lin*255)) actually shows. Uses the same floor
+    (int() truncates toward 0) as the renderer, referenced at the center (lum_corr=1)."""
+    bg = float(bg)
+    f = metric_to_fraction(c, bg, metric)
+    code = int((bg + f * (1.0 - bg)) * 255)          # floor, matches renderer's int()
+    denom = 1.0 - bg
+    if denom <= 1e-9:                                 # degenerate white bg -> no headroom
+        return fraction_to_metric(0.0, bg, metric)
+    # +1e-9 counters IEEE-754 undershoot so the renderer's int() floors to exactly `code`, not
+    # code-1 (the reconstructed luminance can otherwise land one ULP below code/255).
+    f_q = max(0.0, (code / 255.0 - bg) / denom + 1e-9)
+    return fraction_to_metric(f_q, bg, metric)
+
+
+def metric_degenerate(bg, metric) -> bool:
+    """True when Weber/Michelson can't be applied at this background (falls back to normalized)."""
+    bg = float(bg)
+    return str(metric).lower() in ("weber", "michelson") and (bg < _MIN_BG or bg > 1.0 - _MIN_BG)
 
 
 def build_block_trial_list(task_config: dict) -> list[dict]:
@@ -149,13 +239,16 @@ def build_block_trial_list(task_config: dict) -> list[dict]:
     return trials
 
 
-def generate_stimuli(task_config: dict, warp_map, output_dir: str) -> dict:
+def generate_stimuli(task_config: dict, warp_map, output_dir: str,
+                     contrast_metric: str = "weber") -> dict:
     """Generate full session stimulus list.
 
     Args:
         task_config: parsed task YAML dict
         warp_map: loaded NPZ (np.load result) or None for fallback
         output_dir: directory to save stimuli.npz
+        contrast_metric: how the config `contrast` value is interpreted — weber|michelson|normalized
+            (from rig.devices.display.contrast_metric)
 
     Returns:
         dict of arrays (same as NPZ contents) for Leader to use directly
@@ -171,6 +264,10 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str) -> dict:
     bg = stim_cfg.get("background_gray", 0.0)
     duration = stim_cfg.get("duration_s", 2.0)
     shape = str(stim_cfg.get("shape", "square")).lower()
+    contrast_metric = str(contrast_metric).lower()
+    if metric_degenerate(bg, contrast_metric):
+        print(f"WARNING: contrast_metric '{contrast_metric}' undefined at background={bg}; "
+              f"falling back to 'normalized'.")
     proj_res = (1920, 1080)
 
     # Output arrays
@@ -210,15 +307,17 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str) -> dict:
             px_x[i] = proj_res[0] / 2 + t["az_deg"] * px_per_deg
             px_y[i] = proj_res[1] / 2 - t["alt_deg"] * px_per_deg
 
+        # Interpret the config contrast in the active metric -> normalized headroom fraction f.
+        # Luminance correction is applied PER-PIXEL at render time (full-field: background AND
+        # stimulus scale by C(az)), so generation stores the UNcorrected fraction; the renderer
+        # equalizes delivered luminance. (Field name stays corr_contrast for NPZ compatibility.)
+        corr_contrast[i] = min(metric_to_fraction(t["contrast"], bg, contrast_metric), 1.0)
         if warp_map is not None:
             px_size[i] = visual_angle_to_pixels(
                 t["az_deg"], t["alt_deg"],
                 stim_cfg["size_deg"], warp_map, proj_res)
-            lum_corr = get_luminance_correction(warp_map, t["az_deg"])
-            corr_contrast[i] = min(t["contrast"] * lum_corr, 1.0)
         else:
             px_size[i] = max(4, int(stim_cfg["size_deg"] * px_per_deg))
-            corr_contrast[i] = t["contrast"]
 
     # Pre-generate all timing durations
     rng = np.random.default_rng()

@@ -775,6 +775,26 @@ async function testStimulus() {
   log(result.ok ? 'Stimulus drawn.' : 'Stimulus test failed: ' + (result.error || ''));
 }
 
+// Clamp the Stimulus-test contrast to the display ceiling at the current Bg, in the active metric
+// (fraction_to_metric at full headroom f=1), so it can't silently clip to white. Client-side only —
+// mirrors the experiment-UI Correct button's ceiling. Weber:(1-bg)/bg, Michelson:(1-bg)/(1+bg), Normalized:1.
+function correctTestContrast() {
+  const cEl = document.getElementById('test-stim-contrast');
+  if (!cEl) return;
+  const bgEl = document.getElementById('blank-gray-value');
+  const bg = Math.max(0, Math.min(1, parseFloat(bgEl ? bgEl.value : 0) || 0));
+  const metric = (rig.devices.display && rig.devices.display.contrast_metric) || 'weber';
+  const entered = Math.max(0, parseFloat(cEl.value) || 0);
+  let ceil;
+  if (metric === 'weber')          ceil = bg > 0 ? (1 - bg) / bg : Infinity;
+  else if (metric === 'michelson') ceil = (1 - bg) / (1 + bg);
+  else                             ceil = 1;   // normalized
+  const corrected = Math.max(0, Math.min(entered, ceil));
+  cEl.value = (+corrected).toFixed(3);
+  log(`Contrast corrected: ${entered.toFixed(3)} → ${corrected.toFixed(3)} `
+    + `(max ${isFinite(ceil) ? ceil.toFixed(3) : '∞'} @ bg ${bg}, ${metric})`);
+}
+
 async function checkWarp() {
   try {
     const r = await fetch('/api/check_warp');
@@ -1054,11 +1074,11 @@ async function showLumPatch() {
   const pi = getPiForDevice('display');
   if (!pi) { log('Display not assigned to a Pi'); return; }
   const az = lumMeasure.azs[lumMeasure.idx];
-  // White square (contrast 1 on a black bg, normalized) = max drive, unwarped by generation-time
-  // correction — measures the raw delivered luminance through the live renderer.
+  // White square (contrast 1 on a black bg, normalized) = max drive. apply_lum:false renders RAW
+  // drive (no luminance correction) so the meter reads the true delivered luminance the fit needs.
   await proxyPi(pi.ip, '/api/test_stimulus', {
     shape: 'square', az_deg: az, alt_deg: lumMeasure.alt, size_deg: lumMeasure.size,
-    contrast: 1, bg_gray: 0, contrast_metric: 'normalized',
+    contrast: 1, bg_gray: 0, contrast_metric: 'normalized', apply_lum: false,
   });
 }
 async function lumShow(i) {
@@ -1859,6 +1879,7 @@ function renderDisplayControls(dev) {
           <input type="number" id="test-stim-size" value="8" step="1" min="1" style="width:56px"></div>
         <div class="device-field"><label>Contrast</label>
           <input type="number" id="test-stim-contrast" value="0.5" min="0" max="1" step="0.01" style="width:60px"></div>
+        <button class="btn btn-gray btn-sm" onclick="correctTestContrast()" title="Clamp the contrast to the highest value showable at the current Bg in the active metric">Correct</button>
       </div>
     </div>
 

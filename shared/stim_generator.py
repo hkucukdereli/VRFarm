@@ -75,24 +75,34 @@ def gain_to_correction_curve(gain):
     return np.min(g) / g
 
 
-def get_luminance_correction(warp, az_deg):
-    """Return the per-azimuth luminance correction factor at az_deg, honoring the NPZ's
-    `lum_correction_mode` set at warp-build time:
-      - "none"        -> 1.0 (no correction)
+def luminance_correction_curve(warp):
+    """Return (az_arr, corr_arr): the per-azimuth luminance CORRECTION curve (<= 1, attenuate-down)
+    honoring the NPZ's `lum_correction_mode` set at warp-build time:
+      - "none"        -> all 1.0 (no correction)
       - "empirical"   -> measured lum_correction_empirical (fall back to theoretical if absent)
-      - "theoretical" -> theoretical cos-incidence curve
-    An NPZ with no mode key uses the legacy behavior (empirical-if-present, else theoretical)."""
+      - "theoretical" -> min(gain)/gain of the theoretical curve
+    (No mode key -> legacy: empirical-if-present, else theoretical.) corr == 1.0 at the dimmest/
+    outermost az and < 1 at the bright center. The renderer (devices/display.py `_build_corr_map`)
+    interpolates this over az_map for the per-pixel, full-field correction — keep the two in sync."""
     keys = warp.files if hasattr(warp, "files") else warp.keys()
     mode = str(warp["lum_correction_mode"]) if "lum_correction_mode" in keys else None
     if mode == "none":
-        return 1.0
+        az = np.asarray(warp["lum_az"], dtype=float)
+        return az, np.ones_like(az)
     want_empirical = (mode == "empirical") or (mode is None and "lum_az_empirical" in keys)
     if want_empirical and "lum_az_empirical" in keys:
-        return float(np.interp(abs(az_deg), warp["lum_az_empirical"],
-                               warp["lum_correction_empirical"]))
-    # theoretical (explicit, or empirical requested but not measured yet)
-    return float(np.interp(abs(az_deg), warp["lum_az"],
-                           gain_to_correction_curve(warp["lum_gain_theoretical"])))
+        return (np.asarray(warp["lum_az_empirical"], dtype=float),
+                np.asarray(warp["lum_correction_empirical"], dtype=float))
+    return (np.asarray(warp["lum_az"], dtype=float),
+            gain_to_correction_curve(warp["lum_gain_theoretical"]))
+
+
+def get_luminance_correction(warp, az_deg):
+    """Scalar per-azimuth luminance correction at az_deg (used by the experiment-UI Correct
+    button). Mode handling lives in luminance_correction_curve; the renderer applies the full
+    per-pixel version. Returns 1.0 for mode 'none'."""
+    az_arr, corr = luminance_correction_curve(warp)
+    return float(np.interp(abs(az_deg), az_arr, corr))
 
 
 # ── Contrast metric conversions ──
@@ -298,17 +308,16 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
             px_y[i] = proj_res[1] / 2 - t["alt_deg"] * px_per_deg
 
         # Interpret the config contrast in the active metric -> normalized headroom fraction f.
-        f = metric_to_fraction(t["contrast"], bg, contrast_metric)
+        # Luminance correction is applied PER-PIXEL at render time (full-field: background AND
+        # stimulus scale by C(az)), so generation stores the UNcorrected fraction; the renderer
+        # equalizes delivered luminance. (Field name stays corr_contrast for NPZ compatibility.)
+        corr_contrast[i] = min(metric_to_fraction(t["contrast"], bg, contrast_metric), 1.0)
         if warp_map is not None:
             px_size[i] = visual_angle_to_pixels(
                 t["az_deg"], t["alt_deg"],
                 stim_cfg["size_deg"], warp_map, proj_res)
-            # Per-azimuth luminance correction, applied automatically per location.
-            lum_corr = get_luminance_correction(warp_map, t["az_deg"])
-            corr_contrast[i] = min(f * lum_corr, 1.0)
         else:
             px_size[i] = max(4, int(stim_cfg["size_deg"] * px_per_deg))
-            corr_contrast[i] = min(f, 1.0)
 
     # Pre-generate all timing durations
     rng = np.random.default_rng()

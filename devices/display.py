@@ -41,6 +41,8 @@ class Display(Device):
         self._screen = None
         self._warp = None
         self._patch_cache = {}
+        self._blank_cache = {}   # corrected uniform-field surfaces, keyed by bg value
+        self._corr_map = None    # (H,W) per-pixel luminance correction C(az) in [0,1], 0 off-screen
         self._sync_surf = None   # red photodiode flood for the invisible (off-screen) area
 
     def start_display(self):
@@ -110,24 +112,41 @@ class Display(Device):
         pygame.display.flip()
 
     def blank(self):
-        """Fill screen with background color."""
-        import pygame
-        if self._screen is None:
-            return
-        bg_lin = max(0.0, min(1.0, self.bg_gray))
-        bg_rgb = max(0, min(255, int(bg_lin * 255)))
-        self._screen.fill((0, bg_rgb, bg_rgb))
-        pygame.display.flip()
+        """Blank to the session background (uniform delivered luminance when a warp is loaded)."""
+        self.blank_with_gray(self.bg_gray)
 
     def blank_with_gray(self, gray_value: float):
-        """Fill screen with an arbitrary gray value (0..1: 0 = darkest, 1 = brightest)."""
+        """Fill the visible screen with a gray value (0..1). With a warp loaded, the background is
+        luminance-corrected per-pixel so its DELIVERED luminance is uniform across azimuth (same
+        full-field correction as the stimulus, so the whole session looks flat); without a warp it
+        falls back to a plain uniform fill. Green+blue only (red LED off)."""
         import pygame
         if self._screen is None:
             return
         lin = max(0.0, min(1.0, gray_value))
-        rgb = max(0, min(255, int(lin * 255)))
-        self._screen.fill((0, rgb, rgb))   # red LED off -> green+blue only
+        if self._warp is not None and self._corr_map is not None:
+            surf = self._blank_cache.get(round(lin, 4))
+            if surf is None:
+                surf = self._build_field_surface(lin)
+                self._blank_cache[round(lin, 4)] = surf
+            self._screen.blit(surf, (0, 0))
+        else:
+            rgb = max(0, min(255, int(lin * 255)))
+            self._screen.fill((0, rgb, rgb))
         pygame.display.flip()
+
+    def _build_field_surface(self, bg_lin):
+        """Uniform background field with the full-field per-pixel luminance correction: valid
+        pixels driven at bg_lin*C(az) (uniform delivered luminance), invisible area BLACK."""
+        import numpy as np
+        import pygame
+        valid = np.asarray(self._warp["valid_map"], dtype=bool)
+        drive = bg_lin * self._corr_map   # _corr_map is 0 outside the visible screen
+        code = np.clip(drive * 255.0, 0, 255).astype(np.uint8)
+        pixels = np.zeros((self._corr_map.shape[0], self._corr_map.shape[1], 3), dtype=np.uint8)
+        pixels[valid, 1] = code[valid]
+        pixels[valid, 2] = code[valid]
+        return pygame.surfarray.make_surface(pixels.transpose(1, 0, 2))
 
     def load_warp(self, npz_path: str):
         """Load warp map for warped rendering."""
@@ -137,52 +156,93 @@ class Display(Device):
         if p.exists():
             self._warp = np.load(str(p))
             self._patch_cache = {}
+            self._blank_cache = {}
             self._sync_surf = None
+            self._corr_map = self._build_corr_map()   # per-pixel luminance correction
             return True
         return False
 
+    def _build_corr_map(self):
+        """Per-pixel luminance correction C(az) in [0,1] from the warp's lum data, honoring
+        `lum_correction_mode` (none->1, empirical->measured, theoretical->min(gain)/gain). Multiply
+        a pixel's drive by this to attenuate the bright center DOWN to the dim edges — full-field
+        equalization so delivered luminance is uniform across azimuth. Off-screen (invalid) pixels
+        -> 0. Mirrors shared.stim_generator.luminance_correction_curve / gain_to_correction_curve;
+        keep the formula in sync. Returns None if the warp has no usable geometry."""
+        import numpy as np
+        w = self._warp
+        if w is None:
+            return None
+        keys = w.files if hasattr(w, "files") else list(w.keys())
+        if "az_map" not in keys or "valid_map" not in keys:
+            return None
+        mode = str(w["lum_correction_mode"]) if "lum_correction_mode" in keys else None
+        az_arr = corr = None
+        if mode == "none":
+            pass  # az_arr stays None -> all ones
+        elif (mode == "empirical" or (mode is None and "lum_az_empirical" in keys)) \
+                and "lum_az_empirical" in keys:
+            az_arr = np.asarray(w["lum_az_empirical"], dtype=float)
+            corr = np.asarray(w["lum_correction_empirical"], dtype=float)
+        elif "lum_gain_theoretical" in keys:
+            g = np.maximum(np.asarray(w["lum_gain_theoretical"], dtype=float), 0.05)
+            az_arr = np.asarray(w["lum_az"], dtype=float)
+            corr = np.min(g) / g
+        # (no lum data -> az_arr None -> no correction)
+        az_map = np.asarray(w["az_map"], dtype=float)
+        valid = np.asarray(w["valid_map"], dtype=bool)
+        if az_arr is None:
+            cmap = np.ones(az_map.shape, dtype=np.float32)
+        else:
+            cmap = np.interp(np.abs(np.nan_to_num(az_map, nan=0.0)),
+                             az_arr, corr).astype(np.float32)
+        cmap[~valid] = 0.0
+        return cmap
+
     def show_patch_spherical(self, az_deg: float, alt_deg: float, size_deg: float,
-                             corr_contrast: float, bg_gray: float,
-                             sync_square: bool = False, shape: str = "square"):
+                             frac: float, bg_gray: float,
+                             sync_square: bool = False, shape: str = "square",
+                             apply_lum: bool = True):
         """Render a stimulus patch in true visual-angle space through the warp map, so it
-        subtends `size_deg` at any azimuth/altitude and is shaped to the screen curvature.
-        `shape` is "square" or "circle". Surfaces are cached per (az, alt, size, contrast, bg,
-        shape) — positions recur every block, so a trial re-blits a prebuilt surface. Silently
-        no-ops if no warp is loaded (the follower falls back to show_rect)."""
+        subtends `size_deg` at any azimuth/altitude and is shaped to the screen curvature. `frac`
+        is the UNcorrected headroom fraction (stimulus luminance = bg + frac*(1-bg) before the
+        per-pixel luminance correction). `shape` is "square" or "circle". `apply_lum` applies the
+        full-field per-pixel luminance correction (default); set False to render RAW drive — used
+        by the intensity-cal measurement, which must read the uncorrected delivered luminance.
+        Surfaces are cached; silently no-ops if no warp is loaded (follower falls back to show_rect)."""
         import pygame
         if self._screen is None or self._warp is None:
             return
         key = (round(float(az_deg), 2), round(float(alt_deg), 2),
-               round(float(size_deg), 2), round(float(corr_contrast), 4),
-               round(float(bg_gray), 4), str(shape))
+               round(float(size_deg), 2), round(float(frac), 4),
+               round(float(bg_gray), 4), str(shape), bool(apply_lum))
         surf = self._patch_cache.get(key)
         if surf is None:
             surf = self._build_patch_surface(az_deg, alt_deg, size_deg,
-                                             corr_contrast, bg_gray, shape)
+                                             frac, bg_gray, shape, apply_lum)
             self._patch_cache[key] = surf
         self._screen.blit(surf, (0, 0))
         self._draw_sync_border(sync_square)
         pygame.display.flip()
 
-    def _build_patch_surface(self, az0, alt0, size_deg, corr_contrast, bg_gray,
-                             shape="square"):
-        """Compose the full (H, W) framebuffer for one patch: a bright stimulus over a darker
-        background, both green+blue only (R=0). `shape` is "square" (within size_deg/2 in BOTH
-        azimuth and altitude) or "circle" (within radius size_deg/2 in the az/alt plane) — a
-        visual-angle shape, warp-shaped to the screen curvature. The invisible area (outside the
-        marked visible screen, ~valid_map) is left BLACK — it's off-screen and reserved for the
-        red photodiode flood (see _draw_sync_border)."""
+    def _build_patch_surface(self, az0, alt0, size_deg, frac, bg_gray,
+                             shape="square", apply_lum=True):
+        """Compose the full (H, W) framebuffer for one patch: a bright stimulus over a background,
+        both green+blue only (R=0). `shape` is "square" (within size_deg/2 in BOTH azimuth and
+        altitude) or "circle" (radius size_deg/2 in the az/alt plane) — a visual-angle shape,
+        warp-shaped to the screen curvature. When apply_lum, EVERY pixel's drive (background AND
+        stimulus) is multiplied by the per-pixel correction C(az) so delivered luminance is uniform
+        across azimuth (the bright center is darkened to match the dim edges); Bg=1 then means full
+        LED at the edges and attenuated at center. The invisible area (~valid_map) stays BLACK —
+        off-screen, reserved for the red photodiode flood (see _draw_sync_border)."""
         import numpy as np
         import pygame
         az_map = self._warp["az_map"]
         alt_map = self._warp["alt_map"]
-        valid = self._warp["valid_map"]
-        # Gray 0..1 -> 8-bit (same mapping as show_rect)
+        valid = np.asarray(self._warp["valid_map"], dtype=bool)
+        # Ideal (uncorrected) 0..1 drive: bg everywhere, stimulus = bg + frac*(1-bg) inside the shape.
         bg_lin = max(0.0, min(1.0, bg_gray))
-        stim_lin = bg_lin + corr_contrast * (1 - bg_lin)
-        rgb = max(0, min(255, int(stim_lin * 255)))
-        bg_rgb = max(0, min(255, int(bg_lin * 255)))
-        # Stimulus shape in visual-angle space, radius/half-side = size_deg/2.
+        stim_lin = bg_lin + max(0.0, min(1.0, frac)) * (1 - bg_lin)
         half = size_deg / 2.0
         daz = az_map - az0
         dalt = alt_map - alt0
@@ -191,12 +251,16 @@ class Display(Device):
         else:
             inside = (np.abs(daz) <= half) & (np.abs(dalt) <= half)
         lit = valid & inside
-        # Green+blue only: G=B=value, R=0. Visible area gets background/stimulus; the invisible
-        # off-screen area stays (0,0,0) so the red sync flood has a dark baseline.
-        gb = np.where(lit, rgb, bg_rgb).astype(np.uint8)
+        ideal = np.where(lit, stim_lin, bg_lin)
+        # Full-field per-pixel luminance correction (or raw drive, masked to the visible screen).
+        if apply_lum and self._corr_map is not None:
+            drive = ideal * self._corr_map
+        else:
+            drive = np.where(valid, ideal, 0.0)
+        code = np.clip(drive * 255.0, 0, 255).astype(np.uint8)   # green+blue only, R=0
         pixels = np.zeros((az_map.shape[0], az_map.shape[1], 3), dtype=np.uint8)
-        pixels[valid, 1] = gb[valid]
-        pixels[valid, 2] = gb[valid]
+        pixels[valid, 1] = code[valid]
+        pixels[valid, 2] = code[valid]
         return pygame.surfarray.make_surface(pixels.transpose(1, 0, 2))
 
     def show_checkers(self, n: int = 8, use_warp: bool = True):

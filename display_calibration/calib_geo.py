@@ -58,6 +58,7 @@ RES_W, RES_H = 1920, 1080                       # projector panel (also read fro
 GEO_SLIDERS = {
     "parabola_A": ("screen", "parabola_A"),
     "parabola_B": ("screen", "parabola_B"),
+    "azimuth_boundary_deg": ("screen", "azimuth_boundary_deg"),
     "throw_ratio": ("projector", "throw_ratio"),
     "horizontal_stretch": ("projector", "horizontal_stretch"),
     "vertical_stretch": ("projector", "vertical_stretch"),
@@ -81,7 +82,7 @@ DEFAULT_GEO = {
                   "lens_offset_vertical": 1.0, "lateral_offset_cm": 0,
                   "horizontal_stretch": 0.85, "vertical_stretch": 3.35},
     "screen": {"parabola_A": 12.7, "parabola_B": 0.044,
-               "azimuth_height": 14.4, "height_cm": 20,
+               "azimuth_height": 14.4, "azimuth_boundary_deg": 105, "height_cm": 20,
                "altitude_min_deg": -49.75, "altitude_max_deg": 25.3},
 }
 
@@ -90,6 +91,7 @@ PARAMS = {"parabola_A": 12.7, "parabola_B": 0.044, "throw_ratio": 1.2,
           "horizontal_stretch": 0.85, "vertical_stretch": 3.35,
           "optical_axis_elevation_deg": -3.0, "lens_offset_vertical": 1.0,
           "azimuth_height": 14.4,   # cm, eye/az-line above screen bottom -> drives altitudes
+          "azimuth_boundary_deg": 105.0,   # parabola azimuth half-extent (deg), for the top-down view
           "offset_x": 0, "offset_y": 0, "flip_h": False, "flip_v": True,
           "frame_x": 40,                  # usable-area inset (px), symmetric L/R
           "frame_y_top": 40, "frame_y_bottom": 40,   # usable-area insets (px), independent T/B
@@ -427,6 +429,7 @@ def grid_lines(p):
     res_w, res_h = geo["projector"]["resolution"]
     out = {"res": [res_w, res_h], "almin": almin, "almax": almax,
            "azmin": -90, "azmax": 90,
+           "A": A, "B": B, "az_boundary": p.get("azimuth_boundary_deg", 105),
            "frame_x": p["frame_x"], "frame_y_top": p["frame_y_top"],
            "frame_y_bottom": p["frame_y_bottom"],
            "hstretch": round(p["horizontal_stretch"], 4),
@@ -479,6 +482,10 @@ lines sit on the physical 90° marks. Stretches are solved for you. Tune
   <div class=pv><h4>TARGET — flat/undistorted (what the mouse should see)</h4><canvas id=cvIdeal width=480 height=270></canvas></div>
   <div class=pv><h4>PROJECTED — warped for the curved screen (what goes IRL)</h4><canvas id=cvWarp width=480 height=270></canvas></div>
 </div>
+<div style="max-width:640px;margin:0 0 20px">
+  <h4 style="margin:0 0 5px;font-weight:normal;color:#bbb;font-size:13px">TOP-DOWN — eye → parabola (green/cyan rays 0/30/60/90°; yellow-dashed = boundary)</h4>
+  <canvas id=cvTop width=640 height=360></canvas>
+</div>
 <div id=ctrls></div>
 <button onclick=save()>Save rig_geometry.yaml</button>
 <button onclick=saveDefaults()>Save defaults</button>
@@ -491,6 +498,7 @@ const RES=[1920,1080];
 // [key, min, max, step, section-label]
 const S=[
 ['parabola_A',1,30,0.05,'Screen (measured)'],['parabola_B',0.001,0.30,0.001,''],
+['azimuth_boundary_deg',30,120,1,''],
 ['throw_ratio',0.4,1.6,0.01,'Projector (measured)'],
 ['optical_axis_elevation_deg',-30,60,0.5,''],['lens_offset_vertical',0,1,0.05,''],
 ['horizontal_stretch',0.05,6.0,0.01,'Solved from landmarks'],['vertical_stretch',0.1,6.0,0.01,''],
@@ -546,7 +554,39 @@ for(const l of d.az_lines){ctx.strokeStyle=azcol(l.t);ctx.lineWidth=(l.t===0||Ma
 // usable-area frame
 ctx.strokeStyle='#0ff';ctx.lineWidth=1.5;
 ctx.strokeRect(d.frame_x*sx,d.frame_y_top*sy,(d.res[0]-2*d.frame_x)*sx,(d.res[1]-d.frame_y_top-d.frame_y_bottom)*sy);}
-async function refreshPreview(){const d=await(await fetch('/preview')).json();drawIdeal(d);drawWarp(d);
+// ── top-down schematic: eye at origin, parabola y = A - B*x², rays at 0/30/60/90° (+boundary) ──
+function azHit(az,A,B){const th=az*Math.PI/180,s=Math.sin(th),c=Math.cos(th);
+if(Math.abs(s)<1e-9)return [0,A];                          // straight ahead -> vertex (0,A)
+const a=B*s*s,disc=c*c+4*a*A;if(disc<0)return null;
+const t=(-c+Math.sqrt(disc))/(2*a);return t>0?[t*s,t*c]:null;}
+function drawTop(d){const cv=document.getElementById('cvTop'),ctx=cv.getContext('2d'),W=cv.width,H=cv.height;
+ctx.fillStyle='#111';ctx.fillRect(0,0,W,H);
+const A=d.A,B=d.B,bd=d.az_boundary||105;if(!A||!B)return;
+const par=[],pts=[[0,0]];
+for(let az=-bd;az<=bd+1e-6;az+=2){const p=azHit(az,A,B);if(p){par.push(p);pts.push(p);}}
+const rays=[0,30,60,90,-30,-60,-90].map(a=>({a,p:azHit(a,A,B)})).filter(r=>r.p);
+const bnd=[bd,-bd].map(a=>({a,p:azHit(a,A,B)})).filter(r=>r.p);
+rays.concat(bnd).forEach(r=>pts.push(r.p));
+const xs=pts.map(p=>p[0]),ys=pts.map(p=>p[1]);
+const minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys);
+const m=34,sc=Math.min((W-2*m)/((maxX-minX)||1),(H-2*m)/((maxY-minY)||1));
+const px0=(W-(maxX-minX)*sc)/2,py0=(H-(maxY-minY)*sc)/2;
+const X=x=>px0+(x-minX)*sc,Y=y=>py0+(maxY-y)*sc;          // +y (forward) is UP on the canvas
+// eye-plane (y=0, the ±90° coronal line)
+ctx.strokeStyle='#333';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(0,Y(0));ctx.lineTo(W,Y(0));ctx.stroke();
+// parabola
+ctx.strokeStyle='#ccc';ctx.lineWidth=2;ctx.beginPath();
+par.forEach((p,i)=>{const x=X(p[0]),y=Y(p[1]);i?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();
+ctx.font='12px sans-serif';ctx.textAlign='center';
+rays.forEach(r=>{const col=(r.a===0||Math.abs(r.a)===90)?'#0f0':'#0dd';
+ctx.strokeStyle=col;ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(X(0),Y(0));ctx.lineTo(X(r.p[0]),Y(r.p[1]));ctx.stroke();
+ctx.fillStyle=col;ctx.fillText(r.a+'°',X(r.p[0]),Y(r.p[1])-6);});
+bnd.forEach(r=>{ctx.strokeStyle='#fd6';ctx.lineWidth=2;ctx.setLineDash([6,4]);
+ctx.beginPath();ctx.moveTo(X(0),Y(0));ctx.lineTo(X(r.p[0]),Y(r.p[1]));ctx.stroke();ctx.setLineDash([]);
+ctx.fillStyle='#fd6';ctx.fillText(r.a+'°',X(r.p[0]),Y(r.p[1])-6);});
+ctx.fillStyle='#0f0';ctx.beginPath();ctx.arc(X(0),Y(0),4,0,7);ctx.fill();
+ctx.fillStyle='#8f8';ctx.fillText('eye',X(0),Y(0)+18);}
+async function refreshPreview(){const d=await(await fetch('/preview')).json();drawIdeal(d);drawWarp(d);drawTop(d);
 // reflect solved stretches + derived altitude range
 P.horizontal_stretch=d.hstretch;P.vertical_stretch=d.vstretch;
 const oh=document.getElementById('o_horizontal_stretch');if(oh)oh.textContent=fmt('horizontal_stretch',d.hstretch);

@@ -416,7 +416,8 @@ def _display_thread_fn():
                     dev.show_patch_spherical(
                         cmd.get("az_deg", 0.0), cmd.get("alt_deg", 0.0),
                         cmd.get("size_deg", 8.0), cmd.get("corr_contrast", 0.5),
-                        cmd.get("bg_gray", 0.0), shape=cmd.get("shape", "square"))
+                        cmd.get("bg_gray", 0.0), shape=cmd.get("shape", "square"),
+                        apply_lum=cmd.get("apply_lum", True))
                     _display_result_q.put({"ok": True})
             elif action == "reload_warp":
                 # Re-read warp_map.npz into the running Display so a freshly Generated warp
@@ -533,6 +534,9 @@ def test_stimulus():
         "corr_contrast": frac,
         "bg_gray": bg,
         "shape": data.get("shape", "square"),
+        # Intensity-cal measurement sends apply_lum:false to render RAW drive (so the meter reads
+        # the uncorrected delivered luminance the correction is fit from). Normal tests correct.
+        "apply_lum": bool(data.get("apply_lum", True)),
     })
     code = 200 if result.get("ok") else 500
     return jsonify(result), code

@@ -1342,6 +1342,15 @@ async function homeReward() {
   log(result.ok ? 'Home pulse sent.' : 'Failed: ' + (result.error || ''));
 }
 
+// Set a reward pin's GPIO in the rig state (Save Rig persists it). Nested-safe:
+// the pins.<name> object is created if missing so a fresh rig can't crash the write.
+function setRewardPin(name, val) {
+  const r = rig.devices.reward;
+  r.pins = r.pins || {};
+  r.pins[name] = r.pins[name] || {label: name === 'main' ? 'reward' : name};
+  r.pins[name].gpio = parseInt(val);
+}
+
 // ── Reward live ──
 
 async function startRewardLive() {
@@ -1977,6 +1986,8 @@ function renderPhotodiodeControls(dev) {
 function renderRewardControls(dev) {
   const rewardType = dev.reward_type || 'water';
   const homePin = (dev.pins || {}).home;
+  const mainGpio = (((dev.pins || {}).main) || {}).gpio || 18;
+  const homeGpio = (((dev.pins || {}).home) || {}).gpio || 17;
   const cal = (dev.calibration || {}).main || [];
   const deliverUl = 4.0;
   const computedMs = interpolateCalMs(cal, deliverUl);
@@ -1996,6 +2007,16 @@ function renderRewardControls(dev) {
         <label>Type</label>
         <input type="text" value="${rewardType}" style="width:70px"
                onchange="rig.devices.reward.reward_type = this.value">
+      </div>
+      <div class="device-field">
+        <label>Reward GPIO</label>
+        <input type="number" value="${mainGpio}" min="0" max="27" style="width:45px"
+               onchange="setRewardPin('main', this.value)">
+      </div>
+      <div class="device-field">
+        <label>Home GPIO</label>
+        <input type="number" value="${homeGpio}" min="0" max="27" style="width:45px"
+               onchange="setRewardPin('home', this.value)">
       </div>
       <div class="device-field">
         <label>Deliver</label>

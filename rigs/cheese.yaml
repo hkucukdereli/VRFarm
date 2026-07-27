@@ -3,6 +3,10 @@ data:
   mac_dir: /Users/hakan/VRFarm/data
   video_dir: /home/vruser/data
 devices:
+  calibration_probe:
+    enabled: true
+    gpio: 22
+    type: calibration_probe
   camera:
     auto_exposure: false
     bitrate_mbps: 3
@@ -61,6 +65,7 @@ pis:
   - reward
   - photodiode
   - camera
+  - calibration_probe
   ip: 192.168.10.101
   name: cheddar
   role: leader

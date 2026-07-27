@@ -1176,6 +1176,7 @@ async function startCalibration() {
     if (data.ok && data.url) {
       log('Calibration running — sliders at ' + data.url);
       calibrating = true;
+      if (rig.devices.calibration_probe) { (deviceState.calibration_probe = deviceState.calibration_probe || {}).on = true; renderDeviceList(); }
       if (win) win.location = data.url; else window.open(data.url, 'geo-calibration');
     } else {
       log('Calibration start failed: ' + (data.error || ''));
@@ -1206,7 +1207,23 @@ async function stopCalibration() {
     stopped = !!data.ok;
   } catch (e) { log('Stop error: ' + e); }
   if (stopped) calibrating = false;   // keep the red 'Stop' if it failed, so it can be retried
+  if (stopped && rig.devices.calibration_probe) { (deviceState.calibration_probe = deviceState.calibration_probe || {}).on = false; renderDeviceList(); }
   _unlockUI();
+}
+
+async function toggleProbe() {
+  const pi = getPiForDevice('calibration_probe');
+  if (!pi) { log('Calibration probe not assigned to a Pi'); return; }
+  const ds = deviceState.calibration_probe = deviceState.calibration_probe || {};
+  const turningOn = ds.on !== true;
+  const result = await proxyPi(pi.ip, turningOn ? '/api/probe_on' : '/api/probe_off');
+  if (result.ok) {
+    ds.on = turningOn;
+    renderDeviceList();
+    log('Calibration probe ' + (turningOn ? 'ON (TTL HIGH)' : 'OFF (TTL LOW)'));
+  } else {
+    log('Probe toggle failed: ' + (result.error || ''));
+  }
 }
 
 async function startLickMonitor() {
@@ -1652,6 +1669,7 @@ function renderDeviceList() {
       else if (name === 'lick_sensor') controlsHtml = renderLickControls(dev);
       else if (name === 'photodiode') controlsHtml = renderPhotodiodeControls(dev);
       else if (name === 'reward') controlsHtml = renderRewardControls(dev);
+      else if (name === 'calibration_probe') controlsHtml = renderProbeControls(dev);
     }
 
     // Reinit lives in the header row (next to title/status) for camera + display.
@@ -2050,6 +2068,24 @@ function renderRewardControls(dev) {
       <button class="btn btn-blue btn-sm" onclick="addCalRow()">+ Row</button>
       <button class="btn btn-red btn-sm" onclick="removeCalRow()">- Row</button>
       <button class="btn btn-orange btn-sm" onclick="applyCalibration()">Save Calibration</button>
+    </div>`;
+}
+
+function renderProbeControls(dev) {
+  const gpio = dev.gpio || 22;
+  const ds = deviceState.calibration_probe || {};
+  const on = ds.on === true;
+
+  return `
+    <div class="device-controls">
+      <div class="device-field">
+        <label>GPIO</label>
+        <input type="number" value="${gpio}" min="0" max="27" style="width:45px"
+               onchange="rig.devices.calibration_probe.gpio = parseInt(this.value)">
+      </div>
+      <button class="btn ${on ? 'btn-green' : 'btn-gray'} btn-sm" onclick="toggleProbe()"
+              ${ds.initialized !== true ? 'disabled' : ''}>${on ? 'Probe On' : 'Probe Off'}</button>
+      <span style="font-size:11px; color:#888; margin-left:4px">TTL ${on ? 'HIGH' : 'LOW'} · auto-driven by geometry calibration</span>
     </div>`;
 }
 

@@ -518,6 +518,15 @@ def api_init_devices():
             }, "Photodiode")
             results["photodiode"] = {"ok": ok, "message": msg}
 
+    # Calibration probe: pigpiod + GPIO latch
+    if "calibration_probe" in devices and devices["calibration_probe"].get("enabled"):
+        ip = dev_to_ip.get("calibration_probe")
+        if ip:
+            ok, msg = _init("calibration_probe", ip, "/api/init_calibration_probe", {
+                "gpio": devices["calibration_probe"].get("gpio", 22),
+            }, "Calibration probe")
+            results["calibration_probe"] = {"ok": ok, "message": msg}
+
     all_ok = all(r["ok"] for r in results.values())
     return jsonify({"ok": all_ok, "steps": steps, "results": results})
 
@@ -753,6 +762,29 @@ def _reinit_projector(target):
         return False, str(e)
 
 
+def _drive_calibration_probe(high: bool):
+    """Latch the calibration-probe TTL high/low via its Pi's pi_api endpoint (same
+    persistent device the manual card button drives, so they stay in sync). Returns a
+    step string, or None if no probe is configured. Non-fatal: geometry calibration
+    proceeds regardless of the probe."""
+    if not _rig_config:
+        return None
+    probe_pi = next((pi for pi in _rig_config.get("pis", [])
+                     if "calibration_probe" in pi.get("devices", [])), None)
+    if not probe_pi:
+        return None   # no probe on this rig — nothing to drive
+    api_port = _rig_config["network"]["api_port"]
+    endpoint = "/api/probe_on" if high else "/api/probe_off"
+    edge = "HIGH" if high else "LOW"
+    try:
+        r = requests.post(f"http://{probe_pi['ip']}:{api_port}{endpoint}", timeout=5)
+        if r.json().get("ok"):
+            return f"Calibration probe {edge}"
+        return f"WARN calibration probe {edge} skipped: {r.json().get('error', '')} (run Init Devices)"
+    except Exception as e:
+        return f"WARN calibration probe {edge} failed: {e}"
+
+
 @app.route("/api/start_calibration", methods=["POST"])
 def api_start_calibration():
     """Deploy the geometry-calibration tools to the display Pi and launch calib_geo
@@ -819,6 +851,9 @@ def api_start_calibration():
 
         out = _ssh(target, "bash ~/rig/calibration/cal_start.sh geo", timeout=45)
         steps.append((out.strip().splitlines() or ["started"])[0])
+        note = _drive_calibration_probe(True)   # TTL HIGH while calibrating
+        if note:
+            steps.append(note)
         return jsonify({"ok": True, "url": f"http://{ip}:5091", "steps": steps})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "steps": steps})
@@ -838,6 +873,9 @@ def api_stop_calibration():
     try:
         out = _ssh(target, "bash ~/rig/calibration/cal_stop.sh", timeout=20)
         steps.append((out.strip().splitlines() or ["Calibration tool stopped"])[0])
+        note = _drive_calibration_probe(False)  # TTL LOW when calibration stops
+        if note:
+            steps.append(note)
         # Re-init the projector so the normal display comes back cleanly (requested).
         ok, msg = _reinit_projector(target)
         steps.append(f"Projector re-init: {msg}" if ok else f"WARN projector re-init: {msg}")
@@ -1006,6 +1044,7 @@ def api_device_schemas():
     from devices.base import DEVICE_REGISTRY
     import devices.lick_sensor, devices.reward, devices.camera  # noqa
     import devices.photodiode, devices.display  # noqa
+    import devices.calibration_probe  # noqa
 
     schemas = {}
     for name, cls in DEVICE_REGISTRY.items():

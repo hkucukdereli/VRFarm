@@ -675,6 +675,24 @@ def init_photodiode():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/init_calibration_probe", methods=["POST"])
+def init_calibration_probe():
+    """Initialize the calibration probe: create a persistent GPIO-latch device."""
+    _ensure_rig_path()
+    from devices.calibration_probe import CalibrationProbe
+    data = request.json or {}
+    gpio = data.get("gpio", 22)
+    try:
+        dev = CalibrationProbe()
+        dev.init(rig_config={"gpio": gpio}, task_params={})
+        with _devices_lock:
+            _devices["calibration_probe"] = dev
+        check = dev.check()
+        return jsonify({"ok": True, "message": check.get("message", "OK")})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/camera_preview_start", methods=["POST"])
 def camera_preview_start():
     """Start camera MJPEG preview (or session recording if session_id given)."""
@@ -837,6 +855,28 @@ def stop_monitor_photodiode():
     if dev:
         dev.stop_stream()
     return jsonify({"ok": True})
+
+
+@app.route("/api/probe_on", methods=["POST"])
+def probe_on():
+    """Latch the calibration probe GPIO HIGH."""
+    with _devices_lock:
+        dev = _devices.get("calibration_probe")
+    if dev is None:
+        return jsonify({"ok": False, "error": "calibration probe not initialized"}), 400
+    dev.set_state(True)
+    return jsonify({"ok": True, "high": True})
+
+
+@app.route("/api/probe_off", methods=["POST"])
+def probe_off():
+    """Latch the calibration probe GPIO LOW."""
+    with _devices_lock:
+        dev = _devices.get("calibration_probe")
+    if dev is None:
+        return jsonify({"ok": False, "error": "calibration probe not initialized"}), 400
+    dev.set_state(False)
+    return jsonify({"ok": True, "high": False})
 
 
 @app.route("/api/photodiode_data")

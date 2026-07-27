@@ -29,6 +29,7 @@ import devices.lick_sensor   # noqa: F401 — register device
 import devices.reward         # noqa: F401
 import devices.camera         # noqa: F401
 import devices.photodiode     # noqa: F401
+import devices.calibration_probe  # noqa: F401
 
 
 class Leader:

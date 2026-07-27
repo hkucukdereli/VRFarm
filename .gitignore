@@ -213,8 +213,10 @@ data/
 *.h5
 *.hdf5
 
-# Docs
-docs/
+# Docs — kept local by default (audits, protocols, manuals), but track setup guides
+# so they travel with the repo to every controller machine.
+docs/*
+!docs/CONTROLLER_SETUP.md
 
 # Generated calibration / stimulus artifacts
 *.npz

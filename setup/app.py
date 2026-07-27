@@ -580,11 +580,12 @@ def _generate_and_deploy_warp(geo_file, lum_mode="theoretical"):
     ATOMICALLY scp it + the geometry to every Pi and reload the live display. Shared by the
     Regenerate Warp button and the intensity-cal Apply. Returns (ok, steps, error)."""
     steps = []
-    # 1. Run compute_warp_map.py on the Mac, from the SELECTED geometry file, baking in the
-    #    luminance mode (empirical re-injects luminance_cal_latest.yaml, so a measured
-    #    correction survives regeneration).
-    conda_prefix = Path("/opt/homebrew/Caskroom/miniforge/base/envs/vrfarm/bin")
-    python = str(conda_prefix / "python")
+    # 1. Run compute_warp_map.py locally on the controller, from the SELECTED geometry file,
+    #    baking in the luminance mode (empirical re-injects luminance_cal_latest.yaml, so a
+    #    measured correction survives regeneration).
+    # Use the interpreter running this setup UI (the vrfarm env on Mac or Linux), not a
+    # hardcoded macOS miniforge path — that env has numpy/scipy/yaml for the warp build.
+    python = sys.executable
     script = str(GEO_DIR / "compute_warp_map.py")
     r = subprocess.run(
         [python, script, "--geo", str(geo_file), "--lum-mode", lum_mode],

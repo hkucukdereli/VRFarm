@@ -50,6 +50,21 @@
 
   .device-card { background: #0f3460; border-radius: 6px; padding: 10px; margin-bottom: 8px; }
   .device-card h4 { font-size: 12px; color: #ccc; margin-bottom: 4px; }
+
+  /* Device cards shown as Chrome-style tabs */
+  .device-tabs { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 3px;
+                 padding-left: 2px; border-bottom: 2px solid #0f3460; }
+  .device-tab { display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+                background: #16213e; border: 1px solid #0f3460; border-bottom: none;
+                border-radius: 8px 8px 0 0; padding: 6px 12px; margin-bottom: -2px;
+                font-size: 12px; font-weight: 600; max-width: 180px; }
+  .device-tab:hover { background: #1c2a52; }
+  .device-tab.active { background: #0f3460; }
+  .device-tab-label { color: #bcd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .device-tab.active .device-tab-label { color: #fff; }
+  .device-panels { background: #0f3460; border-radius: 0 0 6px 6px; padding: 6px 8px 8px; }
+  .device-panels .device-card { background: transparent; padding: 4px; margin-bottom: 0;
+                                border-radius: 0; }
   .device-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
   /* Wraps a device's params + action buttons; disabled until Initialize is first pressed */
   .device-fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
@@ -537,12 +552,9 @@ async function deployPi(idx) {
     (data.steps || []).forEach(s => log('  ' + s));
     if (data.ok) {
       log('Deploy complete.');
-      // Deploy restarts pi_api, which drops that Pi's initialized devices. Reset their init
-      // state so the dots/controls aren't stale-green — the user must re-Initialize.
-      (pi.devices || []).forEach(name => {
-        if (deviceState[name]) deviceState[name].initialized = false;
-      });
-      devicesInitialized = false;
+      // Deploy restarts pi_api, which drops the initialized devices — revert the whole device
+      // panel to its pristine offline state (must re-Initialize).
+      _revertDevicesToUninitialized();
       log('  pi_api restarted — devices dropped; click Initialize to re-init.');
     } else {
       log('Deploy failed: ' + data.error);
@@ -550,6 +562,16 @@ async function deployPi(idx) {
   } finally {
     _unlockUI();
   }
+}
+
+// A pi_api restart (Restart API or Deploy) drops every initialized device, so revert the whole
+// device panel to its ORIGINAL offline look — gray status dots, locked controls — and flip the
+// Initialize button back from "Reinitialize" to "Initialize".
+function _revertDevicesToUninitialized() {
+  devicesInitialized = false;
+  deviceState = {};   // all dots back to gray (pristine, not red/"failed"); clears camera streaming too
+  const ib = document.getElementById('init-btn');
+  if (ib) { ib.textContent = 'Initialize'; ib.className = 'btn btn-green btn-sm'; }
 }
 
 // Restart pi_api on one Pi (reloads deployed code without a full reboot). Drops that Pi's
@@ -566,9 +588,9 @@ async function restartPiApi(idx) {
     });
     const data = await r.json();
     (data.steps || []).forEach(s => log('  ' + s));
-    // the restart drops this Pi's devices — reflect that so dots/controls aren't stale-green
-    (pi.devices || []).forEach(name => { if (deviceState[name]) deviceState[name].initialized = false; });
-    devicesInitialized = false;
+    // The restart drops the Pi's initialized devices — revert the whole device panel to its
+    // pristine offline state (gray dots, locked controls, button back to "Initialize").
+    _revertDevicesToUninitialized();
     log(data.ok ? `pi_api back online on ${pi.name} — re-initialize devices.`
                 : `pi_api on ${pi.name} may still be starting — re-check.`);
   } catch (e) { log('Restart error: ' + e); }
@@ -1643,43 +1665,85 @@ function syncLogHeight() {
 }
 window.addEventListener('resize', syncLogHeight);
 
+let activeDeviceTab = null;   // which device tab is currently shown
+function devLabel(name) { return (deviceSchemas[name] && deviceSchemas[name].label) || name; }
+
 function renderDeviceList() {
   const el = document.getElementById('device-list');
   if (!rig) { el.innerHTML = ''; return; }
-
   const pisReady = allPisOk();
   const devices = rig.devices || {};
-  el.innerHTML = Object.entries(devices).map(([name, dev]) => {
-    const schema = deviceSchemas[name] || {};
-    const enabled = dev.enabled !== false;
+  // Alphabetical by label — same order as the Add-Device dropdown.
+  const names = Object.keys(devices).sort((a, b) => devLabel(a).localeCompare(devLabel(b)));
+  if (!names.length) {
+    el.innerHTML = '<div style="color:#888; font-size:12px">No devices — add one above.</div>';
+    return;
+  }
+  if (!activeDeviceTab || !names.includes(activeDeviceTab)) activeDeviceTab = names[0];
+
+  // Chrome-style tab strip (status dot + label; dimmed label when the device is off).
+  const tabs = names.map(name => {
+    const dev = devices[name];
     const ds = deviceState[name] || {};
-    const initDot = ds.initialized === true ? 'dot-green' : ds.initialized === false ? 'dot-red' : 'dot-gray';
-    const assignHtml = (rig.pis || []).map((pi, i) => {
-      const assigned = (pi.devices || []).includes(name);
-      return `<span class="device-chip ${assigned ? 'enabled' : ''}"
-                    onclick="assignDeviceToPi('${name}', ${i})"
-                    style="cursor:pointer">${pi.name}</span>`;
-    }).join('');
+    const dot = ds.initialized === true ? 'dot-green' : ds.initialized === false ? 'dot-red' : 'dot-gray';
+    const active = name === activeDeviceTab ? ' active' : '';
+    const off = (dev.enabled !== false) ? '' : ' style="opacity:0.5"';
+    return `<button class="device-tab${active}" data-device="${name}" title="${devLabel(name)}"
+                    onclick="switchDeviceTab('${name}')">
+      <span class="status-dot ${dot}"></span><span class="device-tab-label"${off}>${devLabel(name)}</span>
+    </button>`;
+  }).join('');
 
-    const showControls = enabled && pisReady;
-    let controlsHtml = '';
-    if (showControls) {
-      if (name === 'camera') controlsHtml = renderCameraControls(dev);
-      else if (name === 'display') controlsHtml = renderDisplayControls(dev);
-      else if (name === 'lick_sensor') controlsHtml = renderLickControls(dev);
-      else if (name === 'photodiode') controlsHtml = renderPhotodiodeControls(dev);
-      else if (name === 'reward') controlsHtml = renderRewardControls(dev);
-      else if (name === 'calibration_probe') controlsHtml = renderProbeControls(dev);
-    }
+  // One panel per device; only the active one is shown.
+  const panels = names.map(name =>
+    `<div class="device-panel" data-device="${name}" style="display:${name === activeDeviceTab ? 'block' : 'none'}">
+      ${renderDeviceCard(name, devices[name], pisReady)}
+    </div>`).join('');
 
-    // Reinit lives in the header row (next to title/status) for camera + display.
-    const reinitBtn = (showControls && (name === 'camera' || name === 'display'))
-      ? `<button class="btn btn-yellow btn-sm" style="margin-left:auto"
-                 onclick="reinitDevice('${name}')" ${devicesInitialized ? '' : 'disabled'}>Reinit</button>`
-      : '';
+  el.innerHTML = `<div class="device-tabs">${tabs}</div><div class="device-panels">${panels}</div>`;
+  if (lumMeasure) renderLumPanel();   // re-hydrate an open intensity-cal panel after a re-render
+}
 
-    const opacity = pisReady ? (enabled ? 1 : 0.4) : 0.3;
-    return `
+// Switch the visible device tab in place (no full re-render, so input state is preserved).
+function switchDeviceTab(name) {
+  activeDeviceTab = name;
+  document.querySelectorAll('#device-list .device-panel').forEach(p =>
+    p.style.display = (p.dataset.device === name) ? 'block' : 'none');
+  document.querySelectorAll('#device-list .device-tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.device === name));
+}
+
+function renderDeviceCard(name, dev, pisReady) {
+  const schema = deviceSchemas[name] || {};
+  const enabled = dev.enabled !== false;
+  const ds = deviceState[name] || {};
+  const initDot = ds.initialized === true ? 'dot-green' : ds.initialized === false ? 'dot-red' : 'dot-gray';
+  const assignHtml = (rig.pis || []).map((pi, i) => {
+    const assigned = (pi.devices || []).includes(name);
+    return `<span class="device-chip ${assigned ? 'enabled' : ''}"
+                  onclick="assignDeviceToPi('${name}', ${i})"
+                  style="cursor:pointer">${pi.name}</span>`;
+  }).join('');
+
+  const showControls = enabled && pisReady;
+  let controlsHtml = '';
+  if (showControls) {
+    if (name === 'camera') controlsHtml = renderCameraControls(dev);
+    else if (name === 'display') controlsHtml = renderDisplayControls(dev);
+    else if (name === 'lick_sensor') controlsHtml = renderLickControls(dev);
+    else if (name === 'photodiode') controlsHtml = renderPhotodiodeControls(dev);
+    else if (name === 'reward') controlsHtml = renderRewardControls(dev);
+    else if (name === 'calibration_probe') controlsHtml = renderProbeControls(dev);
+  }
+
+  // Reinit lives in the header row (next to title/status) for camera + display.
+  const reinitBtn = (showControls && (name === 'camera' || name === 'display'))
+    ? `<button class="btn btn-yellow btn-sm" style="margin-left:auto"
+               onclick="reinitDevice('${name}')" ${devicesInitialized ? '' : 'disabled'}>Reinit</button>`
+    : '';
+
+  const opacity = pisReady ? (enabled ? 1 : 0.6) : 0.5;
+  return `
     <div class="device-card" style="opacity: ${opacity}">
       <h4 style="display:flex; align-items:center; gap:6px; flex-wrap:wrap">
         <span class="status-dot ${initDot}"></span>
@@ -1694,8 +1758,6 @@ function renderDeviceList() {
       ${showControls && !devicesInitialized ? '<div style="font-size:10px; color:#888; margin-top:4px">Press Initialize to enable device controls.</div>' : ''}
       ${!pisReady && enabled ? '<div style="font-size:10px; color:#f44336; margin-top:4px">Waiting for Pi check...</div>' : ''}
     </div>`;
-  }).join('');
-  if (lumMeasure) renderLumPanel();   // re-hydrate an open intensity-cal panel after a re-render
 }
 
 function renderCameraControls(dev) {
@@ -2092,7 +2154,8 @@ function renderProbeControls(dev) {
 function renderDeviceCatalog() {
   const el = document.getElementById('device-catalog');
   if (!el) return;
-  const entries = Object.entries(deviceSchemas);
+  const entries = Object.entries(deviceSchemas)
+    .sort((a, b) => (a[1].label || a[0]).localeCompare(b[1].label || b[0]));   // alphabetical
   if (!entries.length) { el.innerHTML = '<div style="color:#666">No devices defined</div>'; return; }
   const opts = entries.map(([name, s]) => {
     const inRig = (rig && rig.devices && rig.devices[name]) ? ' ✓' : '';

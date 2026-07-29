@@ -151,7 +151,7 @@
     </div>
 
     <div class="card" id="card-session">
-      <h3>Session</h3>
+      <h3 style="font-size:11px; color:#888; margin:0 0 6px;">SESSION</h3>
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:0 10px;">
         <div><label>Subject ID</label><input type="text" id="subject-id" value="HK001"></div>
         <div><label>Date</label><input type="text" id="session-date" value=""></div>
@@ -1336,7 +1336,8 @@ function updateButtons() {
   const busy = running || transferring || uiBusy;
 
   document.getElementById('btn-load-rig').disabled = busy;
-  document.getElementById('btn-load-task').disabled = !rigLoaded || busy;
+  // Experiments are loadable/editable WITHOUT a rig (deploy/GO still require rig+connect)
+  document.getElementById('btn-load-task').disabled = busy;
   document.getElementById('btn-save-task').disabled = !taskLoaded || busy;
   document.getElementById('btn-save-task-as').disabled = !taskLoaded || busy;
   document.getElementById('btn-deploy').disabled = !(rigLoaded && taskLoaded && connected && !busy);

@@ -478,7 +478,7 @@ def api_init_devices():
             ok1, _ = _init("display", ip, "/api/init_projector", {},
                            "Projector", timeout=35)
             ok2, msg = _init("display", ip, "/api/init_display",
-                             {"rig_config": devices["display"]},
+                             {"rig_config": _display_init_cfg(devices)},
                              "Display init", timeout=30)
             results["display"] = {"ok": ok1 and ok2, "message": msg}
 
@@ -565,7 +565,7 @@ def api_reinit_device():
 
     if dev_name == "display":
         ok1 = _post("/api/init_projector", {}, "Projector", timeout=35)
-        ok2 = _post("/api/init_display", {"rig_config": devices["display"]},
+        ok2 = _post("/api/init_display", {"rig_config": _display_init_cfg(devices)},
                     "Display init", timeout=30)
         ok = ok1 and ok2
     else:  # camera
@@ -1060,6 +1060,18 @@ def api_device_schemas():
 
 
 # ── Helpers ──
+
+def _display_init_cfg(devices: dict) -> dict:
+    """Display init payload: the display block plus the photodiode card's sync-square
+    prefs (corner/size) — the square is drawn by the display renderer, but authored in
+    the photodiode card. Mirrors engine/follower.py's injection at session start."""
+    pd = devices.get("photodiode", {}) or {}
+    cfg = dict(devices.get("display", {}) or {})
+    for k in ("sync_corner", "sync_size_px"):
+        if k in pd:
+            cfg[k] = pd[k]
+    return cfg
+
 
 def _get_deploy_files(role: str) -> list[tuple[str, str]]:
     """Return list of (local_path, remote_path) for deployment."""

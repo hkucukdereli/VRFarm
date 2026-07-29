@@ -43,7 +43,11 @@ class Display(Device):
         self._patch_cache = {}
         self._blank_cache = {}   # corrected uniform-field surfaces, keyed by bg value
         self._corr_map = None    # (H,W) per-pixel luminance correction C(az) in [0,1], 0 off-screen
-        self._sync_rect = None   # cached photodiode sync square (top-left, frame_x sized)
+        self._sync_rect = None   # cached photodiode sync square (corner, dead-band capped)
+        # Photodiode sync-square prefs — authored in the setup UI's photodiode card, and
+        # injected into this display config by engine/follower.py / setup's init_display payload.
+        self.sync_corner = str(rig_config.get("sync_corner", "top-left"))
+        self.sync_size_px = int(rig_config.get("sync_size_px", 0) or 0)   # 0 = auto (full dead band)
 
     def start_display(self):
         """Initialize pygame and open fullscreen window.
@@ -318,9 +322,10 @@ class Display(Device):
         pygame.display.flip()
 
     def _draw_sync_border(self, on: bool):
-        """Photodiode sync: when `on`, draw a SINGLE pure-red square flush in the panel's
-        top-left corner, sized to the dead band OUTSIDE the usable-area boundary marked in
-        geometry calibration (width = frame_x inset, height = width). It lives entirely off
+        """Photodiode sync: when `on`, draw a SINGLE pure-red square flush in the configured
+        panel corner (sync_corner, default top-left), sized sync_size_px but never larger
+        than the dead band OUTSIDE the usable-area boundary marked in geometry calibration
+        (frame_x inset, symmetric left/right). It lives entirely off
         the visible screen, and the visible stimulus/background is green+blue only (R=0),
         so the red pulse never reaches the mouse's visual field. When off, nothing is drawn
         — the field surfaces already leave off-screen pixels black, so the photodiode sees
@@ -334,21 +339,29 @@ class Display(Device):
             self._screen.fill((255, 0, 0), pygame.Rect(*rect))
 
     def _sync_patch_rect(self):
-        """Cached (x, y, w, h) of the sync square: (0, 0, frame_x, frame_x). frame_x is
-        derived from the warp's valid_map (first column containing any visible pixel =
-        the left usable-area inset set in geo calibration) — no extra plumbing, and it
-        tracks recalibration automatically via load_warp's cache reset."""
+        """Cached (x, y, w, h) of the sync square in the configured corner. The size is
+        sync_size_px, capped at frame_x — the dead-band width outside the usable-area
+        boundary from geo calibration (derived from the warp's valid_map: first column
+        containing any visible pixel; symmetric left/right) — so the square can never
+        overlap the visible screen. sync_size_px = 0 means auto (the full dead band).
+        Tracks recalibration automatically via load_warp's cache reset."""
         import numpy as np
         if self._sync_rect is not None:
             return self._sync_rect
         if self._warp is None:
             return None
         valid = self._warp["valid_map"]
+        H, W = valid.shape
         cols = np.flatnonzero(valid.any(axis=0))
         fx = int(cols[0]) if cols.size else 0
         if fx < 4:
             fx = 40   # boundary at the panel edge -> no dead band; keep a detectable patch
-        self._sync_rect = (0, 0, fx, fx)
+        s = self.sync_size_px if self.sync_size_px > 0 else fx
+        s = max(4, min(s, fx))   # hard cap: stay inside the dead band
+        corner = self.sync_corner.lower().replace("_", "-")
+        x = 0 if "left" in corner else W - s
+        y = 0 if "top" in corner else H - s
+        self._sync_rect = (x, y, s, s)
         return self._sync_rect
 
     def check(self) -> dict:

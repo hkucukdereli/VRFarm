@@ -2039,6 +2039,11 @@ function renderLickControls(dev) {
 function renderPhotodiodeControls(dev) {
   const gpio = dev.gpio || 24;
   const every_n = dev.pulse_every_n_frames || 5;
+  const corner = dev.sync_corner || 'top-left';
+  // Cap = frame_x from geo calibration: the leftover width outside the visible area
+  // (symmetric left/right, so one cap serves all four corners).
+  const sizeCap = (geoData && geoData.calibration && geoData.calibration.frame_x) || 400;
+  const sizePx = dev.sync_size_px || 0;   // 0 = auto (full dead-band width)
   const ds = deviceState.photodiode || {};
   const monitoring = ds.monitoring;
 
@@ -2054,13 +2059,26 @@ function renderPhotodiodeControls(dev) {
         <input type="number" value="${every_n}" min="1" max="60" style="width:45px"
                onchange="rig.devices.photodiode.pulse_every_n_frames = parseInt(this.value)">
       </div>
+      <div class="device-field">
+        <label>Sync corner</label>
+        <select onchange="rig.devices.photodiode.sync_corner = this.value; renderDeviceList()">
+          ${['top-left','top-right','bottom-left','bottom-right'].map(c =>
+            `<option value="${c}" ${c === corner ? 'selected' : ''}>${c}</option>`).join('')}
+        </select>
+      </div>
+      <div class="device-field">
+        <label>Sync size px</label>
+        <input type="number" value="${sizePx}" min="0" max="${sizeCap}" step="1" style="width:55px"
+               title="0 = auto (full dead-band width). Max ${sizeCap}px = frame_x from geo calibration — the leftover width outside the visible area (symmetric left/right)."
+               onchange="this.value = Math.max(0, Math.min(${sizeCap}, parseInt(this.value) || 0)); rig.devices.photodiode.sync_size_px = parseInt(this.value); renderDeviceList()">
+      </div>
       ${monitoring
         ? `<button class="btn btn-red btn-sm" onclick="stopPhotodiodeMonitor()">Stop</button>`
         : `<button class="btn btn-blue btn-sm" onclick="startPhotodiodeMonitor()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
       ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">Pulses: <span id="pulse-count">0</span> | Last: <span id="last-pulse-time">--</span></span>` : ''}
     </div>
     ${monitoring ? `<canvas id="photodiode-canvas" class="lick-canvas" width="400" height="60"></canvas>` : ''}
-    <div style="font-size:10px; color:#666; margin-top:2px">Rising edge detection on GPIO${gpio} — sync square at bottom-center of display</div>`;
+    <div style="font-size:10px; color:#666; margin-top:2px">Rising edge detection on GPIO${gpio} — pure-red sync square at ${corner}, ${sizePx ? sizePx + 'px' : 'auto (' + sizeCap + 'px = dead-band width)'}</div>`;
 }
 
 function renderRewardControls(dev) {

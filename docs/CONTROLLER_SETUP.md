@@ -124,6 +124,32 @@ the warp map with `sys.executable`, so it uses whatever `python` is running the 
 
 ---
 
+## 3b. Data directory (machine-specific — NOT in the rig yaml)
+
+Transferred session data and the subject database live in a **controller-local** root,
+resolved by `app/app.py` at runtime:
+
+1. `$VRFARM_DATA_DIR` if set (e.g. point it at a big SSD mount), else
+2. `~/VRFarm/data` — the same convention on every OS
+   (`/Users/<user>` on macOS, `/home/<user>` on Linux, `C:\Users\<user>` on Windows).
+
+Nothing to configure for a default setup — the directory is created on first transfer.
+To use a dedicated drive, export the variable before launching the UI (and persist it in
+`~/.bashrc` / `~/.zshrc`):
+
+```bash
+export VRFARM_DATA_DIR=/mnt/ssd/vrfarm-data
+```
+
+The rig yaml deliberately has **no** controller path (`data.mac_dir` was removed: a
+machine-specific absolute path in a shared config broke every other controller — the
+original Linux symptom was `Transfer failed: cannot create /Users/... permission denied`).
+The yaml's `data.leader_dir` / `data.video_dir` are Pi-side paths and stay.
+Per-transfer override: the destination field next to the Transfer button still wins over
+everything for that one transfer.
+
+---
+
 ## 4. Launch and validate
 
 ```bash

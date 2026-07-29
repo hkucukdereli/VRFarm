@@ -77,7 +77,8 @@ def api_create_rig():
         },
         "devices": {},
         "data": {
-            "mac_dir": str(Path.home() / "VRFarm" / "data"),
+            # NB: no mac_dir — the controller's data root is machine-specific and
+            # resolved locally by app/app.py ($VRFARM_DATA_DIR, else ~/VRFarm/data).
             "leader_dir": "/home/vruser/data",
             "video_dir": "/media/vruser/ssd/video",
         },

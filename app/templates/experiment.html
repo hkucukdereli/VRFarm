@@ -280,8 +280,8 @@
         <button class="btn btn-green" id="btn-go" onclick="startSession()" disabled>GO</button>
         <button class="btn btn-red" id="btn-stop" onclick="stopSession()" disabled>STOP</button>
         <button class="btn btn-teal" id="btn-transfer" onclick="transferData()" disabled>Transfer</button>
-        <input type="text" id="transfer-dest" placeholder="transfer destination (rig default)"
-               title="Destination folder for transferred data. Blank = rig config default (data.mac_dir)."
+        <input type="text" id="transfer-dest" placeholder="transfer destination (controller default)"
+               title="Destination folder for transferred data. Blank = controller default ($VRFARM_DATA_DIR or ~/VRFarm/data)."
                style="flex:1; min-width:160px; padding:4px 6px; background:#2a2a2a; color:#ddd; border:1px solid #444; border-radius:3px;">
         <button class="btn btn-sm btn-blue" id="btn-browse-dest" onclick="browseDest()">Browse…</button>
         <button class="btn btn-sm btn-blue" id="btn-live" onclick="toggleLive()" disabled>Live</button>
@@ -394,8 +394,8 @@ async function loadRig() {
     document.getElementById('grace-period').value = data.rig.grace_period_s || 10;
     // Pre-fill the transfer destination with the rig default (only if the user hasn't set one)
     const _destField = document.getElementById('transfer-dest');
-    if (_destField && !_destField.value && data.rig.data && data.rig.data.mac_dir) {
-      _destField.value = data.rig.data.mac_dir;
+    if (_destField && !_destField.value && data.data_dir) {
+      _destField.value = data.data_dir;
     }
     updateDevicePanels();
     buildPiStatus();

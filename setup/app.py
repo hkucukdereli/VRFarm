@@ -1075,6 +1075,7 @@ def _get_deploy_files(role: str) -> list[tuple[str, str]]:
         ("devices/camera.py", "devices/camera.py"),
         ("devices/photodiode.py", "devices/photodiode.py"),
         ("devices/display.py", "devices/display.py"),
+        ("devices/calibration_probe.py", "devices/calibration_probe.py"),
         # Pi API
         ("pi_api/api.py", "pi_api/api.py"),
     ]

@@ -38,6 +38,50 @@ def load_stims(path):
     return data
 
 
+# ── Video frame timestamps ─────────────────────────────────────────────
+
+
+def load_video_timestamps(path):
+    """Load a session's frame_timestamps.npy (written by devices/camera.py).
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to frame_timestamps.npy, or a session directory containing it.
+
+    Returns
+    -------
+    dict
+        frame_idx : (n,) int array — index into the H.264 video frames.
+        t : (n,) float64 — host wall clock at frame callback (time.time(),
+            NTP-synced; same timebase as all HDF5 events). Includes ISP
+            pipeline latency (~tens of ms, roughly constant) + jitter.
+        t_sensor : (n,) float64 or None — hardware SensorTimestamp (start of
+            frame readout) mapped onto the wall clock via the session-median
+            offset: accurate frame spacing, no pipeline jitter. None for
+            sessions recorded before the 3-column format.
+        avg_fps : float — from first-to-last wall-clock spacing.
+    """
+    path = Path(path)
+    if path.is_dir():
+        path = path / "frame_timestamps.npy"
+    arr = np.load(path)
+    n = len(arr)
+    out = {
+        "frame_idx": arr[:, 0].astype(int),
+        "t": arr[:, 1],
+        "t_sensor": None,
+        "avg_fps": float((n - 1) / max(arr[-1, 1] - arr[0, 1], 1e-9))
+                   if n > 1 else float("nan"),
+    }
+    # 3-column format: [idx, wall, SensorTimestamp ns on CLOCK_BOOTTIME]
+    if arr.ndim == 2 and arr.shape[1] >= 3 and np.any(arr[:, 2] > 0):
+        sens_s = arr[:, 2] / 1e9
+        offset = np.median(arr[:, 1] - sens_s)   # boot→wall anchor
+        out["t_sensor"] = sens_s + offset
+    return out
+
+
 # ── HDF5 (experiment recording) ────────────────────────────────────────
 
 

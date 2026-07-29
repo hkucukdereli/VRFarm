@@ -158,10 +158,16 @@ def build_projector(geo):
     # optical_axis_elevation_deg is where the IMAGE CENTER hits the screen,
     # not necessarily the true optical axis (which may differ due to lens offset).
     # Forward vector: direction from projector toward screen center.
+    # REAR projection: the lens sits BEHIND the screen (y > screen) looking back
+    # toward the eye in -y. The cross-product frame below then gives right ≈ -x,
+    # which IS the single horizontal mirror rear projection physically requires
+    # (flip_h must be re-registered after this change). Previously the lens was
+    # modeled on the EYE side (y ≈ -34 cm) front-projecting: the mid-field
+    # az→pixel curve was wrong while the 0/±90 anchors still fit.
     fwd = np.array([
         lat_offset,               # x (lateral, small offset if any)
-        np.cos(ax_el),            # y (depth component, toward screen)
-        -np.sin(ax_el)            # z (downward tilt of beam)
+        -np.cos(ax_el),           # y (depth: from behind the screen toward the eye)
+        -np.sin(ax_el)            # z (beam tilt; negative ax_el = up, same sense as before)
     ])
     fwd = fwd / np.linalg.norm(fwd)
 
@@ -405,6 +411,12 @@ def orient_maps(geo, az_map, alt_map, valid, px_map, py_map):
         py_map = (res_h - 1) - py_map
     px_map = px_map + ox
     py_map = py_map - oy
+    # Bounds-mask the forward map in DISPLAY space (post flip/offset): a commanded
+    # angle is reachable iff its display pixel lands on the panel.
+    with np.errstate(invalid='ignore'):
+        oob = ~((px_map >= 0) & (px_map < res_w) & (py_map >= 0) & (py_map < res_h))
+    px_map = np.where(oob, np.nan, px_map)
+    py_map = np.where(oob, np.nan, py_map)
     return az_map, alt_map, valid, px_map, py_map
 
 
@@ -469,11 +481,13 @@ def compute_forward_map(geo, proj,
             if pix is None:
                 continue
             px, py = pix
-            res_w, res_h = proj['res']
-            if 0 <= px < res_w and 0 <= py < res_h:
-                px_map[j, i]    = px
-                py_map[j, i]    = py
-                valid_map[j, i] = True
+            # NO bounds gate here: px/py are RAW image coords — flip/offset move
+            # them into display space only in orient_maps, which bounds-masks
+            # there. Gating raw coords NaN'd ~45% of the forward map (including
+            # az=0/alt=0) once the display offset was large.
+            px_map[j, i]    = px
+            py_map[j, i]    = py
+            valid_map[j, i] = True
 
     return az_samples, alt_samples, px_map, py_map, valid_map
 

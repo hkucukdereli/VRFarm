@@ -59,6 +59,7 @@ GEO_SLIDERS = {
     "parabola_A": ("screen", "parabola_A"),
     "parabola_B": ("screen", "parabola_B"),
     "azimuth_boundary_deg": ("screen", "azimuth_boundary_deg"),
+    "throw_distance_cm": ("projector", "throw_distance_cm"),
     "throw_ratio": ("projector", "throw_ratio"),
     "horizontal_stretch": ("projector", "horizontal_stretch"),
     "vertical_stretch": ("projector", "vertical_stretch"),
@@ -72,8 +73,8 @@ DISPLAY_KEYS = ["offset_x", "offset_y", "flip_h", "flip_v", "frame_x",
 
 # Changing any of these re-anchors the solved stretches to the landmarks.
 SOLVE_TRIGGERS = {"az90_x", "offset_x", "frame_y_top", "frame_y_bottom", "azimuth_height",
-                  "parabola_A", "parabola_B", "throw_ratio", "optical_axis_elevation_deg",
-                  "lens_offset_vertical"}
+                  "parabola_A", "parabola_B", "throw_distance_cm", "throw_ratio",
+                  "optical_axis_elevation_deg", "lens_offset_vertical"}
 
 # Defaults — only fill gaps if rig_geometry.yaml is missing a key.
 DEFAULT_GEO = {
@@ -290,7 +291,10 @@ def build_projector(geo):
     sc = ray_screen_intersection(0.0, np.degrees(alt_c), A, geo["screen"]["parabola_B"])
     if sc is None:
         raise ValueError("no screen center")
-    fwd = np.array([lat_offset, np.cos(ax_el), -np.sin(ax_el)])
+    # REAR projection: lens BEHIND the screen looking back in -y; the frame's
+    # right ≈ -x is the one physical mirror (see compute_warp_map.build_projector
+    # for the full note — keep the two copies verbatim in sync).
+    fwd = np.array([lat_offset, -np.cos(ax_el), -np.sin(ax_el)])
     fwd = fwd / np.linalg.norm(fwd)
     right = np.cross(fwd, np.array([0, 0, 1.0])); right /= np.linalg.norm(right)
     up = np.cross(right, fwd); up /= np.linalg.norm(up)
@@ -499,7 +503,7 @@ const RES=[1920,1080];
 const S=[
 ['parabola_A',1,30,0.05,'Screen (measured)'],['parabola_B',0.001,0.30,0.001,''],
 ['azimuth_boundary_deg',30,120,1,''],
-['throw_ratio',0.4,1.6,0.01,'Projector (measured)'],
+['throw_distance_cm',10,200,0.5,'Projector (measured)'],['throw_ratio',0.4,1.6,0.01,''],
 ['optical_axis_elevation_deg',-30,60,0.5,''],['lens_offset_vertical',0,1,0.05,''],
 ['horizontal_stretch',0.05,6.0,0.01,'Solved from landmarks'],['vertical_stretch',0.1,6.0,0.01,''],
 ['offset_x',-1000,1000,1,'Landmarks — origin cross'],['offset_y',-1000,1000,1,''],

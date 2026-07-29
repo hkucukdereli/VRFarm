@@ -20,7 +20,7 @@ devices:
   display:
     apply_warp: true
     enabled: true
-    geometry_file: rig_geometry_20260723_1301.yaml
+    geometry_file: rig_geometry.yaml
     refresh_hz: 60
     resolution:
     - 1920

@@ -71,6 +71,9 @@ def upload():
 
 
 ALLOWED_DOWNLOAD_DIRS = [RIG_DIR, DATA_DIR, Path("/media/vruser/ssd/video")]
+# video_dir(s) announced at runtime (camera start / list_files ?video_dir=...) — the rig
+# yaml is the source of truth on the controller; the Pi learns it per-request.
+_EXTRA_DOWNLOAD_DIRS: set = set()
 
 
 @app.route("/api/download/<path:filepath>")
@@ -79,9 +82,14 @@ def download(filepath):
     # Allow absolute paths or relative to home
     p = Path(filepath)
     if not p.is_absolute():
-        p = Path.home() / filepath
+        cand = Path.home() / filepath
+        # Flask collapses the leading slash of an absolute path in the URL ("/media/x"
+        # arrives as "media/x"), so if the home-relative candidate doesn't exist retry
+        # root-anchored — otherwise files outside home (e.g. SSD video) 404.
+        p = cand if cand.exists() else Path("/") / filepath
     p = p.resolve()
-    if not any(p.is_relative_to(d) for d in ALLOWED_DOWNLOAD_DIRS):
+    if not any(p.is_relative_to(d)
+               for d in list(ALLOWED_DOWNLOAD_DIRS) + list(_EXTRA_DOWNLOAD_DIRS)):
         return jsonify({"ok": False, "error": "Access denied"}), 403
     if not p.exists():
         return jsonify({"ok": False, "error": f"Not found: {filepath}"}), 404
@@ -118,8 +126,12 @@ def list_files(session_id):
                         files.append(str(f))
             break
 
-    # Check video dir (SSD) — nested then flat
-    video_base = Path("/media/vruser/ssd/video")
+    # Video dir: the controller passes the rig yaml's video_dir (?video_dir=...);
+    # fall back to the legacy SSD path. Register it so /api/download accepts it.
+    vd = request.args.get("video_dir", "").strip()
+    video_base = Path(vd) if vd else Path("/media/vruser/ssd/video")
+    if vd:
+        _EXTRA_DOWNLOAD_DIRS.add(video_base)
     for candidate in [
         video_base / subj / subj_date / session_id if subj else None,
         video_base / session_id,  # legacy
@@ -127,9 +139,14 @@ def list_files(session_id):
         if candidate and candidate.exists():
             for f in candidate.rglob("*"):
                 if f.is_file():
-                    files.append(str(f))
+                    try:
+                        files.append(str(f.relative_to(home)))
+                    except ValueError:
+                        files.append(str(f))
             break
 
+    # video_dir may coincide with the data dir — never list (= download) a file twice
+    files = list(dict.fromkeys(files))
     return jsonify({"files": files})
 
 
@@ -736,6 +753,7 @@ def camera_preview_start():
             dev.init(rig_config=rig_cfg, task_params={})
             if recording:
                 video_dir = data.get("video_dir", "/media/vruser/ssd/video")
+                _EXTRA_DOWNLOAD_DIRS.add(Path(video_dir))   # transfer may pull from here
                 subj, subj_date, _ = _parse_session_id(session_id)
                 output_dir = str(Path(video_dir) / subj / subj_date)
                 dev.start_recording(session_id=session_id, output_dir=output_dir)

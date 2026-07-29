@@ -873,6 +873,7 @@ def transfer():
         try:
             r = requests.get(
                 f"http://{pi['ip']}:{api_port}/api/files/{session_id}",
+                params={"video_dir": rig.get("data", {}).get("video_dir", "")},
                 timeout=5)
             files = r.json().get("files", [])
             for fpath in files:

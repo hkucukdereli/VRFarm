@@ -248,7 +248,17 @@ class Camera(Device):
 
     def _on_frame(self, request):
         if self._recording:
-            self._frame_log.append((self._frame_idx, time.time()))
+            # frame_timestamps.npy columns: [frame_idx, host wall clock, SensorTimestamp].
+            # Wall clock = time.time() (NTP-synced — aligns frames with HDF5 events, but
+            # includes ~tens of ms of ISP pipeline latency + jitter). SensorTimestamp =
+            # hardware stamp at start of frame readout in ns on CLOCK_BOOTTIME — accurate
+            # frame spacing, no pipeline jitter; map to wall time via
+            # offset = median(wall - sensor/1e9) over the session.
+            try:
+                sens_ns = request.get_metadata().get("SensorTimestamp", 0)
+            except Exception:
+                sens_ns = 0
+            self._frame_log.append((self._frame_idx, time.time(), sens_ns))
             self._frame_idx += 1
 
     def _release_camera(self):

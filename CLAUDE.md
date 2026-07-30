@@ -9,7 +9,8 @@ Read this entire file before touching anything.
 
 A behavioral neuroscience experiment system for mice. Two Raspberry Pi 4Bs
 per rig (Leader + Follower), controlled from a Mac via Flask web UIs.
-Paradigms are data (YAML state machines), devices are pluggable.
+Paradigms are tuned via task YAML (stimulus/reward/session/adaptive params); the trial
+engine is the imperative loop in engine/leader.py. Devices are pluggable.
 Named after cheese.
 
 **Current rig:** cheese (cheddar = Leader, mozzarella = Follower)
@@ -27,7 +28,7 @@ symlinked into the env, so a version mismatch breaks `import picamera2`. Create 
 ```
 ~/VRFarm/                              <- project root on Mac
 ├── config/
-│   └── go_nogo_v1.yaml               <- task/paradigm config (YAML state machine)
+│   └── go_nogo_v1.yaml               <- task/paradigm config (stimulus/reward/session/adaptive)
 ├── rigs/
 │   └── cheese.json                    <- rig hardware config (pins, cal, ports, roles)
 ├── devices/
@@ -39,8 +40,7 @@ symlinked into the env, so a version mismatch breaks `import picamera2`. Create 
 │   ├── photodiode.py                  <- TTL sync input (GPIO input)
 │   └── display.py                     <- pygame fullscreen renderer (HDMI)
 ├── engine/
-│   ├── state_machine.py               <- Generic YAML-driven state machine
-│   ├── leader.py                      <- Leader Pi main process
+│   ├── leader.py                      <- Leader Pi main process (imperative trial loop)
 │   └── follower.py                    <- Follower Pi main process
 ├── app/
 │   ├── app.py                         <- Flask experiment UI localhost:5000
@@ -113,7 +113,7 @@ Mac (app/app.py Flask, localhost:5000)
   → UDP :5572 commands to Leader (START, STOP, REWARD)
 
 cheddar — Leader (engine/leader.py)
-  - YAML state machine (engine/state_machine.py)
+  - Imperative trial loop (ITI → pre-stim → stim → reward-delay → response window → post-stim)
   - All GPIO devices: lick sensor, reward, camera, photodiode
   - HDF5 data saved locally, transferred to Mac after session
   → UDP :5575 display commands to Follower (SHOW, QUIT)
@@ -146,8 +146,8 @@ Two config files with clean separation:
 | Pin assignments, I2C addr     | Rig JSON           | `"gpio": 18`, `"i2c_address": "0x5A"` |
 | Calibration tables            | Rig JSON           | `"calibration": [[10,2.1],...]`       |
 | Pi roles, IPs                 | Rig JSON           | `"role": "leader"`                    |
-| State machine / paradigm      | Task YAML `states` | state definitions                    |
-| Experiment-tunable params     | Task YAML `devices`| `amount_ul: 4.0`, `max_lick_rate: 0.3`|
+| Paradigm / trial params       | Task YAML          | stimulus/reward/session/adaptive sections |
+| Experiment-tunable params     | Task YAML `reward` | `amount_ul: 4.0`, `max_lick_rate: 0.3`|
 | Subject, date, session#       | Runtime (UI)       | set in experiment UI fields          |
 
 ## Device abstraction
@@ -251,6 +251,6 @@ python setup/app.py        # rig setup UI, localhost:4999
 - systemd services for Pi process lifecycle
 - HDF5 for trial data, written incrementally per trial on Leader
 - All timestamps: `time.time()` Unix seconds, NTP-synced
-- Config: rig JSON (hardware) + task YAML (paradigm)
-- Paradigm as data: YAML state machines, no code changes for new experiments
+- Config: rig JSON (hardware) + task YAML (paradigm params)
+- Trial engine: imperative loop in engine/leader.py, tuned by task-YAML params
 - Device abstraction: base class + one file per device type

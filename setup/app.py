@@ -1095,7 +1095,6 @@ def _get_deploy_files(role: str) -> list[tuple[str, str]]:
     if role == "leader":
         files += [
             ("engine/__init__.py", "engine/__init__.py"),
-            ("engine/state_machine.py", "engine/state_machine.py"),
             ("engine/leader.py", "engine/leader.py"),
         ]
     elif role == "follower":

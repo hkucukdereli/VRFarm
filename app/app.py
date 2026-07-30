@@ -363,7 +363,6 @@ def deploy():
         code_files = {
             "leader": [
                 "engine/leader.py",
-                "engine/state_machine.py",
                 "shared/stim_generator.py",
                 "shared/config.py",
                 "devices/base.py",

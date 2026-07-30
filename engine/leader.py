@@ -547,7 +547,10 @@ class Leader:
             self._publish_trial_event(stim)
 
             # ── Update adaptive state ──
-            if nominal_level == 2.5 and adaptive_cfg.get("enabled", False):
+            # Level 2.5 IS the adaptive mode (adaptive is implied by 2.5, forced on in
+            # the UI), so step whenever nominal_level==2.5 — matching the unconditional
+            # 2.5 draw at line 403 (previously the `enabled` flag could desync them).
+            if nominal_level == 2.5:
                 licked = len(self._trial_licks) > 0
                 if licked:
                     adaptive_state += adaptive_cfg.get("step_up", 0.2)
@@ -631,14 +634,15 @@ class Leader:
     def _publish_trial_event(self, stim: dict):
         ctx = self._trial_ctx
         level = ctx.get("level", 0)
-        is_operant = (level == 3) or (level == 2.5)
+        # ctx["level"] is the RESOLVED level (2.0/3.0, never 2.5), so operant = L3.
+        is_operant = (level == 3)
         rw_t = ctx.get("response_window_t", 0)
 
         # Adaptive state = P(this trial is L3) — only meaningful when the configured
-        # (nominal) level is 2.5 AND adaptive is enabled. For any deterministic level
-        # (L1/L2/L3) the level is certain, so report 1.
-        adaptive_on = (ctx.get("nominal_level") == 2.5
-                       and self.task.get("adaptive", {}).get("enabled", False))
+        # (nominal) level is 2.5 (which IS adaptive). For any deterministic level
+        # (L1/L2/L3) the level is certain, so report 1. This gate matches the draw at
+        # line 403 and the state step, so publish / table / HDF5 all agree.
+        adaptive_on = (ctx.get("nominal_level") == 2.5)
         adaptive_state = ctx.get("adaptive_state", 0.0) if adaptive_on else 1.0
 
         # Reaction time: first lick within response window, relative to rw_t
@@ -704,7 +708,10 @@ class Leader:
         f.create_dataset("block_num", shape=(0,), maxshape=(n,), dtype="i4")
         f.create_dataset("iti_duration_s", shape=(0,), maxshape=(n,), dtype="f4")
         f.create_dataset("stim_az_deg", shape=(0,), maxshape=(n,), dtype="f4")
+        # contrast = raw value in the configured metric (what the UI shows / user set);
+        # corr_contrast = the normalized headroom fraction actually rendered.
         f.create_dataset("contrast", shape=(0,), maxshape=(n,), dtype="f4")
+        f.create_dataset("corr_contrast", shape=(0,), maxshape=(n,), dtype="f4")
         f.create_dataset("trial_outcome", shape=(0,), maxshape=(n,),
                          dtype=h5py.vlen_dtype(str))
         f.create_dataset("level_effective", shape=(0,), maxshape=(n,), dtype="f4")
@@ -740,7 +747,7 @@ class Leader:
 
         # Core trial data
         for name in ["trial_num", "block_num", "iti_duration_s",
-                      "stim_az_deg", "contrast",
+                      "stim_az_deg", "contrast", "corr_contrast",
                       "trial_outcome", "level_effective", "adaptive_state"]:
             f[name].resize(i + 1, axis=0)
 
@@ -748,10 +755,14 @@ class Leader:
         f["block_num"][i] = int(stim.get("block_num", 0))
         f["iti_duration_s"][i] = self._trial_ctx.get("iti_duration_s", 0)
         f["stim_az_deg"][i] = float(stim.get("stim_az_deg", 0))
-        f["contrast"][i] = float(stim.get("corr_contrast", 0))
+        f["contrast"][i] = float(stim.get("contrast", 0))            # raw metric value
+        f["corr_contrast"][i] = float(stim.get("corr_contrast", 0))  # rendered fraction
         f["trial_outcome"][i] = "hit" if self._trial_licks else "miss"
         f["level_effective"][i] = self._trial_ctx.get("level", 0)
-        f["adaptive_state"][i] = self._trial_ctx.get("adaptive_state", 0)
+        # Same gate as the published event (line 643): P(L3) for adaptive 2.5, else 1 —
+        # so HDF5, the trial event, and the live table all report the same number.
+        f["adaptive_state"][i] = (self._trial_ctx.get("adaptive_state", 0.0)
+                                  if self._trial_ctx.get("nominal_level") == 2.5 else 1.0)
 
         # Device datasets
         for dev in self.devices.values():

@@ -193,7 +193,7 @@
 
         <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">REWARD</h3>
         <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:0 8px;">
-          <div><label>Level</label><select id="p-level" class="task-param"><option value="1">1</option><option value="2">2</option><option value="2.5">2.5</option><option value="3">3</option></select></div>
+          <div><label>Level</label><select id="p-level" class="task-param" onchange="onLevelChange()" title="Level 2.5 is the adaptive mode — it forces Adaptive on."><option value="1">1</option><option value="2">2</option><option value="2.5">2.5</option><option value="3">3</option></select></div>
           <div><label>Amount</label><select id="p-amount_mode" class="task-param" onchange="updateAmountLabel()" title="Volume: pulse duration from the reward calibration. Count: N repeats of the base pulse (first calibration row in the setup UI)."><option value="volume">Volume</option><option value="count">Count</option></select></div>
           <div><label id="amount-value-label">Volume (uL)</label><input type="number" id="p-amount_value" step="0.5" min="0" class="task-param"></div>
           <div><label id="gap-label">Gap (ms)</label><input type="number" id="p-pulse_gap_ms" step="10" min="0" class="task-param" title="Off-time between pulses in Count mode, so the valve fully closes between pulses. Only used in Count mode."></div>
@@ -458,6 +458,8 @@ async function loadTask() {
     });
     const data = await r.json();
     if (data.error) { log('Error: ' + data.error); return; }
+    // Experiments are editable without a rig, so config may still be null here.
+    config = config || { rig: null, task: null };
     config.task = data.task;
     populateTaskFields(data.task);
     document.getElementById('experiment-subsections').style.display = '';
@@ -526,6 +528,7 @@ function populateTaskFields(t) {
   document.getElementById('p-adaptive_initial').value = adp.initial_state ?? 0;
   document.getElementById('p-adaptive_step_up').value = adp.step_up ?? 0.2;
   document.getElementById('p-adaptive_step_down').value = adp.step_down ?? 0.2;
+  onLevelChange();   // L2.5 forces Adaptive on/locked
 }
 
 function collectTaskFields() {
@@ -589,7 +592,9 @@ function collectTaskFields() {
       randomize_blocks: document.getElementById('p-randomize_blocks').checked,
     },
     adaptive: {
-      enabled: document.getElementById('p-adaptive_enabled').checked,
+      // L2.5 IS the adaptive mode -> always enabled, independent of the (disabled) checkbox
+      enabled: (parseFloat(document.getElementById('p-level').value) === 2.5)
+               || document.getElementById('p-adaptive_enabled').checked,
       initial_state: parseFloat(document.getElementById('p-adaptive_initial').value) || 0,
       step_up: parseFloat(document.getElementById('p-adaptive_step_up').value) || 0.2,
       step_down: parseFloat(document.getElementById('p-adaptive_step_down').value) || 0.2,
@@ -726,6 +731,15 @@ function updateContrastHint() {
 
 // "Correct" button: clamp entered contrast(s) to the achievable uniform ceiling (server-computed
 // from the geometry's per-azimuth luminance falloff), and write the corrected values back.
+function onLevelChange() {
+  // Level 2.5 IS the adaptive mode: force the Adaptive checkbox on and lock it so it
+  // can't be turned off; any other level unlocks it (restores manual control).
+  const isL25 = parseFloat(document.getElementById('p-level').value) === 2.5;
+  const cb = document.getElementById('p-adaptive_enabled');
+  if (isL25) { cb.checked = true; cb.disabled = true; }
+  else { cb.disabled = false; }
+}
+
 function updateAmountLabel() {
   const mode = document.getElementById('p-amount_mode').value;
   const lbl = document.getElementById('amount-value-label');

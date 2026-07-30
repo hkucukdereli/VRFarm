@@ -43,7 +43,7 @@ session:
 
 # ── Adaptive (level 2.5 only) ──
 adaptive:
-  enabled: true
+  enabled: false
   initial_state: 0.0
   step_up: 0.2
   step_down: 0.2

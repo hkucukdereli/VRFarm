@@ -1774,7 +1774,9 @@ function renderCameraControls(dev) {
   const streaming = ds.streaming;
   const lock = streaming ? 'disabled' : '';   // res/fps/bitrate reconfigure the camera -> lock while live
   const pi = getPiForDevice('camera');
-  const streamUrl = pi ? `http://${pi.ip}:${rig.network.api_port}/api/camera_stream` : '';
+  // Proxied through the setup app (same-origin) rather than hitting the Pi directly, so the
+  // preview works from any browser that can reach this app — the Pi hop runs server-side.
+  const streamUrl = pi ? '/api/camera_feed' : '';
 
   return `
     <div class="device-controls">

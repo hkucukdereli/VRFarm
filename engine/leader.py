@@ -29,6 +29,7 @@ import devices.lick_sensor   # noqa: F401 — register device
 import devices.reward         # noqa: F401
 import devices.camera         # noqa: F401
 import devices.photodiode     # noqa: F401
+import devices.calibration_probe  # noqa: F401
 
 
 class Leader:
@@ -87,7 +88,11 @@ class Leader:
             dev = cls()
             # Map new YAML structure to device task_params
             if dev_name == "reward":
-                task_params = {"amount_ul": self.task.get("reward", {}).get("amount_ul", 4.0)}
+                rew = self.task.get("reward", {})
+                task_params = {"amount_ul": rew.get("amount_ul", 4.0),
+                               "amount_mode": rew.get("amount_mode", "volume"),
+                               "amount_count": rew.get("amount_count", 1),
+                               "pulse_gap_ms": rew.get("pulse_gap_ms", 150.0)}
             elif dev_name == "lick_sensor":
                 task_params = {"max_lick_rate": self.task.get("reward", {}).get("max_lick_rate", 0.3)}
             elif dev_name == "display":
@@ -125,7 +130,7 @@ class Leader:
             ms = self.devices["reward"].deliver()
             t = time.time()
             self._trial_ctx["reward_t"] = t
-            self._trial_ctx["reward_amount_ul"] = self.devices["reward"].amount_ul
+            self._trial_ctx["reward_amount_ul"] = self.devices["reward"].effective_amount_ul
             self._trial_ctx["rewarded"] = True
             self._publish({"type": "reward", "on": True,
                            "t": t, "pulse_ms": ms})
@@ -157,60 +162,73 @@ class Leader:
 
     # ── ITI helper ──
 
-    def _run_iti(self, planned_duration: float) -> float:
-        """Run an ITI period with optional lick timeout enforcement.
-        timeout_rule: 'none' = no enforcement,
-                      'rate' = restart if lick rate in last 1s exceeds max_lick_rate,
-                      'count' = restart if total licks exceed max_lick_rate * planned_duration.
-        Returns actual ITI duration.
+    def _timeout_phases(self) -> set:
+        """Which trial phases the timeout rule enforces (reward.timeout_phases, set from
+        the Pre-stim / Post-stim / ITI checkboxes). Default ['iti'] = prior behavior."""
+        return set(self.task.get("reward", {}).get("timeout_phases", ["iti"]))
+
+    def _run_enforced_wait(self, planned_duration: float, enforce: bool,
+                           lick_sink: list, restart_event: str,
+                           update_lick_count: bool = False) -> float:
+        """Wait `planned_duration`s, draining licks into `lick_sink`. When `enforce` is
+        True, apply the timeout rule and RESTART the period whenever the mouse over-licks
+        (so the wait extends until it stays quiet). Delivers no rewards. Returns actual
+        elapsed duration.
+          timeout_rule 'none' -> no enforcement (plain wait),
+                       'rate' -> restart if lick rate in the last 1 s reaches max_lick_rate,
+                       'count' -> restart if licks this period exceed max_lick_rate*duration.
         """
         rew = self.task.get("reward", {})
         timeout_rule = rew.get("timeout_rule", "none")
         max_lick_rate = rew.get("max_lick_rate", 0)
-        iti_start = time.time()
-        period_start = iti_start
-        period_licks = 0
-        self._iti_licks = []
+        enforce = enforce and timeout_rule in ("rate", "count") and max_lick_rate > 0
 
-        # Count mode: max allowed licks for the entire ITI
-        max_lick_count = 0
-        if timeout_rule == "count" and max_lick_rate > 0:
-            max_lick_count = int(max_lick_rate * planned_duration)
+        start = time.time()
+        period_start = start
+        period_licks = 0
+        max_lick_count = (int(max_lick_rate * planned_duration)
+                          if timeout_rule == "count" else 0)
 
         while self.running:
-            # Check for STOP command
             self._check_udp()
             if not self.running:
                 break
 
-            # Drain lick queue
             new_licks = self._drain_lick_queue()
-            self._iti_licks.extend(new_licks)
+            lick_sink.extend(new_licks)
             period_licks += len(new_licks)
+            if update_lick_count:
+                self._trial_ctx["lick_count"] = len(self._trial_licks)
 
             now = time.time()
-            elapsed = now - period_start
-            if elapsed >= planned_duration:
+            if now - period_start >= planned_duration:
                 break
 
-            if timeout_rule == "rate" and max_lick_rate > 0:
+            if enforce and timeout_rule == "rate":
                 # Real-time rate: count licks in the last 1 second
                 cutoff = now - 1.0
-                recent = sum(1 for t in self._iti_licks if t >= cutoff)
+                recent = sum(1 for t in lick_sink if t >= cutoff)
                 if recent >= max_lick_rate:
                     period_start = now
                     period_licks = 0
-                    self._publish({"type": "iti_restart", "t": period_start})
-            elif timeout_rule == "count" and max_lick_count > 0:
+                    self._publish({"type": restart_event, "t": period_start})
+            elif enforce and timeout_rule == "count" and max_lick_count > 0:
                 # Count mode: restart if total period licks exceed budget
                 if period_licks > max_lick_count:
                     period_start = now
                     period_licks = 0
-                    self._publish({"type": "iti_restart", "t": period_start})
+                    self._publish({"type": restart_event, "t": period_start})
 
             time.sleep(0.005)
 
-        return time.time() - iti_start
+        return time.time() - start
+
+    def _run_iti(self, planned_duration: float) -> float:
+        """Run an ITI period, enforcing the timeout rule if 'iti' is in timeout_phases."""
+        self._iti_licks = []
+        return self._run_enforced_wait(
+            planned_duration, enforce=("iti" in self._timeout_phases()),
+            lick_sink=self._iti_licks, restart_event="iti_restart")
 
     # ── Wait-for-event helper ──
 
@@ -306,6 +324,7 @@ class Leader:
         adaptive_cfg = self.task.get("adaptive", {})
         reward_delay = reward_cfg.get("reward_delay_s", 0.6)
         rw_dur = reward_cfg.get("response_window", 1.4)
+        pav_delay = reward_cfg.get("pav_delay_s", 0.0)
         visual_dur = self.task.get("stimulus", {}).get("duration_s", 2.0)
 
         # Per-trial durations from NPZ (pre-generated)
@@ -432,7 +451,10 @@ class Leader:
             # ── Pre-stimulus period (baseline lick collection) ──
             prestim_dur = float(prestim_durs[trial_num]) if prestim_durs is not None else 0
             if prestim_dur > 0:
-                self._wait_for_event(prestim_dur)
+                self._run_enforced_wait(
+                    prestim_dur, enforce=("prestim" in self._timeout_phases()),
+                    lick_sink=self._trial_licks, restart_event="prestim_restart",
+                    update_lick_count=True)
                 if not self.running:
                     break
                 self._trial_ctx["prestim_lick_count"] = len(self._trial_licks)
@@ -471,10 +493,22 @@ class Leader:
                 if effective_level == 1 or (effective_level == 2 and self._trial_ctx["is_go"]):
                     self._action_deliver_reward()
 
-            # L3: reward on first lick during response window
-            self._wait_for_event(
-                rw_dur,
-                level_3_lick_reward=(effective_level == 3 and self._trial_ctx["is_go"]))
+            # Conditional (operant) trial: reward is contingent on a lick in the window.
+            is_conditional = (effective_level == 3 and self._trial_ctx["is_go"])
+            if is_conditional and pav_delay > 0:
+                # Pavlovian rescue: wait up to pav_delay (from window start) for a lick,
+                # rewarding operantly on a lick. If no lick by then, deliver the reward
+                # anyway (free), then run out the rest of the window collecting licks.
+                pav = min(pav_delay, rw_dur)
+                self._wait_for_event(pav, level_3_lick_reward=True)
+                if not self._trial_ctx["rewarded"]:
+                    self._action_deliver_reward()
+                    self._trial_ctx["pavlovian_rescue"] = True
+                    self._wait_for_event(max(0.0, rw_dur - pav))
+                # else: operant lick reward already ended the window early (as before)
+            else:
+                # L3: reward on first lick during response window (no rescue / pav disabled)
+                self._wait_for_event(rw_dur, level_3_lick_reward=is_conditional)
 
             # ── Stim OFF event — no waiting; Follower runs for visual_dur independently ──
             stim_off_t = true_onset_t + visual_dur
@@ -492,7 +526,10 @@ class Leader:
                 self._publish({"type": "poststim_start", "trial": self.trial_num,
                                "t": max(stim_off_t, time.time()),
                                "duration": poststim_dur})
-                self._wait_for_event(poststim_dur)
+                self._run_enforced_wait(
+                    poststim_dur, enforce=("poststim" in self._timeout_phases()),
+                    lick_sink=self._trial_licks, restart_event="poststim_restart",
+                    update_lick_count=True)
                 if not self.running:
                     break
             else:
@@ -597,6 +634,13 @@ class Leader:
         is_operant = (level == 3) or (level == 2.5)
         rw_t = ctx.get("response_window_t", 0)
 
+        # Adaptive state = P(this trial is L3) — only meaningful when the configured
+        # (nominal) level is 2.5 AND adaptive is enabled. For any deterministic level
+        # (L1/L2/L3) the level is certain, so report 1.
+        adaptive_on = (ctx.get("nominal_level") == 2.5
+                       and self.task.get("adaptive", {}).get("enabled", False))
+        adaptive_state = ctx.get("adaptive_state", 0.0) if adaptive_on else 1.0
+
         # Reaction time: first lick within response window, relative to rw_t
         rt_ms = None
         for lt in self._trial_licks:
@@ -613,7 +657,7 @@ class Leader:
             "reward_type": "operant" if is_operant else "pavlovian",
             "rt_ms": rt_ms,
             "level": level,
-            "adaptive_state": ctx.get("adaptive_state", 0),
+            "adaptive_state": adaptive_state,
             "t": time.time(),
         })
 

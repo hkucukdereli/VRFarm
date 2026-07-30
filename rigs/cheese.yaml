@@ -1,8 +1,11 @@
 data:
   leader_dir: /home/vruser/data
-  mac_dir: /Users/hakan/VRFarm/data
   video_dir: /home/vruser/data
 devices:
+  calibration_probe:
+    enabled: true
+    gpio: 22
+    type: calibration_probe
   camera:
     auto_exposure: false
     bitrate_mbps: 3
@@ -16,7 +19,7 @@ devices:
   display:
     apply_warp: true
     enabled: true
-    geometry_file: rig_geometry_20260723_1301.yaml
+    geometry_file: rig_geometry.yaml
     refresh_hz: 60
     resolution:
     - 1920
@@ -31,6 +34,8 @@ devices:
     enabled: true
     gpio: 24
     pulse_every_n_frames: 5
+    sync_corner: top-left
+    sync_size_px: 0
     type: photodiode
   reward:
     calibration:
@@ -61,6 +66,7 @@ pis:
   - reward
   - photodiode
   - camera
+  - calibration_probe
   ip: 192.168.10.101
   name: cheddar
   role: leader

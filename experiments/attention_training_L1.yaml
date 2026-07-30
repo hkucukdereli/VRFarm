@@ -15,11 +15,16 @@ stimulus:
   photodiode_sync_every_n: 5
 reward:
   amount_ul: 4
+  amount_mode: volume
+  amount_count: 1
+  pulse_gap_ms: 150
   level: 1
   reward_delay_s: 0.1
   response_window: 1.9
+  pav_delay_s: 0
   timeout_rule: none
   max_lick_rate: 0
+  timeout_phases: [iti]
 session:
   n_blocks: 1
   block_size: 150

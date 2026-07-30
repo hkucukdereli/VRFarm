@@ -77,7 +77,8 @@ def api_create_rig():
         },
         "devices": {},
         "data": {
-            "mac_dir": str(Path.home() / "VRFarm" / "data"),
+            # NB: no mac_dir — the controller's data root is machine-specific and
+            # resolved locally by app/app.py ($VRFARM_DATA_DIR, else ~/VRFarm/data).
             "leader_dir": "/home/vruser/data",
             "video_dir": "/media/vruser/ssd/video",
         },
@@ -477,7 +478,7 @@ def api_init_devices():
             ok1, _ = _init("display", ip, "/api/init_projector", {},
                            "Projector", timeout=35)
             ok2, msg = _init("display", ip, "/api/init_display",
-                             {"rig_config": devices["display"]},
+                             {"rig_config": _display_init_cfg(devices)},
                              "Display init", timeout=30)
             results["display"] = {"ok": ok1 and ok2, "message": msg}
 
@@ -518,6 +519,15 @@ def api_init_devices():
             }, "Photodiode")
             results["photodiode"] = {"ok": ok, "message": msg}
 
+    # Calibration probe: pigpiod + GPIO latch
+    if "calibration_probe" in devices and devices["calibration_probe"].get("enabled"):
+        ip = dev_to_ip.get("calibration_probe")
+        if ip:
+            ok, msg = _init("calibration_probe", ip, "/api/init_calibration_probe", {
+                "gpio": devices["calibration_probe"].get("gpio", 22),
+            }, "Calibration probe")
+            results["calibration_probe"] = {"ok": ok, "message": msg}
+
     all_ok = all(r["ok"] for r in results.values())
     return jsonify({"ok": all_ok, "steps": steps, "results": results})
 
@@ -555,7 +565,7 @@ def api_reinit_device():
 
     if dev_name == "display":
         ok1 = _post("/api/init_projector", {}, "Projector", timeout=35)
-        ok2 = _post("/api/init_display", {"rig_config": devices["display"]},
+        ok2 = _post("/api/init_display", {"rig_config": _display_init_cfg(devices)},
                     "Display init", timeout=30)
         ok = ok1 and ok2
     else:  # camera
@@ -580,11 +590,11 @@ def _generate_and_deploy_warp(geo_file, lum_mode="theoretical"):
     ATOMICALLY scp it + the geometry to every Pi and reload the live display. Shared by the
     Regenerate Warp button and the intensity-cal Apply. Returns (ok, steps, error)."""
     steps = []
-    # 1. Run compute_warp_map.py on the Mac, from the SELECTED geometry file, baking in the
-    #    luminance mode (empirical re-injects luminance_cal_latest.yaml, so a measured
-    #    correction survives regeneration).
-    # Use the interpreter running this setup UI (the vrfarm conda env on Mac or Windows),
-    # not a hardcoded macOS miniforge path — that env has numpy/scipy/yaml for the warp build.
+    # 1. Run compute_warp_map.py locally on the controller, from the SELECTED geometry file,
+    #    baking in the luminance mode (empirical re-injects luminance_cal_latest.yaml, so a
+    #    measured correction survives regeneration).
+    # Use the interpreter running this setup UI (the vrfarm env on Mac or Linux), not a
+    # hardcoded macOS miniforge path — that env has numpy/scipy/yaml for the warp build.
     python = sys.executable
     script = str(GEO_DIR / "compute_warp_map.py")
     r = subprocess.run(
@@ -753,6 +763,29 @@ def _reinit_projector(target):
         return False, str(e)
 
 
+def _drive_calibration_probe(high: bool):
+    """Latch the calibration-probe TTL high/low via its Pi's pi_api endpoint (same
+    persistent device the manual card button drives, so they stay in sync). Returns a
+    step string, or None if no probe is configured. Non-fatal: geometry calibration
+    proceeds regardless of the probe."""
+    if not _rig_config:
+        return None
+    probe_pi = next((pi for pi in _rig_config.get("pis", [])
+                     if "calibration_probe" in pi.get("devices", [])), None)
+    if not probe_pi:
+        return None   # no probe on this rig — nothing to drive
+    api_port = _rig_config["network"]["api_port"]
+    endpoint = "/api/probe_on" if high else "/api/probe_off"
+    edge = "HIGH" if high else "LOW"
+    try:
+        r = requests.post(f"http://{probe_pi['ip']}:{api_port}{endpoint}", timeout=5)
+        if r.json().get("ok"):
+            return f"Calibration probe {edge}"
+        return f"WARN calibration probe {edge} skipped: {r.json().get('error', '')} (run Init Devices)"
+    except Exception as e:
+        return f"WARN calibration probe {edge} failed: {e}"
+
+
 @app.route("/api/start_calibration", methods=["POST"])
 def api_start_calibration():
     """Deploy the geometry-calibration tools to the display Pi and launch calib_geo
@@ -819,6 +852,9 @@ def api_start_calibration():
 
         out = _ssh(target, "bash ~/rig/calibration/cal_start.sh geo", timeout=45)
         steps.append((out.strip().splitlines() or ["started"])[0])
+        note = _drive_calibration_probe(True)   # TTL HIGH while calibrating
+        if note:
+            steps.append(note)
         return jsonify({"ok": True, "url": f"http://{ip}:5091", "steps": steps})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "steps": steps})
@@ -838,6 +874,9 @@ def api_stop_calibration():
     try:
         out = _ssh(target, "bash ~/rig/calibration/cal_stop.sh", timeout=20)
         steps.append((out.strip().splitlines() or ["Calibration tool stopped"])[0])
+        note = _drive_calibration_probe(False)  # TTL LOW when calibration stops
+        if note:
+            steps.append(note)
         # Re-init the projector so the normal display comes back cleanly (requested).
         ok, msg = _reinit_projector(target)
         steps.append(f"Projector re-init: {msg}" if ok else f"WARN projector re-init: {msg}")
@@ -1006,6 +1045,7 @@ def api_device_schemas():
     from devices.base import DEVICE_REGISTRY
     import devices.lick_sensor, devices.reward, devices.camera  # noqa
     import devices.photodiode, devices.display  # noqa
+    import devices.calibration_probe  # noqa
 
     schemas = {}
     for name, cls in DEVICE_REGISTRY.items():
@@ -1020,6 +1060,18 @@ def api_device_schemas():
 
 
 # ── Helpers ──
+
+def _display_init_cfg(devices: dict) -> dict:
+    """Display init payload: the display block plus the photodiode card's sync-square
+    prefs (corner/size) — the square is drawn by the display renderer, but authored in
+    the photodiode card. Mirrors engine/follower.py's injection at session start."""
+    pd = devices.get("photodiode", {}) or {}
+    cfg = dict(devices.get("display", {}) or {})
+    for k in ("sync_corner", "sync_size_px"):
+        if k in pd:
+            cfg[k] = pd[k]
+    return cfg
+
 
 def _get_deploy_files(role: str) -> list[tuple[str, str]]:
     """Return list of (local_path, remote_path) for deployment."""
@@ -1036,6 +1088,7 @@ def _get_deploy_files(role: str) -> list[tuple[str, str]]:
         ("devices/camera.py", "devices/camera.py"),
         ("devices/photodiode.py", "devices/photodiode.py"),
         ("devices/display.py", "devices/display.py"),
+        ("devices/calibration_probe.py", "devices/calibration_probe.py"),
         # Pi API
         ("pi_api/api.py", "pi_api/api.py"),
     ]

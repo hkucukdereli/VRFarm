@@ -286,6 +286,7 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
     # kept for logging and the no-warp fallback)
     stim_size_deg = np.full(n, float(stim_cfg.get("size_deg", 10.0)), dtype=np.float32)
 
+    n_px_fallback = 0   # trials whose px_x/px_y came from the LINEAR fallback
     for i, t in enumerate(trials):
         trial_idx[i] = t["trial_idx"]
         block_num[i] = t["block_num"]
@@ -301,9 +302,11 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
                 px_x[i] = px
                 px_y[i] = py
             except ValueError:
+                n_px_fallback += 1
                 px_x[i] = proj_res[0] / 2 + t["az_deg"] * px_per_deg
                 px_y[i] = proj_res[1] / 2 - t["alt_deg"] * px_per_deg
         else:
+            n_px_fallback += 1
             px_x[i] = proj_res[0] / 2 + t["az_deg"] * px_per_deg
             px_y[i] = proj_res[1] / 2 - t["alt_deg"] * px_per_deg
 
@@ -318,6 +321,12 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
                 stim_cfg["size_deg"], warp_map, proj_res)
         else:
             px_size[i] = max(4, int(stim_cfg["size_deg"] * px_per_deg))
+
+    if n_px_fallback:
+        print(f"[stim_generator] WARNING: {n_px_fallback}/{n} trials used the LINEAR "
+              f"az→px fallback (no warp map, or angle outside warp coverage). The linear "
+              f"mapping is up to ~19° wrong mid-field — deploy a valid warp map before "
+              f"running real sessions.", flush=True)
 
     # Pre-generate all timing durations
     rng = np.random.default_rng()

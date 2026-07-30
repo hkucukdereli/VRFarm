@@ -219,6 +219,7 @@ def api_load_rig():
 
     return jsonify({
         "rig": state["rig_config"],
+        "data_dir": str(_data_dir()),   # controller-resolved (env/default), not from the yaml
         "pi_results": pi_results,
         "all_pis_ok": all_pis_ok,
     })
@@ -849,32 +850,32 @@ def browse_folder():
         return jsonify({"ok": False, "error": str(e)})
 
 
-def _resolve_mac_dir(rig) -> Path:
-    """Base directory for downloaded session data. Use the configured data.mac_dir if it's
-    meaningful on this OS, else fall back to ~/VRFarm/data. This lets one rig config (whose
-    mac_dir is a POSIX path like /Users/...) work unchanged on a Windows controller, where
-    such a path has no drive letter and is unusable."""
-    configured = Path(rig["data"]["mac_dir"]).expanduser()
-    if os.name == "nt" and not configured.drive:
-        return Path.home() / "VRFarm" / "data"
-    return configured
+def _data_dir() -> Path:
+    """Controller-local root for transferred session data + the subject database.
+    Machine-specific by nature, so it does NOT come from the shared rig yaml (a
+    macOS path in a git/Dropbox-shared file breaks every other controller):
+    $VRFARM_DATA_DIR wins if set, else ~/VRFarm/data — the same convention on
+    every OS (/Users/<u> on macOS, /home/<u> on Linux, C:\\Users\\<u> on Windows).
+    The legacy data.mac_dir yaml key is intentionally ignored."""
+    env = os.environ.get("VRFARM_DATA_DIR", "").strip()
+    return Path(env).expanduser() if env else Path.home() / "VRFarm" / "data"
 
 
 @app.route("/api/transfer", methods=["POST"])
 def transfer():
-    """Download session data from Pis to Mac."""
+    """Download session data from Pis to the controller."""
     req = request.get_json(silent=True) or {}
     rig = state["rig_config"]
     api_port = rig["network"]["api_port"]
-    default_mac_dir = _resolve_mac_dir(rig)
-    # Optional per-transfer destination override (UI field / Browse picker); blank = rig default.
+    default_data_dir = _data_dir()
+    # Optional per-transfer destination override (UI field / Browse picker); blank = controller default.
     dest_override = str(req.get("dest_dir", "")).strip()
-    mac_dir = Path(dest_override).expanduser() if dest_override else default_mac_dir
+    dest_root = Path(dest_override).expanduser() if dest_override else default_data_dir
     session_id = state["session_id"]
     subject_id = state["session"]["subject_id"]
     date_str = state["session"]["date"]
     subject_date = f"{subject_id}_{date_str}"
-    dest = mac_dir / subject_id / subject_date / session_id
+    dest = dest_root / subject_id / subject_date / session_id
     try:
         dest.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -885,6 +886,7 @@ def transfer():
         try:
             r = requests.get(
                 f"http://{pi['ip']}:{api_port}/api/files/{session_id}",
+                params={"video_dir": rig.get("data", {}).get("video_dir", "")},
                 timeout=5)
             files = r.json().get("files", [])
             for fpath in files:
@@ -903,9 +905,9 @@ def transfer():
         except Exception as e:
             transferred.append(f"ERROR ({pi['name']}): {e}")
 
-    # Register in subject database — always at the rig-default location so the index stays
-    # consistent even when session files are sent to an override destination.
-    db_dir = default_mac_dir / "subjects"
+    # Register in subject database — always at the controller-default location so the index
+    # stays consistent even when session files are sent to an override destination.
+    db_dir = default_data_dir / "subjects"
     register_session(
         subject_id=subject_id,
         session_id=session_id,
@@ -944,7 +946,7 @@ def subject_history(subject_id):
     rig = state["rig_config"]
     if not rig:
         return jsonify([])
-    db_dir = _resolve_mac_dir(rig) / "subjects"
+    db_dir = _data_dir() / "subjects"
     return jsonify(get_subject_history(subject_id, db_dir))
 
 

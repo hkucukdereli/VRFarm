@@ -151,7 +151,7 @@
     </div>
 
     <div class="card" id="card-session">
-      <h3>Session</h3>
+      <h3 style="font-size:11px; color:#888; margin:0 0 6px;">SESSION</h3>
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:0 10px;">
         <div><label>Subject ID</label><input type="text" id="subject-id" value="HK001"></div>
         <div><label>Date</label><input type="text" id="session-date" value=""></div>
@@ -192,13 +192,25 @@
         </div>
 
         <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">REWARD</h3>
-        <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr 1fr 1fr; gap:0 8px;">
+        <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:0 8px;">
           <div><label>Level</label><select id="p-level" class="task-param"><option value="1">1</option><option value="2">2</option><option value="2.5">2.5</option><option value="3">3</option></select></div>
-          <div><label>Amount (uL)</label><input type="number" id="p-amount_ul" step="0.5" min="0" class="task-param"></div>
-          <div><label>Delay (s)</label><input type="number" id="p-reward_delay_s" step="0.1" min="0" class="task-param"></div>
-          <div><label>Resp win (s)</label><input type="number" id="p-response_window" step="0.1" min="0" class="task-param" title="Response window duration after delay"></div>
-          <div><label>Timeout</label><select id="p-timeout_rule" class="task-param"><option value="none">None</option><option value="rate">Rate</option><option value="count">Count</option></select></div>
-          <div><label>Max lick/s</label><input type="number" id="p-max_lick_rate" step="0.05" min="0" class="task-param" title="Max lick rate for timeout rule"></div>
+          <div><label>Amount</label><select id="p-amount_mode" class="task-param" onchange="updateAmountLabel()" title="Volume: pulse duration from the reward calibration. Count: N repeats of the base pulse (first calibration row in the setup UI)."><option value="volume">Volume</option><option value="count">Count</option></select></div>
+          <div><label id="amount-value-label">Volume (uL)</label><input type="number" id="p-amount_value" step="0.5" min="0" class="task-param"></div>
+          <div><label id="gap-label">Gap (ms)</label><input type="number" id="p-pulse_gap_ms" step="10" min="0" class="task-param" title="Off-time between pulses in Count mode, so the valve fully closes between pulses. Only used in Count mode."></div>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(5,1fr) auto; gap:0 8px; margin-top:4px; align-items:end;">
+          <div><label>Resp delay (s)</label><input type="number" id="p-reward_delay_s" step="0.1" min="0" class="task-param" title="Time to delay the response-window start, measured from stim onset"></div>
+          <div><label>Resp win (s)</label><input type="number" id="p-response_window" step="0.1" min="0" class="task-param" title="Response window duration, after the Resp delay"></div>
+          <div><label>Pav delay (s)</label><input type="number" id="p-pav_delay_s" step="0.1" min="0" class="task-param" title="On conditional (operant) trials only: time from response-window start to wait for a lick before switching to a Pavlovian (free) reward. 0 = disabled (pure operant, no rescue)."></div>
+          <div><label>Type</label><select id="p-timeout_rule" class="task-param" title="Over-lick rule applied to the checked phases: none, rate (restart the phase if lick rate exceeds Max lick/s), or count (restart if total phase licks exceed budget)."><option value="none">None</option><option value="rate">Rate</option><option value="count">Count</option></select></div>
+          <div><label>Max lick/s</label><input type="number" id="p-max_lick_rate" step="0.05" min="0" class="task-param" title="Lick-rate threshold for the Type rule"></div>
+          <div><label title="Which trial phases the Type/Max-lick timeout rule enforces">Timeout on</label>
+            <div style="display:flex; gap:8px; font-size:11px; padding-bottom:5px; white-space:nowrap;">
+              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-timeout_prestim" class="task-param">Pre-stim</label>
+              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-timeout_poststim" class="task-param">Post-stim</label>
+              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-timeout_iti" class="task-param">ITI</label>
+            </div>
+          </div>
         </div>
 
         <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">TRIAL STRUCTURE</h3>
@@ -280,8 +292,8 @@
         <button class="btn btn-green" id="btn-go" onclick="startSession()" disabled>GO</button>
         <button class="btn btn-red" id="btn-stop" onclick="stopSession()" disabled>STOP</button>
         <button class="btn btn-teal" id="btn-transfer" onclick="transferData()" disabled>Transfer</button>
-        <input type="text" id="transfer-dest" placeholder="transfer destination (rig default)"
-               title="Destination folder for transferred data. Blank = rig config default (data.mac_dir)."
+        <input type="text" id="transfer-dest" placeholder="transfer destination (controller default)"
+               title="Destination folder for transferred data. Blank = controller default ($VRFARM_DATA_DIR or ~/VRFarm/data)."
                style="flex:1; min-width:160px; padding:4px 6px; background:#2a2a2a; color:#ddd; border:1px solid #444; border-radius:3px;">
         <button class="btn btn-sm btn-blue" id="btn-browse-dest" onclick="browseDest()">Browse…</button>
         <button class="btn btn-sm btn-blue" id="btn-live" onclick="toggleLive()" disabled>Live</button>
@@ -333,7 +345,7 @@
       <div style="max-height: 200px; overflow-y: auto;">
         <table class="trial-table">
           <thead><tr>
-            <th>#</th><th>Az</th><th>Contrast</th><th>Type</th><th>Outcome</th><th>RT (ms)</th>
+            <th>#</th><th>Az</th><th>Contrast</th><th>Level</th><th>Adaptive</th><th>Type</th><th>Outcome</th><th>RT (ms)</th>
           </tr></thead>
           <tbody id="trial-tbody"></tbody>
         </table>
@@ -394,8 +406,8 @@ async function loadRig() {
     document.getElementById('grace-period').value = data.rig.grace_period_s || 10;
     // Pre-fill the transfer destination with the rig default (only if the user hasn't set one)
     const _destField = document.getElementById('transfer-dest');
-    if (_destField && !_destField.value && data.rig.data && data.rig.data.mac_dir) {
-      _destField.value = data.rig.data.mac_dir;
+    if (_destField && !_destField.value && data.data_dir) {
+      _destField.value = data.data_dir;
     }
     updateDevicePanels();
     buildPiStatus();
@@ -480,11 +492,20 @@ function populateTaskFields(t) {
 
   // Reward
   document.getElementById('p-level').value = String(rew.level ?? 1);
-  document.getElementById('p-amount_ul').value = rew.amount_ul ?? '';
+  document.getElementById('p-amount_mode').value = rew.amount_mode || 'volume';
+  document.getElementById('p-amount_value').value = (rew.amount_mode === 'count')
+      ? (rew.amount_count ?? 1) : (rew.amount_ul ?? '');
+  document.getElementById('p-pulse_gap_ms').value = rew.pulse_gap_ms ?? 150;
+  updateAmountLabel();
   document.getElementById('p-reward_delay_s').value = rew.reward_delay_s ?? '';
   document.getElementById('p-response_window').value = rew.response_window ?? 1.4;
+  document.getElementById('p-pav_delay_s').value = rew.pav_delay_s ?? 0;
   document.getElementById('p-timeout_rule').value = rew.timeout_rule || 'none';
   document.getElementById('p-max_lick_rate').value = rew.max_lick_rate ?? 0;
+  const tphases = rew.timeout_phases || ['iti'];
+  document.getElementById('p-timeout_prestim').checked = tphases.includes('prestim');
+  document.getElementById('p-timeout_poststim').checked = tphases.includes('poststim');
+  document.getElementById('p-timeout_iti').checked = tphases.includes('iti');
 
   // Session
   document.getElementById('p-block_size').value = sess.block_size ?? 25;
@@ -535,12 +556,25 @@ function collectTaskFields() {
       photodiode_sync_every_n: parseInt(document.getElementById('p-photodiode_sync_every_n').value) || 5,
     },
     reward: {
-      amount_ul: parseFloat(document.getElementById('p-amount_ul').value) || 4,
+      // One value box serves both modes: it writes the ACTIVE mode's key and the
+      // other key keeps its previous task value (so switching modes is lossless).
+      amount_mode: document.getElementById('p-amount_mode').value,
+      amount_ul: document.getElementById('p-amount_mode').value === 'volume'
+          ? (parseFloat(document.getElementById('p-amount_value').value) || 4)
+          : (((config.task || {}).reward || {}).amount_ul ?? 4),
+      amount_count: document.getElementById('p-amount_mode').value === 'count'
+          ? (parseInt(document.getElementById('p-amount_value').value) || 1)
+          : (((config.task || {}).reward || {}).amount_count ?? 1),
+      pulse_gap_ms: parseFloat(document.getElementById('p-pulse_gap_ms').value) || 150,
       level: parseFloat(document.getElementById('p-level').value) || 1,
       reward_delay_s: parseFloat(document.getElementById('p-reward_delay_s').value) || 0.6,
       response_window: parseFloat(document.getElementById('p-response_window').value) || 1.4,
+      // Pav delay 0 = disabled; preserve an explicit 0 (don't fall back to a default)
+      pav_delay_s: (function(){const v = parseFloat(document.getElementById('p-pav_delay_s').value); return isFinite(v) ? v : 0;})(),
       timeout_rule: document.getElementById('p-timeout_rule').value,
       max_lick_rate: parseFloat(document.getElementById('p-max_lick_rate').value) || 0,
+      timeout_phases: ['prestim', 'poststim', 'iti'].filter(
+          p => document.getElementById('p-timeout_' + p).checked),
     },
     session: {
       n_blocks: parseInt(document.getElementById('p-n_blocks').value) || 6,
@@ -692,6 +726,28 @@ function updateContrastHint() {
 
 // "Correct" button: clamp entered contrast(s) to the achievable uniform ceiling (server-computed
 // from the geometry's per-azimuth luminance falloff), and write the corrected values back.
+function updateAmountLabel() {
+  const mode = document.getElementById('p-amount_mode').value;
+  const lbl = document.getElementById('amount-value-label');
+  const inp = document.getElementById('p-amount_value');
+  const gap = document.getElementById('p-pulse_gap_ms');
+  const gapLbl = document.getElementById('gap-label');
+  const isCount = (mode === 'count');
+  if (isCount) {
+    lbl.textContent = 'Count (#)';
+    inp.step = 1; inp.min = 1;
+    inp.title = 'Number of base pulses per reward (base pulse = first calibration row in the setup UI); 1 = 1 pulse, 2 = 2 pulses';
+    if (inp.value) inp.value = Math.max(1, Math.round(parseFloat(inp.value)) || 1);
+  } else {
+    lbl.textContent = 'Volume (uL)';
+    inp.step = 0.5; inp.min = 0;
+    inp.title = 'Volume per reward; pulse duration interpolated from the reward calibration';
+  }
+  // Gap only applies in Count mode
+  gap.disabled = !isCount;
+  gap.style.opacity = gapLbl.style.opacity = isCount ? '1' : '0.4';
+}
+
 async function correctContrast() {
   let values;
   try { values = JSON.parse(document.getElementById('p-contrast_values').value); }
@@ -1295,9 +1351,15 @@ function addTrialRow(evt) {
   const outCls = evt.outcome === 'hit' ? 'outcome-hit' : 'outcome-miss';
   const typeCls = evt.reward_type === 'operant' ? 'color:#ab47bc' : 'color:#ff9800';
   const rt = (evt.rt_ms != null && isFinite(evt.rt_ms)) ? evt.rt_ms.toFixed(0) : '--';
+  // Level: effective level for this trial (L1/L2/L3). Adaptive: P(L3) for adaptive
+  // L2.5, else 1 (deterministic level).
+  const lvl = (evt.level != null) ? 'L' + (+evt.level).toFixed((+evt.level % 1) ? 1 : 0) : '--';
+  const adp = (evt.adaptive_state != null)
+    ? (+evt.adaptive_state === 1 ? '1' : (+evt.adaptive_state).toFixed(2)) : '--';
   tbody.insertAdjacentHTML('afterbegin',
     `<tr><td>${evt.trial_num + 1}</td><td>${evt.stim_az?.toFixed(0) || '--'}&deg;</td>` +
     `<td>${evt.contrast?.toFixed(3) || '--'}</td>` +
+    `<td>${lvl}</td><td>${adp}</td>` +
     `<td style="${typeCls}">${evt.reward_type || '--'}</td>` +
     `<td class="${outCls}">${evt.outcome}</td>` +
     `<td>${rt}</td></tr>`);
@@ -1336,7 +1398,8 @@ function updateButtons() {
   const busy = running || transferring || uiBusy;
 
   document.getElementById('btn-load-rig').disabled = busy;
-  document.getElementById('btn-load-task').disabled = !rigLoaded || busy;
+  // Experiments are loadable/editable WITHOUT a rig (deploy/GO still require rig+connect)
+  document.getElementById('btn-load-task').disabled = busy;
   document.getElementById('btn-save-task').disabled = !taskLoaded || busy;
   document.getElementById('btn-save-task-as').disabled = !taskLoaded || busy;
   document.getElementById('btn-deploy').disabled = !(rigLoaded && taskLoaded && connected && !busy);

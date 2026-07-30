@@ -43,7 +43,11 @@ class Display(Device):
         self._patch_cache = {}
         self._blank_cache = {}   # corrected uniform-field surfaces, keyed by bg value
         self._corr_map = None    # (H,W) per-pixel luminance correction C(az) in [0,1], 0 off-screen
-        self._sync_surf = None   # red photodiode flood for the invisible (off-screen) area
+        self._sync_rect = None   # cached photodiode sync square (corner, dead-band capped)
+        # Photodiode sync-square prefs — authored in the setup UI's photodiode card, and
+        # injected into this display config by engine/follower.py / setup's init_display payload.
+        self.sync_corner = str(rig_config.get("sync_corner", "top-left"))
+        self.sync_size_px = int(rig_config.get("sync_size_px", 0) or 0)   # 0 = auto (full dead band)
 
     def start_display(self):
         """Initialize pygame and open fullscreen window.
@@ -157,7 +161,7 @@ class Display(Device):
             self._warp = np.load(str(p))
             self._patch_cache = {}
             self._blank_cache = {}
-            self._sync_surf = None
+            self._sync_rect = None
             self._corr_map = self._build_corr_map()   # per-pixel luminance correction
             return True
         return False
@@ -234,7 +238,7 @@ class Display(Device):
         stimulus) is multiplied by the per-pixel correction C(az) so delivered luminance is uniform
         across azimuth (the bright center is darkened to match the dim edges); Bg=1 then means full
         LED at the edges and attenuated at center. The invisible area (~valid_map) stays BLACK —
-        off-screen, reserved for the red photodiode flood (see _draw_sync_border)."""
+        off-screen, reserved for the red photodiode sync square (see _draw_sync_border)."""
         import numpy as np
         import pygame
         az_map = self._warp["az_map"]
@@ -318,36 +322,47 @@ class Display(Device):
         pygame.display.flip()
 
     def _draw_sync_border(self, on: bool):
-        """Photodiode sync: when `on`, flood the INVISIBLE area (projector pixels outside the
-        marked visible screen, ~valid_map) with max red. The visible stimulus/background is
-        green+blue only (R=0), so red is reserved for the off-screen photodiode zone and never
-        reaches the mouse's visual field. When off, nothing is drawn — the patch surface already
-        left the invisible area black, so the photodiode sees a clean red pulse (see
-        _show_synced: ON every Nth frame). No-op on the flat fallback (no warp/valid_map)."""
+        """Photodiode sync: when `on`, draw a SINGLE pure-red square flush in the configured
+        panel corner (sync_corner, default top-left), sized sync_size_px but never larger
+        than the dead band OUTSIDE the usable-area boundary marked in geometry calibration
+        (frame_x inset, symmetric left/right). It lives entirely off
+        the visible screen, and the visible stimulus/background is green+blue only (R=0),
+        so the red pulse never reaches the mouse's visual field. When off, nothing is drawn
+        — the field surfaces already leave off-screen pixels black, so the photodiode sees
+        a clean red-only pulse (see _show_synced: ON every Nth frame). No-op on the flat
+        fallback (no warp -> no boundary info)."""
         import pygame
         if self._screen is None or self._warp is None or not on:
             return
-        surf = self._sync_border_surface()
-        if surf is not None:
-            self._screen.blit(surf, (0, 0))
+        rect = self._sync_patch_rect()
+        if rect is not None:
+            self._screen.fill((255, 0, 0), pygame.Rect(*rect))
 
-    def _sync_border_surface(self):
-        """Cached full-screen surface: max red where the pixel is off the visible screen
-        (~valid_map), transparent (black colorkey) elsewhere, so one blit reddens only the
-        invisible area and leaves the visible green+blue patch untouched."""
+    def _sync_patch_rect(self):
+        """Cached (x, y, w, h) of the sync square in the configured corner. The size is
+        sync_size_px, capped at frame_x — the dead-band width outside the usable-area
+        boundary from geo calibration (derived from the warp's valid_map: first column
+        containing any visible pixel; symmetric left/right) — so the square can never
+        overlap the visible screen. sync_size_px = 0 means auto (the full dead band).
+        Tracks recalibration automatically via load_warp's cache reset."""
         import numpy as np
-        import pygame
-        if self._sync_surf is not None:
-            return self._sync_surf
+        if self._sync_rect is not None:
+            return self._sync_rect
         if self._warp is None:
             return None
         valid = self._warp["valid_map"]
-        px = np.zeros((valid.shape[0], valid.shape[1], 3), dtype=np.uint8)
-        px[~valid, 0] = 255   # max red in the invisible (off-screen) area
-        surf = pygame.surfarray.make_surface(px.transpose(1, 0, 2))
-        surf.set_colorkey((0, 0, 0))   # black = transparent -> only the red border paints
-        self._sync_surf = surf
-        return self._sync_surf
+        H, W = valid.shape
+        cols = np.flatnonzero(valid.any(axis=0))
+        fx = int(cols[0]) if cols.size else 0
+        if fx < 4:
+            fx = 40   # boundary at the panel edge -> no dead band; keep a detectable patch
+        s = self.sync_size_px if self.sync_size_px > 0 else fx
+        s = max(4, min(s, fx))   # hard cap: stay inside the dead band
+        corner = self.sync_corner.lower().replace("_", "-")
+        x = 0 if "left" in corner else W - s
+        y = 0 if "top" in corner else H - s
+        self._sync_rect = (x, y, s, s)
+        return self._sync_rect
 
     def check(self) -> dict:
         try:

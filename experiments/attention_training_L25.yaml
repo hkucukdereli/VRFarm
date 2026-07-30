@@ -17,11 +17,16 @@ stimulus:
 # ── When to reward ──
 reward:
   amount_ul: 4.0
+  amount_mode: volume
+  amount_count: 1
+  pulse_gap_ms: 150
   level: 2.5
   reward_delay_s: 0.6
   response_window: 1.4
+  pav_delay_s: 0
   timeout_rule: rate
   max_lick_rate: 0.3
+  timeout_phases: [iti]
 
 # ── Trial structure ──
 session:

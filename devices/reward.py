@@ -26,9 +26,18 @@ class Reward(Device):
             },
         }
 
+    # Valve off-time between pulses in count mode, so it fully cycles each time
+    PULSE_GAP_MS = 150.0
+
     def init(self, rig_config: dict, task_params: dict):
         import pigpio
         self.amount_ul = task_params.get("amount_ul", 4.0)
+        # "volume": one pulse, duration interpolated from the calibration for amount_ul.
+        # "count": amount_count repeats of the BASE pulse (first calibration row, as
+        # set up in the setup UI's reward card).
+        self.amount_mode = str(task_params.get("amount_mode", "volume"))
+        self.amount_count = max(1, int(task_params.get("amount_count", 1)))
+        self.pulse_gap_ms = float(task_params.get("pulse_gap_ms", self.PULSE_GAP_MS))
         self.reward_type = rig_config.get("reward_type", "water")
         self._pi = pigpio.pi()
         if not self._pi.connected:
@@ -45,6 +54,7 @@ class Reward(Device):
 
         # Calibration (loaded separately via load_calibration)
         self._interp = {}  # name -> interp1d function
+        self._base = {}    # name -> (ms, ul) of the FIRST calibration row = base pulse
 
     @property
     def needs_calibration(self) -> bool:
@@ -58,6 +68,7 @@ class Reward(Device):
         import numpy as np
         for name, points in cal_data.items():
             arr = np.array(points)
+            self._base[name] = (float(arr[0, 0]), float(arr[0, 1]))   # base pulse (ms, ul)
             if arr.shape[0] == 1:
                 # Single point: proportional scaling
                 ms_per_ul = arr[0, 0] / arr[0, 1]
@@ -80,16 +91,48 @@ class Reward(Device):
                              args=(gpio, duration_ms), daemon=True)
         t.start()
 
+    def pulse_train(self, duration_ms: float, n: int, pin_name: str = "main"):
+        """Fire n identical pulses with PULSE_GAP_MS off-time between them."""
+        gpio = self._pins[pin_name]
+        t = threading.Thread(target=self._pulse_train_thread,
+                             args=(gpio, duration_ms, max(1, int(n))), daemon=True)
+        t.start()
+
     def deliver(self, pin_name: str = "main"):
-        """Deliver calibrated reward at configured amount_ul."""
+        """Deliver a reward per the configured amount mode.
+        volume: one pulse, duration interpolated from the calibration for amount_ul.
+        count:  amount_count repeats of the base pulse (first calibration row)."""
+        if self.amount_mode == "count":
+            if pin_name not in self._base:
+                raise ValueError(f"No calibration for pin '{pin_name}'")
+            ms = self._base[pin_name][0]
+            self.pulse_train(ms, self.amount_count, pin_name)
+            return ms
         ms = self.pulse_ms_for_volume(self.amount_ul, pin_name)
         self.pulse(ms, pin_name)
         return ms
+
+    @property
+    def effective_amount_ul(self) -> float:
+        """µL commanded per reward: amount_ul in volume mode; amount_count × the base
+        pulse's calibrated volume in count mode (for HDF5 logging)."""
+        if self.amount_mode == "count":
+            base = self._base.get("main")
+            return float(self.amount_count * base[1]) if base else float("nan")
+        return float(self.amount_ul)
 
     def _pulse_thread(self, gpio: int, duration_ms: float):
         self._pi.write(gpio, 1)
         time.sleep(duration_ms / 1000.0)
         self._pi.write(gpio, 0)
+
+    def _pulse_train_thread(self, gpio: int, duration_ms: float, n: int):
+        for i in range(n):
+            if i:
+                time.sleep(self.pulse_gap_ms / 1000.0)
+            self._pi.write(gpio, 1)
+            time.sleep(duration_ms / 1000.0)
+            self._pi.write(gpio, 0)
 
     def check(self) -> dict:
         if not self._pi.connected:
@@ -105,12 +148,16 @@ class Reward(Device):
         return {
             "reward_t": "f8",
             "reward_amount_ul": "f4",
+            # 1 if this trial's reward came from the Pav-delay rescue (no lick on a
+            # conditional trial), else 0.
+            "reward_pavlovian": "i1",
         }
 
     def hdf5_trial_data(self, ctx: dict) -> dict:
         return {
             "reward_t": ctx.get("reward_t", float("nan")),
             "reward_amount_ul": ctx.get("reward_amount_ul", 0.0),
+            "reward_pavlovian": 1 if ctx.get("pavlovian_rescue") else 0,
         }
 
     def close(self):

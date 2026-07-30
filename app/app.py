@@ -14,6 +14,7 @@ import logging
 import os
 import queue
 import socket
+import struct
 import sys
 import threading
 import time
@@ -1079,12 +1080,38 @@ def event_stream():
 
 # ── UDP communication ──
 
+def _disable_udp_conn_reset(sock):
+    """Windows only: stop a prior ICMP 'port unreachable' (e.g. a command sent while the
+    Leader engine is down) from poisoning this UDP socket so the next recv/send raises
+    ConnectionResetError (WSAECONNRESET). macOS/Linux ignore the ICMP error, so this is a
+    no-op there and the whole thing is wrapped defensively."""
+    if sys.platform != "win32":
+        return
+    try:
+        sock.ioctl(socket.SIO_UDP_CONNRESET, struct.pack("I", 0))
+    except (AttributeError, OSError):
+        pass
+
+
 def _send_command(ip: str, port: int, msg: dict):
-    """Send a UDP command to Leader."""
+    """Send a UDP command to Leader. Tolerant of a Windows ConnectionResetError left by a
+    previous packet to a closed port: rebuild the socket and retry once (UDP is best-effort
+    anyway), so one dropped command can't 500 the operator or wedge the command socket."""
     global _cmd_sock
     if _cmd_sock is None:
         _cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    _cmd_sock.sendto(json.dumps(msg).encode(), (ip, port))
+        _disable_udp_conn_reset(_cmd_sock)
+    payload = json.dumps(msg).encode()
+    try:
+        _cmd_sock.sendto(payload, (ip, port))
+    except ConnectionResetError:
+        try:
+            _cmd_sock.close()
+        except OSError:
+            pass
+        _cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        _disable_udp_conn_reset(_cmd_sock)
+        _cmd_sock.sendto(payload, (ip, port))
 
 
 def _start_udp_listener(event_port: int):
@@ -1098,6 +1125,7 @@ def _start_udp_listener(event_port: int):
     def listen():
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(("0.0.0.0", event_port))
+        _disable_udp_conn_reset(sock)
         sock.settimeout(1.0)
         while _udp_running:
             try:
@@ -1117,6 +1145,9 @@ def _start_udp_listener(event_port: int):
                     print("[UDP] Queue full, dropped oldest event")
                     _event_queue.put_nowait(event)
             except socket.timeout:
+                continue
+            except ConnectionResetError:
+                # Windows: a stray ICMP unreachable poisoned the socket — keep listening.
                 continue
             except OSError:
                 break

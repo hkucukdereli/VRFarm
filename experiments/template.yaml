@@ -21,7 +21,7 @@ reward:
   amount_count: 1           # count mode: # of base pulses per reward
   pulse_gap_ms: 150         # count mode: off-time (ms) between pulses
   level: 1                    # 1=free, 2=free on go, 2.5=adaptive, 3=operant
-  reward_delay_s: 0.6         # delay after stim onset before response window opens
+  resp_delay_s: 0.6         # delay after stim onset before response window opens
   response_window: 1.4        # response window duration (can extend beyond stim)
   pav_delay_s: 0            # operant trials: s from resp-win start to Pavlovian rescue (0=off)
   timeout_rule: rate             # none | rate | count

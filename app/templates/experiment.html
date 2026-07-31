@@ -187,7 +187,7 @@
           <div><label id="gap-label">Gap (ms)</label><input type="number" id="p-pulse_gap_ms" step="10" min="0" class="task-param" title="Off-time between pulses in Count mode, so the valve fully closes between pulses. Only used in Count mode."></div>
         </div>
         <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:0 8px; margin-top:4px;">
-          <div><label>Resp delay (s)</label><input type="number" id="p-reward_delay_s" step="0.1" min="0" class="task-param" title="Time to delay the response-window start, measured from stim onset"></div>
+          <div><label>Resp delay (s)</label><input type="number" id="p-resp_delay_s" step="0.1" min="0" class="task-param" title="Time to delay the response-window start, measured from stim onset"></div>
           <div><label>Resp win (s)</label><input type="number" id="p-response_window" step="0.1" min="0" class="task-param" title="Response window duration, after the Resp delay"></div>
           <div><label>Pav delay (s)</label><input type="number" id="p-pav_delay_s" step="0.1" min="0" class="task-param" title="On conditional (operant) trials only: time from response-window start to wait for a lick before switching to a Pavlovian (free) reward. 0 = disabled (pure operant, no rescue)."></div>
         </div>
@@ -513,7 +513,7 @@ function populateTaskFields(t) {
       ? (rew.amount_count ?? 1) : (rew.amount_ul ?? '');
   document.getElementById('p-pulse_gap_ms').value = rew.pulse_gap_ms ?? 150;
   updateAmountLabel();
-  document.getElementById('p-reward_delay_s').value = rew.reward_delay_s ?? '';
+  document.getElementById('p-resp_delay_s').value = rew.resp_delay_s ?? rew.reward_delay_s ?? '';
   document.getElementById('p-response_window').value = rew.response_window ?? 1.4;
   document.getElementById('p-pav_delay_s').value = rew.pav_delay_s ?? 0;
   document.getElementById('p-timeout_rule').value = rew.timeout_rule || 'none';
@@ -584,7 +584,7 @@ function collectTaskFields() {
           : (((config.task || {}).reward || {}).amount_count ?? 1),
       pulse_gap_ms: parseFloat(document.getElementById('p-pulse_gap_ms').value) || 150,
       level: parseFloat(document.getElementById('p-level').value) || 1,
-      reward_delay_s: parseFloat(document.getElementById('p-reward_delay_s').value) || 0.6,
+      resp_delay_s: parseFloat(document.getElementById('p-resp_delay_s').value) || 0.6,
       response_window: parseFloat(document.getElementById('p-response_window').value) || 1.4,
       // Pav delay 0 = disabled; preserve an explicit 0 (don't fall back to a default)
       pav_delay_s: (function(){const v = parseFloat(document.getElementById('p-pav_delay_s').value); return isFinite(v) ? v : 0;})(),
@@ -1036,7 +1036,7 @@ function handleEvent(evt) {
         showStimThumb(evt.trial, evt.az);
       } else {
         // Stim off from leader — don't override t_off: leader fires this after
-        // reward_delay_s but the Follower renders for the full duration_s.
+        // resp_delay_s but the Follower renders for the full duration_s.
         // The trialTable-based t_off set on stim ON is the ground truth.
         clearStimThumb();
       }

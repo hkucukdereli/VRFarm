@@ -326,7 +326,9 @@ class Leader:
         nominal_level = float(reward_cfg.get("level", 1))
         adaptive_state = self.task.get("adaptive", {}).get("initial_state", 0.0)
         adaptive_cfg = self.task.get("adaptive", {})
-        reward_delay = reward_cfg.get("reward_delay_s", 0.6)
+        # resp_delay_s: delay from stim onset before the response window opens (was reward_delay_s;
+        # the fallback keeps any pre-rename experiment yaml working).
+        reward_delay = reward_cfg.get("resp_delay_s", reward_cfg.get("reward_delay_s", 0.6))
         rw_dur = reward_cfg.get("response_window", 1.4)
         pav_delay = reward_cfg.get("pav_delay_s", 0.0)
         visual_dur = self.task.get("stimulus", {}).get("duration_s", 2.0)
@@ -481,8 +483,8 @@ class Leader:
             self._trial_ctx["true_onset_t"] = true_onset_t
             self._trial_ctx["display_latency_s"] = true_onset_t - stim_onset_t
 
-            # Reward delay phase (default 0.6s) — anchored to TRUE onset so the
-            # reward window opens reward_delay_s after the mouse actually sees the stim.
+            # Response-delay phase (default 0.6s) — anchored to TRUE onset so the
+            # response window opens resp_delay_s after the mouse actually sees the stim.
             # L1: reward on first lick during this phase
             self._wait_for_event(
                 max(0.0, reward_delay - (time.time() - true_onset_t)),

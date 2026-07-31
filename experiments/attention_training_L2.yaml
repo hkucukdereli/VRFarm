@@ -17,7 +17,7 @@ reward:
   amount_count: 1
   pulse_gap_ms: 150
   level: 2
-  reward_delay_s: 0.6
+  resp_delay_s: 0.6
   response_window: 1.4
   pav_delay_s: 0
   timeout_rule: rate

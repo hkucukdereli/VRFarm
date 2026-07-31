@@ -40,6 +40,8 @@ session:
   block_delay: 0
   block_delay_skip_first: false
   # randomize_blocks: true  # optional, shuffles all trials
+  global_timeout_trials: 0            # abort session if dry for N consecutive trials (0 = off)
+  global_timeout_phases: []           # phases checked for licks: prestim/stim/poststim/iti
 
 # ── Adaptive (level 2.5 only) ──
 adaptive:

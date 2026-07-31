@@ -244,6 +244,19 @@
           <div><label>Step up</label><input type="number" id="p-adaptive_step_up" step="0.05" min="0" class="task-param"></div>
           <div><label>Step down</label><input type="number" id="p-adaptive_step_down" step="0.05" min="0" class="task-param"></div>
         </div>
+
+        <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">GLOBAL TIMEOUT</h3>
+        <div style="display:grid; grid-template-columns:1fr auto; gap:0 8px; align-items:end;">
+          <div><label title="Abort the session (as if STOP) when the mouse produces no licks in the checked phases for this many consecutive trials. 0 = off.">Num of trials</label><input type="number" id="p-global_timeout_trials" min="0" step="1" class="task-param" title="0 disables the global timeout"></div>
+          <div><label title="A trial counts toward the abort streak when it has no licks in any of the checked phases">Abort if no licks in</label>
+            <div style="display:flex; gap:8px; font-size:11px; padding-bottom:5px; white-space:nowrap;">
+              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-gt_prestim" class="task-param">Pre-stim</label>
+              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-gt_stim" class="task-param">Stim</label>
+              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-gt_poststim" class="task-param">Post-stim</label>
+              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-gt_iti" class="task-param">ITI</label>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -535,6 +548,12 @@ function populateTaskFields(t) {
   document.getElementById('p-global_delay').value = _fmtDur(sess.global_delay);
   document.getElementById('p-block_delay').value = _fmtDur(sess.block_delay);
   document.getElementById('p-block_delay_skip_first').checked = !!sess.block_delay_skip_first;
+  const gtphases = sess.global_timeout_phases || [];
+  document.getElementById('p-global_timeout_trials').value = sess.global_timeout_trials ?? 0;
+  document.getElementById('p-gt_prestim').checked = gtphases.includes('prestim');
+  document.getElementById('p-gt_stim').checked = gtphases.includes('stim');
+  document.getElementById('p-gt_poststim').checked = gtphases.includes('poststim');
+  document.getElementById('p-gt_iti').checked = gtphases.includes('iti');
   _updateNTrials();
 
   // Adaptive
@@ -604,6 +623,9 @@ function collectTaskFields() {
       block_delay: _parseDur('p-block_delay'),
       block_delay_skip_first: document.getElementById('p-block_delay_skip_first').checked,
       randomize_blocks: document.getElementById('p-randomize_blocks').checked,
+      global_timeout_trials: parseInt(document.getElementById('p-global_timeout_trials').value) || 0,
+      global_timeout_phases: ['prestim', 'stim', 'poststim', 'iti'].filter(
+          p => document.getElementById('p-gt_' + p).checked),
     },
     adaptive: {
       // L2.5 IS the adaptive mode -> always enabled, independent of the (disabled) checkbox
@@ -1082,6 +1104,9 @@ function handleEvent(evt) {
     case 'iti_restart':
       itiStartTime = Date.now();
       log('ITI restarted (excess licking)');
+      break;
+    case 'global_timeout':
+      log(`Global timeout: no licks in ${(evt.phases || []).join('/')} for ${evt.n_dry} trials — aborting.`);
       break;
     case 'session_end':
       document.getElementById('btn-go').textContent = 'GO';  // clear any leftover countdown

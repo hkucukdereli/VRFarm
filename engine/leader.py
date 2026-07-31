@@ -322,6 +322,13 @@ class Leader:
         block_size = sess_cfg.get("block_size", 25)
         n_blocks = sess_cfg.get("n_blocks", sess_cfg.get("n_trials", 150) // max(block_size, 1))
         n_trials = n_blocks * block_size
+        # Global timeout: abort the whole session (as if STOP) when the mouse produces no
+        # licks in the selected phases for `gt_n` consecutive trials. 0 trials or no phases
+        # selected = disabled.
+        gt_n = int(sess_cfg.get("global_timeout_trials", 0) or 0)
+        gt_phases = set(sess_cfg.get("global_timeout_phases", []) or [])
+        gt_active = gt_n > 0 and bool(gt_phases)
+        gt_dry_streak = 0
         reward_cfg = self.task.get("reward", {})
         nominal_level = float(reward_cfg.get("level", 1))
         adaptive_state = self.task.get("adaptive", {}).get("initial_state", 0.0)
@@ -465,6 +472,10 @@ class Leader:
                     break
                 self._trial_ctx["prestim_lick_count"] = len(self._trial_licks)
 
+            # Licks so far this trial all belong to the pre-stim phase (list was reset
+            # at trial setup; pre-stim is the only phase before the stimulus).
+            n_licks_prestim = len(self._trial_licks)
+
             # ── Stimulus ON ──
             self._action_show_stim()
             stim_onset_t = self._trial_ctx["stim_onset_t"]
@@ -523,6 +534,7 @@ class Leader:
                            "t": stim_off_t})
 
             # ── Post-stimulus period ──
+            n_licks_poststim = 0
             poststim_dur = float(poststim_durs[trial_num]) if poststim_durs is not None else 0
             if poststim_dur > 0:
                 # Wait for stim to actually end on Follower
@@ -532,12 +544,14 @@ class Leader:
                 self._publish({"type": "poststim_start", "trial": self.trial_num,
                                "t": max(stim_off_t, time.time()),
                                "duration": poststim_dur})
+                n_before_poststim = len(self._trial_licks)
                 self._run_enforced_wait(
                     poststim_dur, enforce=("poststim" in self._timeout_phases()),
                     lick_sink=self._trial_licks, restart_event="poststim_restart",
                     update_lick_count=True)
                 if not self.running:
                     break
+                n_licks_poststim = len(self._trial_licks) - n_before_poststim
             else:
                 self._wait_for_event(0.5)  # brief pause before outcome when no post-stim
 
@@ -563,6 +577,28 @@ class Leader:
                 else:
                     adaptive_state -= adaptive_cfg.get("step_down", 0.2)
                 adaptive_state = max(0.0, min(1.0, adaptive_state))
+
+            # ── Global timeout: abort if the mouse is dry for gt_n consecutive trials ──
+            # A trial is "dry" when it produced no licks in ANY of the selected phases.
+            # (iti_lick_count is the ITI that ran immediately before this trial.)
+            if gt_active:
+                n_licks_stim = len(self._trial_licks) - n_licks_prestim - n_licks_poststim
+                phase_licks = {
+                    "prestim": n_licks_prestim,
+                    "stim": n_licks_stim,
+                    "poststim": n_licks_poststim,
+                    "iti": self._trial_ctx.get("iti_lick_count", 0),
+                }
+                dry = sum(phase_licks[p] for p in gt_phases) == 0
+                gt_dry_streak = gt_dry_streak + 1 if dry else 0
+                if gt_dry_streak >= gt_n:
+                    self._publish({"type": "global_timeout", "trial": trial_num,
+                                   "n_dry": gt_dry_streak,
+                                   "phases": sorted(gt_phases), "t": time.time()})
+                    print(f"Global timeout: no licks in {sorted(gt_phases)} for "
+                          f"{gt_dry_streak} consecutive trials — aborting session.")
+                    self.running = False
+                    break
 
         # ── Trailing ITI ──
         if self.running and self._stims is not None:

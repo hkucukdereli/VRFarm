@@ -33,10 +33,14 @@ import devices.calibration_probe  # noqa: F401
 
 
 class Leader:
-    def __init__(self, rig_config: dict, task_config: dict, session: dict):
+    def __init__(self, rig_config: dict, task_config: dict, session: dict,
+                 skip_save=None):
         self.rig = rig_config
         self.task = task_config
         self.session = session  # {subject_id, date, session_num, notes}
+        # Device names whose per-trial HDF5 datasets to SKIP (user unchecked them at GO). Core
+        # trial outcomes (first_lick_t, trial_outcome, timings) are written directly and unaffected.
+        self._skip_save = set(skip_save or ())
         self.session_id = (f"{session['subject_id']}_{session['date']}"
                            f"_{session['session_num']:03d}")
         self.devices = {}
@@ -593,6 +597,9 @@ class Leader:
             "task_config": self.task,
             "rig_name": self.rig.get("name", ""),
             "timestamp": float(time.time()),
+            # Data provenance: which devices' detailed data was recorded this session.
+            "saved_devices": sorted(n for n in self.devices if n not in self._skip_save),
+            "skipped_devices": sorted(self._skip_save),
         }
         meta_path = data_dir / "metadata.yaml"
         with open(meta_path, "w") as f:
@@ -722,8 +729,10 @@ class Leader:
             f.create_dataset("_iti_durations_planned",
                              data=self._stims["iti_durations"])
 
-        # Device datasets (generalized)
-        for dev in self.devices.values():
+        # Device datasets (generalized) — skip devices the user chose not to save.
+        for name, dev in self.devices.items():
+            if name in self._skip_save:
+                continue
             for ds_name, ds_spec in dev.hdf5_datasets().items():
                 if isinstance(ds_spec, dict):
                     f.create_dataset(ds_name, shape=(0,), maxshape=(n,), **ds_spec)
@@ -764,8 +773,10 @@ class Leader:
         f["adaptive_state"][i] = (self._trial_ctx.get("adaptive_state", 0.0)
                                   if self._trial_ctx.get("nominal_level") == 2.5 else 1.0)
 
-        # Device datasets
-        for dev in self.devices.values():
+        # Device datasets — skip devices the user chose not to save (datasets were never created).
+        for name, dev in self.devices.items():
+            if name in self._skip_save:
+                continue
             for ds_name, value in dev.hdf5_trial_data(self._trial_ctx).items():
                 if ds_name in f:
                     f[ds_name].resize(i + 1, axis=0)
@@ -794,6 +805,8 @@ def main():
     parser.add_argument("--date", required=True)
     parser.add_argument("--session-num", type=int, required=True)
     parser.add_argument("--notes", default="")
+    parser.add_argument("--no-save", default="",
+                        help="comma-separated device names whose HDF5 datasets to skip")
     args = parser.parse_args()
 
     import yaml
@@ -809,7 +822,8 @@ def main():
         "notes": args.notes,
     }
 
-    leader = Leader(rig_config, task_config, session)
+    skip_save = {s.strip() for s in args.no_save.split(",") if s.strip()}
+    leader = Leader(rig_config, task_config, session, skip_save=skip_save)
 
     # Handle SIGTERM gracefully (from pi_api stop)
     def _sigterm(sig, frame):

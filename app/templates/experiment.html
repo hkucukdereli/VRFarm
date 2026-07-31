@@ -293,12 +293,18 @@
         <button class="btn btn-green" id="btn-deploy" onclick="deployExperiment()" disabled>Deploy</button>
         <button class="btn btn-green" id="btn-go" onclick="startSession()" disabled>GO</button>
         <button class="btn btn-red" id="btn-stop" onclick="stopSession()" disabled>STOP</button>
+        <button class="btn btn-sm btn-blue" id="btn-live" onclick="toggleLive()" disabled>Live</button>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:8px;">
         <button class="btn btn-teal" id="btn-transfer" onclick="transferData()" disabled>Transfer</button>
         <input type="text" id="transfer-dest" placeholder="transfer destination (controller default)"
                title="Destination folder for transferred data. Blank = controller default ($VRFARM_DATA_DIR or ~/VRFarm/data)."
                style="flex:1; min-width:160px; padding:4px 6px; background:#2a2a2a; color:#ddd; border:1px solid #444; border-radius:3px;">
         <button class="btn btn-sm btn-blue" id="btn-browse-dest" onclick="browseDest()">Browse…</button>
-        <button class="btn btn-sm btn-blue" id="btn-live" onclick="toggleLive()" disabled>Live</button>
+        <span style="display:inline-flex; align-items:center; gap:8px; font-size:11px; color:#888; white-space:nowrap;">
+          <span title="Which device data to record this session. Unchecked = not saved (Camera still livestreams).">Save:</span>
+          <span id="save-devices" style="display:inline-flex; gap:8px;"></span>
+        </span>
       </div>
     </div>
 
@@ -417,6 +423,7 @@ async function loadRig() {
       _destField.value = data.data_dir;
     }
     updateDevicePanels();
+    renderSaveDevices();
     buildPiStatus();
     for (const [name, res] of Object.entries(data.pi_results)) {
       const dot = document.getElementById('dot-' + name);
@@ -682,6 +689,24 @@ async function updateSession() {
   return (await r.json()).session_id;
 }
 
+// ── Per-device "save data" checkboxes (Actions row 2) ──
+// One checkbox per data-producing device present+enabled in the rig; default checked (= save all,
+// current behavior). Read at GO by startSession(). Camera unchecked = livestream but no video file;
+// a behavioral device unchecked = its detailed HDF5 datasets are skipped (core outcomes still save).
+function renderSaveDevices() {
+  const host = document.getElementById('save-devices');
+  if (!host) return;
+  const devs = (config && config.rig && config.rig.devices) || {};
+  const DATA_DEVICES = [['camera', 'Camera'], ['lick_sensor', 'Lick'],
+                        ['reward', 'Reward'], ['photodiode', 'Photodiode']];
+  host.innerHTML = DATA_DEVICES
+    .filter(([name]) => devs[name] && devs[name].enabled)
+    .map(([name, label]) =>
+      `<label style="display:inline-flex; align-items:center; gap:3px; color:#bbb; cursor:pointer;">` +
+      `<input type="checkbox" class="save-dev" data-dev="${name}" checked>${label}</label>`)
+    .join('');
+}
+
 // ── Device panel visibility ──
 
 function updateDevicePanels() {
@@ -882,8 +907,15 @@ async function startSession() {
   currentStimAz = null;
   drawStimScene();
 
+  // Per-device save choices (Actions row 2). Unchecked -> not recorded (camera still livestreams).
+  const save = {};
+  document.querySelectorAll('.save-dev').forEach(cb => { save[cb.dataset.dev] = cb.checked; });
+
   try {
-    const r = await fetch('/api/go', {method: 'POST'});
+    const r = await fetch('/api/go', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({save})
+    });
     const data = await r.json();
     (data.steps || []).forEach(s => log('  ' + s));
     if (data.ok) {

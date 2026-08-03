@@ -357,7 +357,7 @@
         </div>
         <span class="info" id="raster-info"></span>
       </div>
-      <canvas class="raster-canvas" id="canvas-raster" style="height:80px;"></canvas>
+      <canvas class="raster-canvas" id="canvas-raster" style="height:40px;"></canvas>
     </div>
 
     <!-- Trial table -->
@@ -394,6 +394,10 @@ let timeoutExtraMs = 0;         // extra time accrued from phase-restart timeout
 let phaseStartTime = null;      // start of the current enforced phase (ITI/prestim/poststim)
 let currentTrialTotalS = null;  // planned duration of the current trial phase (excl. ITI)
 let currentItiTotalS = null;    // planned duration of the current ITI
+// Phase 4: predicted upcoming events drawn in the future region of the raster.
+let predStim = null;      // predicted upcoming stim window {t_on, t_off} (leader clock)
+let predReward = null;    // predicted pavlovian reward {t} (L1/L2 only; not adaptive/conditional)
+let predTrialIdx = null;  // trial index currently being predicted
 let clockInterval = null;
 
 // Live data
@@ -407,7 +411,9 @@ let rasterLive = false, rasterAnimFrame = null;
 // Stim events from SSE
 let stimEvents = [];  // [{trial, t_on, t_off}]
 let trialTable = [];  // populated from /api/trial_table after deploy
-const RASTER_WINDOW = 30;  // seconds
+const RASTER_PAST = 10;    // seconds of history shown left of the "now" play-head
+const RASTER_FUTURE = 20;  // seconds of future shown right of it (scheduled stim windows, etc.)
+const RASTER_WINDOW = RASTER_PAST + RASTER_FUTURE;  // total span (s)
 const STIM_COLOR = 'rgba(33, 150, 243, 0.15)';  // blue translucent
 
 // Today's date as yyyymmdd (LOCAL, not UTC — avoids the evening off-by-one). Set once at load;
@@ -948,6 +954,9 @@ async function startSession() {
   phaseStartTime = null;
   currentTrialTotalS = null;
   currentItiTotalS = null;
+  predStim = null;
+  predReward = null;
+  predTrialIdx = null;
   document.getElementById('trial-tbody').innerHTML = '';
   clearAllCanvases();
   currentStimAz = null;
@@ -1074,12 +1083,17 @@ function handleEvent(evt) {
       break;
     case 'reward':
       if (rasterLive) { rewardEvents.push({t: evt.t, duration_ms: evt.pulse_ms || 0}); updateRasterInfo(); }
+      predReward = null;   // real reward fired — drop its prediction
       break;
     case 'stim':
       if (evt.on) {
         const dur = trialTable[evt.trial] ? trialTable[evt.trial].duration_s : 2.0;
         if (rasterLive) stimEvents.push({trial: evt.trial, t_on: evt.t, t_off: evt.t + dur});
         showStimThumb(evt.trial, evt.az);
+        // Real stim replaces the predicted window; re-anchor the pavlovian-reward prediction
+        // to the true onset (evt.t).
+        predStim = null;
+        predReward = _isPavlovian(evt.trial) ? {t: evt.t + _respDelayS()} : null;
       } else {
         // Stim off from leader — don't override t_off: leader fires this after
         // resp_delay_s but the Follower renders for the full duration_s.
@@ -1099,6 +1113,7 @@ function handleEvent(evt) {
       itiStartTime = null;
       sessionEstimateMs = computeSessionEstimate();   // baseline ETA (elapsed is post-grace)
       timeoutExtraMs = 0;
+      predStim = null; predReward = null; predTrialIdx = null;
       document.getElementById('btn-go').textContent = 'GO';  // grace done
       log('Experiment started.');
       const sid = document.getElementById('subject-id').value;
@@ -1111,16 +1126,23 @@ function handleEvent(evt) {
       trialStartTime = Date.now();
       phaseStartTime = Date.now();   // pre-stim phase begins here
       currentTrialTotalS = trialPhaseDur(trialTable[evt.trial]);
+      // Refine the prediction now that pre-stim actually begins: onset = now + pre-stim.
+      predTrialIdx = evt.trial;
+      setPrediction(evt.trial, evt.t + ((trialTable[evt.trial] || {}).prestim_s || 0));
       itiStartTime = null;
       break;
     case 'trial':
       addTrialRow(evt);
       trialStartTime = null;
+      predStim = null; predReward = null;   // trial done — clear its predictions
       break;
     case 'iti_start':
       itiStartTime = Date.now();
       phaseStartTime = Date.now();
       currentItiTotalS = (evt.duration != null) ? evt.duration : null;
+      // Predict the upcoming trial's stim window/reward: onset = ITI end + pre-stim.
+      predTrialIdx = evt.trial;
+      setPrediction(evt.trial, evt.t + (evt.duration || 0) + ((trialTable[evt.trial] || {}).prestim_s || 0));
       trialStartTime = null;
       break;
     case 'poststim_start':
@@ -1138,6 +1160,9 @@ function handleEvent(evt) {
       if (phaseStartTime) timeoutExtraMs += Date.now() - phaseStartTime;  // wasted time repeats
       phaseStartTime = Date.now();
       itiStartTime = Date.now();
+      // ITI restarted → push the predicted onset later (uses the ITI event's leader-clock time).
+      if (predTrialIdx != null)
+        setPrediction(predTrialIdx, evt.t + (currentItiTotalS || 0) + ((trialTable[predTrialIdx] || {}).prestim_s || 0));
       log('ITI restarted (excess licking)');
       break;
     case 'prestim_restart':
@@ -1358,29 +1383,71 @@ function drawUnifiedRaster() {
   if (lickOffset === null) return;
   const now = Date.now() / 1000 - lickOffset;
 
-  // Draw stim windows (blue shading). Drawn from stim ONSET using the trial-table duration
-  // (t_off = t_on + duration_s, set on the stim event) — not deferred until the stim is over.
-  // While the stim is still playing, offAge < 0 clamps the right edge to "now", so the box
-  // grows in real time; once it ends it scrolls left at full width.
+  // Time-to-x: the "now" play-head sits RASTER_PAST seconds from the left; history is left of
+  // it (negative t), the future is right of it (positive t). age = now - t (>0 past, <0 future).
+  const xForAge = age => ((RASTER_PAST - age) / RASTER_WINDOW) * w;
+  const x0 = xForAge(0);   // the 0-sec / "now" play-head
+
+  // Subtle shading of the future (right) region.
+  ctx.fillStyle = 'rgba(255,255,255,0.03)';
+  ctx.fillRect(x0, 0, w - x0, h - 12);
+
+  // Stim windows (blue). Drawn from onset with the trial-table duration (t_off = t_on +
+  // duration_s); with the future region the full window is visible AHEAD of the play-head,
+  // then scrolls left as it plays.
   for (const stim of stimEvents) {
-    const onAge = now - stim.t_on;
-    const offAge = now - stim.t_off;
-    if (onAge > RASTER_WINDOW || onAge < 0) continue;   // off-screen left, or not yet begun
-    const x1 = Math.max(0, ((RASTER_WINDOW - onAge) / RASTER_WINDOW) * w);
-    const x2 = Math.min(w, ((RASTER_WINDOW - offAge) / RASTER_WINDOW) * w);
+    const x1 = Math.max(0, xForAge(now - stim.t_on));
+    const x2 = Math.min(w, xForAge(now - stim.t_off));
+    if (x2 <= x1) continue;   // fully off-screen
     ctx.fillStyle = STIM_COLOR;
     ctx.fillRect(x1, 0, x2 - x1, h - 12);
   }
 
-  // Time axis labels
-  ctx.fillStyle = '#444';
-  ctx.font = '9px monospace';
-  for (let s = 0; s <= RASTER_WINDOW; s += 5) {
-    const x = ((RASTER_WINDOW - s) / RASTER_WINDOW) * w;
-    ctx.fillText('-' + s + 's', x, h - 2);
+  // Predicted upcoming stim window (dashed = not yet real; cleared once the real stim fires).
+  if (predStim) {
+    const x1 = Math.max(0, xForAge(now - predStim.t_on));
+    const x2 = Math.min(w, xForAge(now - predStim.t_off));
+    if (x2 > x1) {
+      ctx.fillStyle = 'rgba(33,150,243,0.05)';
+      ctx.fillRect(x1, 0, x2 - x1, h - 12);
+      ctx.strokeStyle = 'rgba(33,150,243,0.5)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.strokeRect(x1 + 0.5, 0.5, (x2 - x1) - 1, h - 13);
+      ctx.setLineDash([]);
+    }
   }
 
-  // Draw each enabled trace
+  // Time-axis ticks: negative left of 0, positive (future) right of it.
+  ctx.fillStyle = '#444';
+  ctx.font = '9px monospace';
+  for (let tau = -RASTER_PAST; tau <= RASTER_FUTURE; tau += 5) {
+    const x = xForAge(-tau);
+    ctx.fillText(tau === 0 ? '0' : (tau > 0 ? '+' + tau : '' + tau) + 's', x + 1, h - 2);
+  }
+
+  // "Now" play-head at 0.
+  ctx.strokeStyle = '#aaa';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x0, 0);
+  ctx.lineTo(x0, h - 12);
+  ctx.stroke();
+
+  // Predicted pavlovian reward (hollow + dashed) in the future — not conditional/adaptive rewards.
+  if (predReward && predReward.t > now) {
+    const x = xForAge(now - predReward.t);
+    if (x >= 0 && x <= w) {
+      ctx.strokeStyle = '#2196f3';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([2, 2]);
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h - 12); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath(); ctx.arc(x, (h - 12) / 2, 3, 0, 2 * Math.PI); ctx.stroke();
+    }
+  }
+
+  // Draw each enabled trace (real events — licks/rewards/pulses — sit in the past region).
   const traces = [
     {cb: 'cb-lick', events: lickEvents, color: '#4caf50'},
     {cb: 'cb-reward', events: rewardEvents, color: '#2196f3'},
@@ -1392,8 +1459,8 @@ function drawUnifiedRaster() {
     ctx.lineWidth = 1.5;
     for (const evt of tr.events) {
       const age = now - evt.t;
-      if (age > RASTER_WINDOW || age < 0) continue;
-      const x = ((RASTER_WINDOW - age) / RASTER_WINDOW) * w;
+      if (age > RASTER_PAST || age < -RASTER_FUTURE) continue;
+      const x = xForAge(age);
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, h - 12);
@@ -1458,6 +1525,9 @@ function stopClock() {
   phaseStartTime = null;
   currentTrialTotalS = null;
   currentItiTotalS = null;
+  predStim = null;
+  predReward = null;
+  predTrialIdx = null;
   document.getElementById('session-clock').textContent = '00:00:00';
   document.getElementById('trial-clock').textContent = '--:--';
   document.getElementById('iti-clock').textContent = '--:--';
@@ -1530,6 +1600,35 @@ function computeSessionEstimate() {
   const skip = sess.block_delay_skip_first ? 1 : 0;
   total += mid(sess.block_delay) * Math.max(0, nBlocks - skip);
   return total * 1000;
+}
+
+// ── Phase 4: predicted upcoming events (drawn dimmed in the raster's future region) ──
+function _respDelayS() {
+  const rew = (config.task && config.task.reward) || {};
+  return rew.resp_delay_s ?? rew.reward_delay_s ?? 0.6;
+}
+// Go/no-go per the engine's go_rule (stimulus.go_rule): all=go, right=az>0, else az<0.
+function _isGo(az) {
+  const rule = (config.task && config.task.stimulus && config.task.stimulus.go_rule) || 'left';
+  if (rule === 'all') return true;
+  if (rule === 'right') return az > 0;
+  return az < 0;
+}
+// Does trial i deliver a SCHEDULED (pavlovian) reward we can predict? L1 always; L2 on go trials.
+// L2.5 (adaptive: level drawn per trial) and L3 (conditional/lick-gated) are not predictable.
+function _isPavlovian(i) {
+  const t = trialTable[i]; if (!t) return false;
+  const lvl = parseFloat(((config.task && config.task.reward) || {}).level) || 1;
+  if (lvl === 1) return true;
+  if (lvl === 2) return _isGo(t.az);
+  return false;
+}
+// Predict trial i's stim window + (if pavlovian) reward, given its stim onset (leader clock, s).
+function setPrediction(i, stimOnset) {
+  const t = trialTable[i];
+  if (!t) { predStim = null; predReward = null; return; }
+  predStim = {t_on: stimOnset, t_off: stimOnset + (t.duration_s || 0)};
+  predReward = _isPavlovian(i) ? {t: stimOnset + _respDelayS()} : null;
 }
 
 // ── Trial table ──

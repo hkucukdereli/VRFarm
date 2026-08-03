@@ -32,6 +32,7 @@ from shared.config import (load_rig, load_task, save_task,
                            get_leader_pi, get_follower_pis,
                            make_session_id, register_session,
                            get_subject_history, next_session_num)
+from shared.notify import notify
 
 app = Flask(__name__)
 
@@ -55,6 +56,8 @@ _event_queue = queue.Queue(maxsize=2000)
 _udp_thread = None
 _udp_running = False
 _cmd_sock = None
+# Set by the listener on session_end; stop() checks it to avoid a duplicate notify
+_session_end_seen = False
 
 # Trial data for live display
 _trials = []
@@ -786,7 +789,11 @@ def go():
 
     state["phase"] = "running"
     _trials.clear()
+    global _session_end_seen
+    _session_end_seen = False
     _app_logger.info(f"GO session={state['session_id']}")
+    notify(f"▶️ {rig['name']} — session started: "
+           f"{state['session'].get('subject_id', '?')} ({state['session_id']})")
     return jsonify({"ok": True, "steps": steps})
 
 
@@ -832,6 +839,9 @@ def stop():
     _stop_udp_listener()
     _save_session_logs()
     _app_logger.info(f"STOP session={state['session_id']} trials={len(_trials)}")
+    if state["phase"] == "running" and not _session_end_seen:
+        notify(f"⏹️ {rig['name']} — stopped, but no session_end came from the leader "
+               f"({state['session_id']})")
     state["phase"] = "ended"
     return jsonify({"ok": True})
 
@@ -1136,6 +1146,7 @@ def _start_udp_listener(event_port: int):
     _udp_running = True
 
     def listen():
+        global _session_end_seen
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(("0.0.0.0", event_port))
         _disable_udp_conn_reset(sock)
@@ -1144,9 +1155,18 @@ def _start_udp_listener(event_port: int):
             try:
                 data, _ = sock.recvfrom(4096)
                 event = json.loads(data)
+                rig_name = state["rig_config"]["name"]
                 # Track trials
                 if event.get("type") == "trial":
                     _trials.append(event)
+                elif event.get("type") == "global_timeout":
+                    notify(f"⏱️ {rig_name} — GLOBAL TIMEOUT: {event.get('n_dry', '?')} dry "
+                           f"trials, aborting at trial {event.get('trial', '?')} "
+                           f"({state['session_id']})")
+                elif event.get("type") == "session_end":
+                    _session_end_seen = True
+                    notify(f"✅ {rig_name} — session ended: {event.get('n_completed', '?')}"
+                           f"/{event.get('n_planned', '?')} trials ({state['session_id']})")
                 # Push to SSE queue
                 try:
                     _event_queue.put_nowait(event)

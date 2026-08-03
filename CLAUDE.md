@@ -206,6 +206,7 @@ pigpio` (in the `rig` env). pigpiod must be running: it's a service now
 **Running the UIs:**
 ```bash
 conda activate vrfarm
+export VRFARM_SLACK_WEBHOOK="https://hooks.slack.com/services/..."  # optional: Slack notifications (start/end/timeout); unset = off
 python app/app.py          # experiment UI, localhost:5000
 python setup/app.py        # rig setup UI, localhost:4999
 ```

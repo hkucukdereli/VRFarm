@@ -1358,11 +1358,14 @@ function drawUnifiedRaster() {
   if (lickOffset === null) return;
   const now = Date.now() / 1000 - lickOffset;
 
-  // Draw stim windows (blue shading)
+  // Draw stim windows (blue shading). Drawn from stim ONSET using the trial-table duration
+  // (t_off = t_on + duration_s, set on the stim event) — not deferred until the stim is over.
+  // While the stim is still playing, offAge < 0 clamps the right edge to "now", so the box
+  // grows in real time; once it ends it scrolls left at full width.
   for (const stim of stimEvents) {
     const onAge = now - stim.t_on;
     const offAge = now - stim.t_off;
-    if (onAge > RASTER_WINDOW || offAge < 0) continue;
+    if (onAge > RASTER_WINDOW || onAge < 0) continue;   // off-screen left, or not yet begun
     const x1 = Math.max(0, ((RASTER_WINDOW - onAge) / RASTER_WINDOW) * w);
     const x2 = Math.min(w, ((RASTER_WINDOW - offAge) / RASTER_WINDOW) * w);
     ctx.fillStyle = STIM_COLOR;

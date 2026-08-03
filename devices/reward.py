@@ -39,6 +39,12 @@ class Reward(Device):
         self.amount_count = max(1, int(task_params.get("amount_count", 1)))
         self.pulse_gap_ms = float(task_params.get("pulse_gap_ms", self.PULSE_GAP_MS))
         self.reward_type = rig_config.get("reward_type", "water")
+        # Serialize valve access: only one pulse/train may drive the GPIO at a time, so a
+        # concurrent trigger (e.g. a manual REWARD during an auto-reward train) is dropped
+        # rather than racing the output and garbling the waveform. _stopping lets close()
+        # end an in-flight train with the valve shut instead of leaving it energized.
+        self._valve_lock = threading.Lock()
+        self._stopping = False
         self._pi = pigpio.pi()
         if not self._pi.connected:
             raise RuntimeError("pigpiod not running — sudo pigpiod")
@@ -122,17 +128,36 @@ class Reward(Device):
         return float(self.amount_ul)
 
     def _pulse_thread(self, gpio: int, duration_ms: float):
-        self._pi.write(gpio, 1)
-        time.sleep(duration_ms / 1000.0)
-        self._pi.write(gpio, 0)
-
-    def _pulse_train_thread(self, gpio: int, duration_ms: float, n: int):
-        for i in range(n):
-            if i:
-                time.sleep(self.pulse_gap_ms / 1000.0)
+        # Drop if a delivery is already in flight (don't race the GPIO).
+        if not self._valve_lock.acquire(blocking=False):
+            return
+        try:
+            if self._stopping:
+                return
             self._pi.write(gpio, 1)
             time.sleep(duration_ms / 1000.0)
-            self._pi.write(gpio, 0)
+        finally:
+            self._pi.write(gpio, 0)   # always leave the valve closed
+            self._valve_lock.release()
+
+    def _pulse_train_thread(self, gpio: int, duration_ms: float, n: int):
+        # Drop if a delivery is already in flight (don't race the GPIO).
+        if not self._valve_lock.acquire(blocking=False):
+            return
+        try:
+            for i in range(n):
+                if self._stopping:
+                    break
+                if i:
+                    time.sleep(self.pulse_gap_ms / 1000.0)
+                    if self._stopping:
+                        break
+                self._pi.write(gpio, 1)
+                time.sleep(duration_ms / 1000.0)
+                self._pi.write(gpio, 0)
+        finally:
+            self._pi.write(gpio, 0)   # always leave the valve closed
+            self._valve_lock.release()
 
     def check(self) -> dict:
         if not self._pi.connected:
@@ -161,6 +186,14 @@ class Reward(Device):
         }
 
     def close(self):
-        for gpio in self._pins.values():
-            self._pi.write(gpio, 0)
-        self._pi.stop()
+        # Signal any in-flight pulse/train to stop, then wait briefly for it to finish so
+        # we never disconnect pigpio mid-pulse and leave the valve energized.
+        self._stopping = True
+        got = self._valve_lock.acquire(timeout=1.0)
+        try:
+            for gpio in self._pins.values():
+                self._pi.write(gpio, 0)
+            self._pi.stop()
+        finally:
+            if got:
+                self._valve_lock.release()

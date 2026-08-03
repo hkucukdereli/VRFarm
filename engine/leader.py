@@ -33,10 +33,14 @@ import devices.calibration_probe  # noqa: F401
 
 
 class Leader:
-    def __init__(self, rig_config: dict, task_config: dict, session: dict):
+    def __init__(self, rig_config: dict, task_config: dict, session: dict,
+                 skip_save=None):
         self.rig = rig_config
         self.task = task_config
         self.session = session  # {subject_id, date, session_num, notes}
+        # Device names whose per-trial HDF5 datasets to SKIP (user unchecked them at GO). Core
+        # trial outcomes (first_lick_t, trial_outcome, timings) are written directly and unaffected.
+        self._skip_save = set(skip_save or ())
         self.session_id = (f"{session['subject_id']}_{session['date']}"
                            f"_{session['session_num']:03d}")
         self.devices = {}
@@ -318,11 +322,20 @@ class Leader:
         block_size = sess_cfg.get("block_size", 25)
         n_blocks = sess_cfg.get("n_blocks", sess_cfg.get("n_trials", 150) // max(block_size, 1))
         n_trials = n_blocks * block_size
+        # Global timeout: abort the whole session (as if STOP) when the mouse produces no
+        # licks in the selected phases for `gt_n` consecutive trials. 0 trials or no phases
+        # selected = disabled.
+        gt_n = int(sess_cfg.get("global_timeout_trials", 0) or 0)
+        gt_phases = set(sess_cfg.get("global_timeout_phases", []) or [])
+        gt_active = gt_n > 0 and bool(gt_phases)
+        gt_dry_streak = 0
         reward_cfg = self.task.get("reward", {})
         nominal_level = float(reward_cfg.get("level", 1))
         adaptive_state = self.task.get("adaptive", {}).get("initial_state", 0.0)
         adaptive_cfg = self.task.get("adaptive", {})
-        reward_delay = reward_cfg.get("reward_delay_s", 0.6)
+        # resp_delay_s: delay from stim onset before the response window opens (was reward_delay_s;
+        # the fallback keeps any pre-rename experiment yaml working).
+        reward_delay = reward_cfg.get("resp_delay_s", reward_cfg.get("reward_delay_s", 0.6))
         rw_dur = reward_cfg.get("response_window", 1.4)
         pav_delay = reward_cfg.get("pav_delay_s", 0.0)
         visual_dur = self.task.get("stimulus", {}).get("duration_s", 2.0)
@@ -459,6 +472,10 @@ class Leader:
                     break
                 self._trial_ctx["prestim_lick_count"] = len(self._trial_licks)
 
+            # Licks so far this trial all belong to the pre-stim phase (list was reset
+            # at trial setup; pre-stim is the only phase before the stimulus).
+            n_licks_prestim = len(self._trial_licks)
+
             # ── Stimulus ON ──
             self._action_show_stim()
             stim_onset_t = self._trial_ctx["stim_onset_t"]
@@ -477,8 +494,8 @@ class Leader:
             self._trial_ctx["true_onset_t"] = true_onset_t
             self._trial_ctx["display_latency_s"] = true_onset_t - stim_onset_t
 
-            # Reward delay phase (default 0.6s) — anchored to TRUE onset so the
-            # reward window opens reward_delay_s after the mouse actually sees the stim.
+            # Response-delay phase (default 0.6s) — anchored to TRUE onset so the
+            # response window opens resp_delay_s after the mouse actually sees the stim.
             # L1: reward on first lick during this phase
             self._wait_for_event(
                 max(0.0, reward_delay - (time.time() - true_onset_t)),
@@ -517,6 +534,7 @@ class Leader:
                            "t": stim_off_t})
 
             # ── Post-stimulus period ──
+            n_licks_poststim = 0
             poststim_dur = float(poststim_durs[trial_num]) if poststim_durs is not None else 0
             if poststim_dur > 0:
                 # Wait for stim to actually end on Follower
@@ -526,12 +544,14 @@ class Leader:
                 self._publish({"type": "poststim_start", "trial": self.trial_num,
                                "t": max(stim_off_t, time.time()),
                                "duration": poststim_dur})
+                n_before_poststim = len(self._trial_licks)
                 self._run_enforced_wait(
                     poststim_dur, enforce=("poststim" in self._timeout_phases()),
                     lick_sink=self._trial_licks, restart_event="poststim_restart",
                     update_lick_count=True)
                 if not self.running:
                     break
+                n_licks_poststim = len(self._trial_licks) - n_before_poststim
             else:
                 self._wait_for_event(0.5)  # brief pause before outcome when no post-stim
 
@@ -547,13 +567,38 @@ class Leader:
             self._publish_trial_event(stim)
 
             # ── Update adaptive state ──
-            if nominal_level == 2.5 and adaptive_cfg.get("enabled", False):
+            # Level 2.5 IS the adaptive mode (adaptive is implied by 2.5, forced on in
+            # the UI), so step whenever nominal_level==2.5 — matching the unconditional
+            # 2.5 draw at line 403 (previously the `enabled` flag could desync them).
+            if nominal_level == 2.5:
                 licked = len(self._trial_licks) > 0
                 if licked:
                     adaptive_state += adaptive_cfg.get("step_up", 0.2)
                 else:
                     adaptive_state -= adaptive_cfg.get("step_down", 0.2)
                 adaptive_state = max(0.0, min(1.0, adaptive_state))
+
+            # ── Global timeout: abort if the mouse is dry for gt_n consecutive trials ──
+            # A trial is "dry" when it produced no licks in ANY of the selected phases.
+            # (iti_lick_count is the ITI that ran immediately before this trial.)
+            if gt_active:
+                n_licks_stim = len(self._trial_licks) - n_licks_prestim - n_licks_poststim
+                phase_licks = {
+                    "prestim": n_licks_prestim,
+                    "stim": n_licks_stim,
+                    "poststim": n_licks_poststim,
+                    "iti": self._trial_ctx.get("iti_lick_count", 0),
+                }
+                dry = sum(phase_licks[p] for p in gt_phases) == 0
+                gt_dry_streak = gt_dry_streak + 1 if dry else 0
+                if gt_dry_streak >= gt_n:
+                    self._publish({"type": "global_timeout", "trial": trial_num,
+                                   "n_dry": gt_dry_streak,
+                                   "phases": sorted(gt_phases), "t": time.time()})
+                    print(f"Global timeout: no licks in {sorted(gt_phases)} for "
+                          f"{gt_dry_streak} consecutive trials — aborting session.")
+                    self.running = False
+                    break
 
         # ── Trailing ITI ──
         if self.running and self._stims is not None:
@@ -590,6 +635,9 @@ class Leader:
             "task_config": self.task,
             "rig_name": self.rig.get("name", ""),
             "timestamp": float(time.time()),
+            # Data provenance: which devices' detailed data was recorded this session.
+            "saved_devices": sorted(n for n in self.devices if n not in self._skip_save),
+            "skipped_devices": sorted(self._skip_save),
         }
         meta_path = data_dir / "metadata.yaml"
         with open(meta_path, "w") as f:
@@ -631,14 +679,15 @@ class Leader:
     def _publish_trial_event(self, stim: dict):
         ctx = self._trial_ctx
         level = ctx.get("level", 0)
-        is_operant = (level == 3) or (level == 2.5)
+        # ctx["level"] is the RESOLVED level (2.0/3.0, never 2.5), so operant = L3.
+        is_operant = (level == 3)
         rw_t = ctx.get("response_window_t", 0)
 
         # Adaptive state = P(this trial is L3) — only meaningful when the configured
-        # (nominal) level is 2.5 AND adaptive is enabled. For any deterministic level
-        # (L1/L2/L3) the level is certain, so report 1.
-        adaptive_on = (ctx.get("nominal_level") == 2.5
-                       and self.task.get("adaptive", {}).get("enabled", False))
+        # (nominal) level is 2.5 (which IS adaptive). For any deterministic level
+        # (L1/L2/L3) the level is certain, so report 1. This gate matches the draw at
+        # line 403 and the state step, so publish / table / HDF5 all agree.
+        adaptive_on = (ctx.get("nominal_level") == 2.5)
         adaptive_state = ctx.get("adaptive_state", 0.0) if adaptive_on else 1.0
 
         # Reaction time: first lick within response window, relative to rw_t
@@ -704,7 +753,10 @@ class Leader:
         f.create_dataset("block_num", shape=(0,), maxshape=(n,), dtype="i4")
         f.create_dataset("iti_duration_s", shape=(0,), maxshape=(n,), dtype="f4")
         f.create_dataset("stim_az_deg", shape=(0,), maxshape=(n,), dtype="f4")
+        # contrast = raw value in the configured metric (what the UI shows / user set);
+        # corr_contrast = the normalized headroom fraction actually rendered.
         f.create_dataset("contrast", shape=(0,), maxshape=(n,), dtype="f4")
+        f.create_dataset("corr_contrast", shape=(0,), maxshape=(n,), dtype="f4")
         f.create_dataset("trial_outcome", shape=(0,), maxshape=(n,),
                          dtype=h5py.vlen_dtype(str))
         f.create_dataset("level_effective", shape=(0,), maxshape=(n,), dtype="f4")
@@ -715,8 +767,10 @@ class Leader:
             f.create_dataset("_iti_durations_planned",
                              data=self._stims["iti_durations"])
 
-        # Device datasets (generalized)
-        for dev in self.devices.values():
+        # Device datasets (generalized) — skip devices the user chose not to save.
+        for name, dev in self.devices.items():
+            if name in self._skip_save:
+                continue
             for ds_name, ds_spec in dev.hdf5_datasets().items():
                 if isinstance(ds_spec, dict):
                     f.create_dataset(ds_name, shape=(0,), maxshape=(n,), **ds_spec)
@@ -740,7 +794,7 @@ class Leader:
 
         # Core trial data
         for name in ["trial_num", "block_num", "iti_duration_s",
-                      "stim_az_deg", "contrast",
+                      "stim_az_deg", "contrast", "corr_contrast",
                       "trial_outcome", "level_effective", "adaptive_state"]:
             f[name].resize(i + 1, axis=0)
 
@@ -748,13 +802,19 @@ class Leader:
         f["block_num"][i] = int(stim.get("block_num", 0))
         f["iti_duration_s"][i] = self._trial_ctx.get("iti_duration_s", 0)
         f["stim_az_deg"][i] = float(stim.get("stim_az_deg", 0))
-        f["contrast"][i] = float(stim.get("corr_contrast", 0))
+        f["contrast"][i] = float(stim.get("contrast", 0))            # raw metric value
+        f["corr_contrast"][i] = float(stim.get("corr_contrast", 0))  # rendered fraction
         f["trial_outcome"][i] = "hit" if self._trial_licks else "miss"
         f["level_effective"][i] = self._trial_ctx.get("level", 0)
-        f["adaptive_state"][i] = self._trial_ctx.get("adaptive_state", 0)
+        # Same gate as the published event (line 643): P(L3) for adaptive 2.5, else 1 —
+        # so HDF5, the trial event, and the live table all report the same number.
+        f["adaptive_state"][i] = (self._trial_ctx.get("adaptive_state", 0.0)
+                                  if self._trial_ctx.get("nominal_level") == 2.5 else 1.0)
 
-        # Device datasets
-        for dev in self.devices.values():
+        # Device datasets — skip devices the user chose not to save (datasets were never created).
+        for name, dev in self.devices.items():
+            if name in self._skip_save:
+                continue
             for ds_name, value in dev.hdf5_trial_data(self._trial_ctx).items():
                 if ds_name in f:
                     f[ds_name].resize(i + 1, axis=0)
@@ -783,6 +843,8 @@ def main():
     parser.add_argument("--date", required=True)
     parser.add_argument("--session-num", type=int, required=True)
     parser.add_argument("--notes", default="")
+    parser.add_argument("--no-save", default="",
+                        help="comma-separated device names whose HDF5 datasets to skip")
     args = parser.parse_args()
 
     import yaml
@@ -798,7 +860,8 @@ def main():
         "notes": args.notes,
     }
 
-    leader = Leader(rig_config, task_config, session)
+    skip_save = {s.strip() for s in args.no_save.split(",") if s.strip()}
+    leader = Leader(rig_config, task_config, session, skip_save=skip_save)
 
     # Handle SIGTERM gracefully (from pi_api stop)
     def _sigterm(sig, frame):

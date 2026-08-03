@@ -1,0 +1,6 @@
+# Line-ending policy. Files that EXECUTE on the Linux Raspberry Pis must keep LF endings even
+# when the repo is checked out on the Windows controller — bash and systemd choke on CRLF
+# ("$'\r': command not found", "syntax error: unexpected end of file"). This overrides a
+# Windows git core.autocrlf=true, so Deploy scp's LF scripts to the Pis.
+*.sh        text eol=lf
+*.service   text eol=lf

@@ -391,7 +391,8 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
             "block": int(block_num[i]),
             "az": float(stim_az_deg[i]),
             "alt": float(stim_alt_deg[i]),
-            "contrast": float(corr_contrast[i]),
+            "contrast": float(contrast[i]),            # raw metric value (matches UI/HDF5)
+            "corr_contrast": float(corr_contrast[i]),  # rendered fraction
             "duration_s": float(duration_s[i]),
             "prestim_s": float(prestim_durations[i]),
             "poststim_s": float(poststim_durations[i]),

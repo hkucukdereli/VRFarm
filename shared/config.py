@@ -3,7 +3,8 @@ shared/config.py
 
 Config loaders for the two config files:
   - Rig config (YAML): hardware, pins, calibrations, Pi roles
-  - Task config (YAML): paradigm states, stimulus params, device params
+  - Task config (YAML): stimulus / reward / session / adaptive params (no `states`;
+    the trial engine is the imperative loop in engine/leader.py)
 
 Also: subject database (session history tracking).
 """

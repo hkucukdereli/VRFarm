@@ -363,7 +363,6 @@ def deploy():
         code_files = {
             "leader": [
                 "engine/leader.py",
-                "engine/state_machine.py",
                 "shared/stim_generator.py",
                 "shared/config.py",
                 "devices/base.py",
@@ -619,6 +618,10 @@ def go():
     api_port = rig["network"]["api_port"]
     cmd_port = rig["network"]["command_port"]
     session = state["session"]
+
+    # Per-device "save data" choices from the Actions row (default: save everything). Camera unchecked
+    # -> livestream only (no video file); a behavioral device unchecked -> Leader skips its HDF5 datasets.
+    save = (request.get_json(silent=True) or {}).get("save", {})
     rig_filename = Path(state["rig_path"]).name
     task_filename = Path(state["task_path"]).name
 
@@ -686,20 +689,23 @@ def go():
 
     # Start leader engine
     print("[go] Starting leader...")
+    # Behavioral devices the user chose NOT to save -> tell the Leader to skip their HDF5 datasets.
+    skip_save = [d for d in ("lick_sensor", "reward", "photodiode") if not save.get(d, True)]
+    leader_args = [
+        "--rig", f"/home/vruser/rig/rigs/{rig_filename}",
+        "--task", f"/home/vruser/rig/experiments/{task_filename}",
+        "--subject", session["subject_id"],
+        "--date", session["date"],
+        "--session-num", str(int(session["session_num"])),
+        "--notes", session.get("notes", ""),
+    ]
+    if skip_save:
+        leader_args += ["--no-save", ",".join(skip_save)]
+        steps.append(f"Not saving: {', '.join(skip_save)}")
     try:
         r = requests.post(
             f"http://{leader['ip']}:{api_port}/api/start",
-            json={
-                "script": "leader",
-                "args": [
-                    "--rig", f"/home/vruser/rig/rigs/{rig_filename}",
-                    "--task", f"/home/vruser/rig/experiments/{task_filename}",
-                    "--subject", session["subject_id"],
-                    "--date", session["date"],
-                    "--session-num", str(int(session["session_num"])),
-                    "--notes", session.get("notes", ""),
-                ]
-            }, timeout=10)
+            json={"script": "leader", "args": leader_args}, timeout=10)
         res = r.json()
         if res.get("ok"):
             steps.append(f"Leader started on {leader['name']} (pid {res.get('pid', '?')})")
@@ -708,57 +714,64 @@ def go():
     except Exception as e:
         return jsonify({"ok": False, "error": f"Failed to start leader: {e}", "steps": steps})
 
-    # Start camera recording for session (if camera enabled)
+    # Start the camera: RECORD to disk if 'camera' is checked, else PREVIEW-only (livestream, no file).
     cam_cfg = rig.get("devices", {}).get("camera", {})
+    save_camera = bool(save.get("camera", True))
     cam_recording = False
     if cam_cfg.get("enabled", False):
         video_dir = rig["data"].get("video_dir", "/media/vruser/ssd/video")
+        payload = {
+            "resolution": cam_cfg.get("resolution", [1280, 720]),
+            "fps": cam_cfg.get("fps", 50),
+            "bitrate_mbps": cam_cfg.get("bitrate_mbps", 8),
+            "auto_exposure": cam_cfg.get("auto_exposure", True),
+            "exposure_us": cam_cfg.get("exposure_us", 10000),
+            "gain": cam_cfg.get("gain", 1.0),
+            "live_preset": cam_cfg.get("live_preset", "med"),
+        }
+        if save_camera:
+            payload.update({"session_id": state["session_id"], "video_dir": video_dir})  # -> record
+        else:
+            payload["downsample"] = True   # -> preview-only livestream, no file
         for pi in rig["pis"]:
             if "camera" in pi.get("devices", []):
                 try:
-                    # Stop any existing preview
                     requests.post(f"http://{pi['ip']}:{api_port}/api/camera_preview_stop",
                                   json={}, timeout=5)
-                    # Start session recording at full resolution
                     r = requests.post(
                         f"http://{pi['ip']}:{api_port}/api/camera_preview_start",
-                        json={
-                            "session_id": state["session_id"],
-                            "video_dir": video_dir,
-                            "resolution": cam_cfg.get("resolution", [1280, 720]),
-                            "fps": cam_cfg.get("fps", 50),
-                            "bitrate_mbps": cam_cfg.get("bitrate_mbps", 8),
-                            "auto_exposure": cam_cfg.get("auto_exposure", True),
-                            "exposure_us": cam_cfg.get("exposure_us", 10000),
-                            "gain": cam_cfg.get("gain", 1.0),
-                            "live_preset": cam_cfg.get("live_preset", "med"),
-                        }, timeout=10)
-                    # A failed record start (e.g. HTTP 500 when video_dir is unwritable /
-                    # the SSD isn't mounted) may not return JSON — parse defensively.
+                        json=payload, timeout=10)
+                    # A failed start may not return JSON (e.g. HTTP 500) — parse defensively.
                     ok, err = False, f"HTTP {r.status_code}"
                     try:
                         j = r.json()
                         ok, err = bool(j.get("ok")), j.get("error", err)
                     except Exception:
                         pass
-                    if ok:
+                    if ok and save_camera:
                         cam_recording = True
                         steps.append(f"Camera recording on {pi['name']}")
-                    else:
-                        warn = (f"⚠️  CAMERA NOT RECORDING on {pi['name']}: {err} — "
-                                f"session runs WITHOUT video. Check the SSD / "
-                                f"video_dir ({video_dir}).")
+                    elif ok:
+                        steps.append(f"Camera livestream (NOT saved) on {pi['name']}")
+                    elif save_camera:
+                        warn = (f"⚠️  CAMERA NOT RECORDING on {pi['name']}: {err} — session runs "
+                                f"WITHOUT video. Check the SSD / video_dir ({video_dir}).")
                         steps.append(warn)
                         _app_logger.warning(warn)
+                    else:
+                        steps.append(f"⚠️  Camera livestream failed on {pi['name']}: {err}")
                 except Exception as e:
-                    warn = (f"⚠️  CAMERA NOT RECORDING on {pi['name']}: {e} — "
-                            f"session runs WITHOUT video. Check the SSD / video_dir.")
-                    steps.append(warn)
-                    _app_logger.warning(warn)
+                    if save_camera:
+                        warn = (f"⚠️  CAMERA NOT RECORDING on {pi['name']}: {e} — session runs "
+                                f"WITHOUT video. Check the SSD / video_dir.")
+                        steps.append(warn)
+                        _app_logger.warning(warn)
+                    else:
+                        steps.append(f"⚠️  Camera livestream failed on {pi['name']}: {e}")
                 break
-        print(f"[go] Camera recording {'started' if cam_recording else 'FAILED — no video'}")
+        print(f"[go] Camera: {'recording' if cam_recording else ('livestream (not saved)' if not save_camera else 'FAILED — no video')}")
     else:
-        print("[go] Camera not enabled — skipping recording")
+        print("[go] Camera not enabled — skipping")
 
     # Give processes time to initialize and wait for START
     print("[go] Waiting for processes to init...")

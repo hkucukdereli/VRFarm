@@ -17,7 +17,7 @@ from pathlib import Path
 
 import requests
 import yaml
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -437,6 +437,37 @@ def api_proxy():
         return jsonify(r.json())
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/api/camera_feed")
+def camera_feed():
+    """Proxy the Pi's MJPEG camera stream through the setup app (same-origin), so the setup UI
+    preview works from any browser that can reach this app — mirrors app/app.py:camera_feed.
+    The setup app runs threaded=True, so this long-lived stream doesn't block other requests."""
+    if not _rig_config:
+        return "No rig", 400
+    api_port = _rig_config["network"]["api_port"]
+    ip = None
+    for pi in _rig_config["pis"]:
+        if "camera" in pi.get("devices", []):
+            ip = pi["ip"]
+            break
+    if not ip:
+        return "No camera", 400
+
+    def generate():
+        try:
+            r = requests.get(f"http://{ip}:{api_port}/api/camera_stream",
+                             stream=True, timeout=5)
+            for chunk in r.iter_content(chunk_size=4096):
+                yield chunk
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+                Exception):
+            return  # stream ended — silently close
+
+    return Response(generate(),
+                    mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
 @app.route("/api/init_devices", methods=["POST"])
@@ -1095,7 +1126,6 @@ def _get_deploy_files(role: str) -> list[tuple[str, str]]:
     if role == "leader":
         files += [
             ("engine/__init__.py", "engine/__init__.py"),
-            ("engine/state_machine.py", "engine/state_machine.py"),
             ("engine/leader.py", "engine/leader.py"),
         ]
     elif role == "follower":

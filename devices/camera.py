@@ -155,20 +155,22 @@ class Camera(Device):
 
     def start_preview(self, downsample=False):
         """Preview-only live view: configure + start the camera with NO encoder and write no file.
-        downsample=False (setup 'Live') runs at the real recording res/fps — faithful. downsample=True
-        (experiment 'Live') runs at the live preset (smaller res, lower fps) to keep the load light.
-        Freeze-safe either way: with no H264 encoder competing on the stream, capture_array('main')
-        can run without the buffer-starvation stall that happens when preview fights the encoder."""
+        BOTH modes preview from a small YUV420 `lores` stream (its Y-plane taken directly as
+        grayscale) — the SAME light path the recording preview uses. capture_array('main') at full
+        resolution can't be JPEG-encoded in Python fast enough and comes back blank/stalled on the
+        mono IMX296, so the preview never reads `main`. downsample=False (setup 'Live') uses a
+        larger half-res lores for focus/framing at a capped fps; downsample=True (experiment 'Live')
+        uses the live preset."""
         from picamera2 import Picamera2
         if downsample:
             preset = PRESETS.get(self.live_preset, PRESETS["med"])
-            size = self._scaled_size(preset["scale"])
+            lores_size = self._scaled_size(preset["scale"])
             fps = preset["fps"]
             quality = preset["quality"]
         else:
-            size = tuple(self.resolution)
-            fps = int(self.fps)   # faithful: the real capture fps, not throttled
-            quality = 85
+            lores_size = self._scaled_size(0.5)   # setup: half-res preview — detailed but light
+            fps = min(int(self.fps), 25)          # capped: Python JPEG can't sustain 50 fps
+            quality = 80
         self._is_preview = True
         self._video_path = None
         self._tslog_path = None
@@ -178,16 +180,24 @@ class Camera(Device):
             self._cam = Picamera2()
             controls = {"FrameRate": fps, "Saturation": 0.0}
             controls.update(self._exposure_controls())
+            # main (full-res, unread here) + lores YUV420 — mirrors start_recording's stream setup
+            # minus the encoder; the preview captures `lores`, never the heavy `main`.
             cfg = self._cam.create_video_configuration(
-                main={"size": size, "format": "RGB888"},
+                main={"size": tuple(self.resolution), "format": "RGB888"},
+                lores={"size": lores_size, "format": "YUV420"},
                 controls=controls,
             )
             self._cam.configure(cfg)
             self._cam.start()          # no encoder -> nothing is written
-            self._preview_source = "main"
+            self._preview_source = "lores"
             self._preview_fps = fps
             self._preview_quality = quality
-            self._lores_size = None
+            # Use the size libcamera ACTUALLY configured (the ISP may adjust it) so the Y-plane
+            # crop matches and the preview never tears; fall back to the requested size.
+            try:
+                self._lores_size = tuple(self._cam.camera_configuration()["lores"]["size"])
+            except Exception:
+                self._lores_size = lores_size
             self._encoding = False
             self._recording = False
             self._live = True

@@ -148,18 +148,6 @@
         <button class="btn" id="btn-save-task" onclick="saveTask()" disabled style="background:#555">Save</button>
         <button class="btn" id="btn-save-task-as" onclick="saveTaskAs()" disabled style="background:#555">Save As</button>
       </div>
-    </div>
-
-    <div class="card" id="card-session">
-      <h3 style="font-size:11px; color:#888; margin:0 0 6px;">SESSION</h3>
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:0 10px;">
-        <div><label>Subject ID</label><input type="text" id="subject-id" value="HK001"></div>
-        <div><label>Date</label><input type="text" id="session-date" value=""></div>
-      </div>
-      <div style="display:grid; grid-template-columns:1fr 1fr; gap:0 10px;">
-        <div><label>Session #</label><input type="number" id="session-num" value="1" min="1"></div>
-        <div class="notes-wrap"><label>Notes</label><textarea id="session-notes"></textarea></div>
-      </div>
 
       <div id="experiment-subsections" style="display:none;">
         <h3 style="font-size:11px; color:#888; margin:10px 0 6px;">STIMULUS</h3>
@@ -193,15 +181,19 @@
 
         <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">REWARD</h3>
         <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:0 8px;">
-          <div><label>Level</label><select id="p-level" class="task-param"><option value="1">1</option><option value="2">2</option><option value="2.5">2.5</option><option value="3">3</option></select></div>
+          <div><label>Level</label><select id="p-level" class="task-param" onchange="onLevelChange()" title="Level 2.5 is the adaptive mode — it forces Adaptive on."><option value="1">1</option><option value="2">2</option><option value="2.5">2.5</option><option value="3">3</option></select></div>
           <div><label>Amount</label><select id="p-amount_mode" class="task-param" onchange="updateAmountLabel()" title="Volume: pulse duration from the reward calibration. Count: N repeats of the base pulse (first calibration row in the setup UI)."><option value="volume">Volume</option><option value="count">Count</option></select></div>
           <div><label id="amount-value-label">Volume (uL)</label><input type="number" id="p-amount_value" step="0.5" min="0" class="task-param"></div>
           <div><label id="gap-label">Gap (ms)</label><input type="number" id="p-pulse_gap_ms" step="10" min="0" class="task-param" title="Off-time between pulses in Count mode, so the valve fully closes between pulses. Only used in Count mode."></div>
         </div>
-        <div style="display:grid; grid-template-columns:repeat(5,1fr) auto; gap:0 8px; margin-top:4px; align-items:end;">
-          <div><label>Resp delay (s)</label><input type="number" id="p-reward_delay_s" step="0.1" min="0" class="task-param" title="Time to delay the response-window start, measured from stim onset"></div>
+        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:0 8px; margin-top:4px;">
+          <div><label>Resp delay (s)</label><input type="text" inputmode="decimal" id="p-resp_delay_s" class="task-param" title="Time to delay the response-window start, measured from stim onset (accepts 0.6 or 0,6)"></div>
           <div><label>Resp win (s)</label><input type="number" id="p-response_window" step="0.1" min="0" class="task-param" title="Response window duration, after the Resp delay"></div>
           <div><label>Pav delay (s)</label><input type="number" id="p-pav_delay_s" step="0.1" min="0" class="task-param" title="On conditional (operant) trials only: time from response-window start to wait for a lick before switching to a Pavlovian (free) reward. 0 = disabled (pure operant, no rescue)."></div>
+        </div>
+
+        <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">TIMEOUT</h3>
+        <div style="display:grid; grid-template-columns:1fr 1fr auto; gap:0 8px; align-items:end;">
           <div><label>Type</label><select id="p-timeout_rule" class="task-param" title="Over-lick rule applied to the checked phases: none, rate (restart the phase if lick rate exceeds Max lick/s), or count (restart if total phase licks exceed budget)."><option value="none">None</option><option value="rate">Rate</option><option value="count">Count</option></select></div>
           <div><label>Max lick/s</label><input type="number" id="p-max_lick_rate" step="0.05" min="0" class="task-param" title="Lick-rate threshold for the Type rule"></div>
           <div><label title="Which trial phases the Type/Max-lick timeout rule enforces">Timeout on</label>
@@ -252,7 +244,30 @@
           <div><label>Step up</label><input type="number" id="p-adaptive_step_up" step="0.05" min="0" class="task-param"></div>
           <div><label>Step down</label><input type="number" id="p-adaptive_step_down" step="0.05" min="0" class="task-param"></div>
         </div>
+
+        <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">GLOBAL TIMEOUT</h3>
+        <div style="display:grid; grid-template-columns:1fr auto; gap:0 8px; align-items:end;">
+          <div><label title="Abort the session (as if STOP) when the mouse produces no licks in the checked phases for this many consecutive trials. 0 = off.">Num of trials</label><input type="number" id="p-global_timeout_trials" min="0" step="1" class="task-param" title="0 disables the global timeout"></div>
+          <div><label title="A trial counts toward the abort streak when it has no licks in any of the checked phases">Abort if no licks in</label>
+            <div style="display:flex; gap:8px; font-size:11px; padding-bottom:5px; white-space:nowrap;">
+              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-gt_prestim" class="task-param">Pre-stim</label>
+              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-gt_stim" class="task-param">Stim</label>
+              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-gt_poststim" class="task-param">Post-stim</label>
+              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-gt_iti" class="task-param">ITI</label>
+            </div>
+          </div>
+        </div>
       </div>
+    </div>
+
+    <div class="card" id="card-session">
+      <h3 style="font-size:11px; color:#888; margin:0 0 6px;">SESSION</h3>
+      <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0 10px;">
+        <div><label>Subject ID</label><input type="text" id="subject-id" value="" placeholder="subject id"></div>
+        <div><label>Date</label><input type="text" id="session-date" value=""></div>
+        <div><label>Session #</label><input type="number" id="session-num" value="1" min="1"></div>
+      </div>
+      <div><label>Notes</label><textarea id="session-notes" style="height:56px;"></textarea></div>
     </div>
 
   </div>
@@ -291,12 +306,18 @@
         <button class="btn btn-green" id="btn-deploy" onclick="deployExperiment()" disabled>Deploy</button>
         <button class="btn btn-green" id="btn-go" onclick="startSession()" disabled>GO</button>
         <button class="btn btn-red" id="btn-stop" onclick="stopSession()" disabled>STOP</button>
+        <button class="btn btn-sm btn-blue" id="btn-live" onclick="toggleLive()" disabled>Live</button>
+      </div>
+      <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:8px;">
         <button class="btn btn-teal" id="btn-transfer" onclick="transferData()" disabled>Transfer</button>
         <input type="text" id="transfer-dest" placeholder="transfer destination (controller default)"
                title="Destination folder for transferred data. Blank = controller default ($VRFARM_DATA_DIR or ~/VRFarm/data)."
                style="flex:1; min-width:160px; padding:4px 6px; background:#2a2a2a; color:#ddd; border:1px solid #444; border-radius:3px;">
         <button class="btn btn-sm btn-blue" id="btn-browse-dest" onclick="browseDest()">Browse…</button>
-        <button class="btn btn-sm btn-blue" id="btn-live" onclick="toggleLive()" disabled>Live</button>
+        <span style="display:inline-flex; align-items:center; gap:8px; font-size:11px; color:#888; white-space:nowrap;">
+          <span title="Which device data to record this session. Unchecked = not saved (Camera still livestreams).">Save:</span>
+          <span id="save-devices" style="display:inline-flex; gap:8px;"></span>
+        </span>
       </div>
     </div>
 
@@ -383,8 +404,13 @@ let trialTable = [];  // populated from /api/trial_table after deploy
 const RASTER_WINDOW = 30;  // seconds
 const STIM_COLOR = 'rgba(33, 150, 243, 0.15)';  // blue translucent
 
-document.getElementById('session-date').value =
-  new Date().toISOString().slice(0,10).replace(/-/g, '');
+// Today's date as yyyymmdd (LOCAL, not UTC — avoids the evening off-by-one). Set once at load;
+// stays editable and is not reset when an experiment is loaded.
+(function () {
+  const d = new Date();
+  document.getElementById('session-date').value =
+    `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+})();
 
 // ── Config loading ──
 
@@ -410,6 +436,7 @@ async function loadRig() {
       _destField.value = data.data_dir;
     }
     updateDevicePanels();
+    renderSaveDevices();
     buildPiStatus();
     for (const [name, res] of Object.entries(data.pi_results)) {
       const dot = document.getElementById('dot-' + name);
@@ -444,6 +471,17 @@ function _parseDur(id) {
   const s = document.getElementById(id).value.trim();
   try { const v = JSON.parse(s); return v; } catch(e) { return parseFloat(s) || 0; }
 }
+// Robust numeric read for decimal fields. Accepts comma OR period decimals (so a
+// locale like de-AT that types "0,37" is read correctly) and, when the field is blank
+// or unparseable, returns `fallback` — NEVER a hardcoded default. This is why saving no
+// longer silently reverts a value (e.g. Resp delay) to a constant: an empty/invalid read
+// preserves the last stored value instead of clobbering it.
+function _numField(id, fallback) {
+  const raw = String(document.getElementById(id).value).trim().replace(',', '.');
+  if (raw === '') return fallback;
+  const v = parseFloat(raw);
+  return isFinite(v) ? v : fallback;
+}
 
 async function loadTask() {
   _lockUI();
@@ -458,6 +496,8 @@ async function loadTask() {
     });
     const data = await r.json();
     if (data.error) { log('Error: ' + data.error); return; }
+    // Experiments are editable without a rig, so config may still be null here.
+    config = config || { rig: null, task: null };
     config.task = data.task;
     populateTaskFields(data.task);
     document.getElementById('experiment-subsections').style.display = '';
@@ -497,7 +537,7 @@ function populateTaskFields(t) {
       ? (rew.amount_count ?? 1) : (rew.amount_ul ?? '');
   document.getElementById('p-pulse_gap_ms').value = rew.pulse_gap_ms ?? 150;
   updateAmountLabel();
-  document.getElementById('p-reward_delay_s').value = rew.reward_delay_s ?? '';
+  document.getElementById('p-resp_delay_s').value = rew.resp_delay_s ?? rew.reward_delay_s ?? '';
   document.getElementById('p-response_window').value = rew.response_window ?? 1.4;
   document.getElementById('p-pav_delay_s').value = rew.pav_delay_s ?? 0;
   document.getElementById('p-timeout_rule').value = rew.timeout_rule || 'none';
@@ -519,6 +559,12 @@ function populateTaskFields(t) {
   document.getElementById('p-global_delay').value = _fmtDur(sess.global_delay);
   document.getElementById('p-block_delay').value = _fmtDur(sess.block_delay);
   document.getElementById('p-block_delay_skip_first').checked = !!sess.block_delay_skip_first;
+  const gtphases = sess.global_timeout_phases || [];
+  document.getElementById('p-global_timeout_trials').value = sess.global_timeout_trials ?? 0;
+  document.getElementById('p-gt_prestim').checked = gtphases.includes('prestim');
+  document.getElementById('p-gt_stim').checked = gtphases.includes('stim');
+  document.getElementById('p-gt_poststim').checked = gtphases.includes('poststim');
+  document.getElementById('p-gt_iti').checked = gtphases.includes('iti');
   _updateNTrials();
 
   // Adaptive
@@ -526,6 +572,7 @@ function populateTaskFields(t) {
   document.getElementById('p-adaptive_initial').value = adp.initial_state ?? 0;
   document.getElementById('p-adaptive_step_up').value = adp.step_up ?? 0.2;
   document.getElementById('p-adaptive_step_down').value = adp.step_down ?? 0.2;
+  onLevelChange();   // L2.5 forces Adaptive on/locked
 }
 
 function collectTaskFields() {
@@ -543,13 +590,13 @@ function collectTaskFields() {
   let blockSeq;
   try { blockSeq = JSON.parse(document.getElementById('p-block_sequence').value); } catch(e) { blockSeq = [0]; }
 
-  return {
+  const _fields = {
     stimulus: {
       background_gray: parseFloat(document.getElementById('p-background_gray').value) || 0,
       size_deg: parseFloat(document.getElementById('p-size_deg').value) || 8,
       shape: document.getElementById('p-shape').value || 'square',
       duration_s: parseFloat(document.getElementById('p-duration_s').value) || 2,
-      altitude_deg: parseFloat(document.getElementById('p-altitude_deg').value) || 10,
+      altitude_deg: _numField('p-altitude_deg', 10),
       go_rule: document.getElementById('p-go_rule').value,
       contrast: { values: contrastValues, proportions: contrastProportions },
       photodiode_sync_enabled: document.getElementById('p-photodiode_sync_enabled').checked,
@@ -565,10 +612,12 @@ function collectTaskFields() {
       amount_count: document.getElementById('p-amount_mode').value === 'count'
           ? (parseInt(document.getElementById('p-amount_value').value) || 1)
           : (((config.task || {}).reward || {}).amount_count ?? 1),
-      pulse_gap_ms: parseFloat(document.getElementById('p-pulse_gap_ms').value) || 150,
+      pulse_gap_ms: _numField('p-pulse_gap_ms', 150),
       level: parseFloat(document.getElementById('p-level').value) || 1,
-      reward_delay_s: parseFloat(document.getElementById('p-reward_delay_s').value) || 0.6,
-      response_window: parseFloat(document.getElementById('p-response_window').value) || 1.4,
+      resp_delay_s: _numField('p-resp_delay_s',
+          (((config || {}).task || {}).reward || {}).resp_delay_s
+          ?? (((config || {}).task || {}).reward || {}).reward_delay_s ?? 0.6),
+      response_window: _numField('p-response_window', 1.4),
       // Pav delay 0 = disabled; preserve an explicit 0 (don't fall back to a default)
       pav_delay_s: (function(){const v = parseFloat(document.getElementById('p-pav_delay_s').value); return isFinite(v) ? v : 0;})(),
       timeout_rule: document.getElementById('p-timeout_rule').value,
@@ -587,14 +636,24 @@ function collectTaskFields() {
       block_delay: _parseDur('p-block_delay'),
       block_delay_skip_first: document.getElementById('p-block_delay_skip_first').checked,
       randomize_blocks: document.getElementById('p-randomize_blocks').checked,
+      global_timeout_trials: parseInt(document.getElementById('p-global_timeout_trials').value) || 0,
+      global_timeout_phases: ['prestim', 'stim', 'poststim', 'iti'].filter(
+          p => document.getElementById('p-gt_' + p).checked),
     },
     adaptive: {
-      enabled: document.getElementById('p-adaptive_enabled').checked,
+      // L2.5 IS the adaptive mode -> always enabled, independent of the (disabled) checkbox
+      enabled: (parseFloat(document.getElementById('p-level').value) === 2.5)
+               || document.getElementById('p-adaptive_enabled').checked,
       initial_state: parseFloat(document.getElementById('p-adaptive_initial').value) || 0,
-      step_up: parseFloat(document.getElementById('p-adaptive_step_up').value) || 0.2,
-      step_down: parseFloat(document.getElementById('p-adaptive_step_down').value) || 0.2,
+      step_up: _numField('p-adaptive_step_up', 0.2),
+      step_down: _numField('p-adaptive_step_down', 0.2),
     },
   };
+  // Keep the JS-side task copy current so nothing goes stale between saves — specifically the
+  // Amount dual-key (volume/count), whose inactive value is read back from config.task. Every
+  // other field is read straight from the DOM, so this makes the whole form save losslessly.
+  if (config) config.task = Object.assign(config.task || {}, _fields);
+  return _fields;
 }
 
 async function saveTask() {
@@ -665,6 +724,24 @@ async function updateSession() {
   return (await r.json()).session_id;
 }
 
+// ── Per-device "save data" checkboxes (Actions row 2) ──
+// One checkbox per data-producing device present+enabled in the rig; default checked (= save all,
+// current behavior). Read at GO by startSession(). Camera unchecked = livestream but no video file;
+// a behavioral device unchecked = its detailed HDF5 datasets are skipped (core outcomes still save).
+function renderSaveDevices() {
+  const host = document.getElementById('save-devices');
+  if (!host) return;
+  const devs = (config && config.rig && config.rig.devices) || {};
+  const DATA_DEVICES = [['camera', 'Camera'], ['lick_sensor', 'Lick'],
+                        ['reward', 'Reward'], ['photodiode', 'Photodiode']];
+  host.innerHTML = DATA_DEVICES
+    .filter(([name]) => devs[name] && devs[name].enabled)
+    .map(([name, label]) =>
+      `<label style="display:inline-flex; align-items:center; gap:3px; color:#bbb; cursor:pointer;">` +
+      `<input type="checkbox" class="save-dev" data-dev="${name}" checked>${label}</label>`)
+    .join('');
+}
+
 // ── Device panel visibility ──
 
 function updateDevicePanels() {
@@ -726,6 +803,15 @@ function updateContrastHint() {
 
 // "Correct" button: clamp entered contrast(s) to the achievable uniform ceiling (server-computed
 // from the geometry's per-azimuth luminance falloff), and write the corrected values back.
+function onLevelChange() {
+  // Level 2.5 IS the adaptive mode: force the Adaptive checkbox on and lock it so it
+  // can't be turned off; any other level unlocks it (restores manual control).
+  const isL25 = parseFloat(document.getElementById('p-level').value) === 2.5;
+  const cb = document.getElementById('p-adaptive_enabled');
+  if (isL25) { cb.checked = true; cb.disabled = true; }
+  else { cb.disabled = false; }
+}
+
 function updateAmountLabel() {
   const mode = document.getElementById('p-amount_mode').value;
   const lbl = document.getElementById('amount-value-label');
@@ -856,8 +942,15 @@ async function startSession() {
   currentStimAz = null;
   drawStimScene();
 
+  // Per-device save choices (Actions row 2). Unchecked -> not recorded (camera still livestreams).
+  const save = {};
+  document.querySelectorAll('.save-dev').forEach(cb => { save[cb.dataset.dev] = cb.checked; });
+
   try {
-    const r = await fetch('/api/go', {method: 'POST'});
+    const r = await fetch('/api/go', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({save})
+    });
     const data = await r.json();
     (data.steps || []).forEach(s => log('  ' + s));
     if (data.ok) {
@@ -978,7 +1071,7 @@ function handleEvent(evt) {
         showStimThumb(evt.trial, evt.az);
       } else {
         // Stim off from leader — don't override t_off: leader fires this after
-        // reward_delay_s but the Follower renders for the full duration_s.
+        // resp_delay_s but the Follower renders for the full duration_s.
         // The trialTable-based t_off set on stim ON is the ground truth.
         clearStimThumb();
       }
@@ -1024,6 +1117,9 @@ function handleEvent(evt) {
     case 'iti_restart':
       itiStartTime = Date.now();
       log('ITI restarted (excess licking)');
+      break;
+    case 'global_timeout':
+      log(`Global timeout: no licks in ${(evt.phases || []).join('/')} for ${evt.n_dry} trials — aborting.`);
       break;
     case 'session_end':
       document.getElementById('btn-go').textContent = 'GO';  // clear any leftover countdown

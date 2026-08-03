@@ -187,7 +187,7 @@
           <div><label id="gap-label">Gap (ms)</label><input type="number" id="p-pulse_gap_ms" step="10" min="0" class="task-param" title="Off-time between pulses in Count mode, so the valve fully closes between pulses. Only used in Count mode."></div>
         </div>
         <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:0 8px; margin-top:4px;">
-          <div><label>Resp delay (s)</label><input type="number" id="p-resp_delay_s" step="0.1" min="0" class="task-param" title="Time to delay the response-window start, measured from stim onset"></div>
+          <div><label>Resp delay (s)</label><input type="text" inputmode="decimal" id="p-resp_delay_s" class="task-param" title="Time to delay the response-window start, measured from stim onset (accepts 0.6 or 0,6)"></div>
           <div><label>Resp win (s)</label><input type="number" id="p-response_window" step="0.1" min="0" class="task-param" title="Response window duration, after the Resp delay"></div>
           <div><label>Pav delay (s)</label><input type="number" id="p-pav_delay_s" step="0.1" min="0" class="task-param" title="On conditional (operant) trials only: time from response-window start to wait for a lick before switching to a Pavlovian (free) reward. 0 = disabled (pure operant, no rescue)."></div>
         </div>
@@ -471,6 +471,17 @@ function _parseDur(id) {
   const s = document.getElementById(id).value.trim();
   try { const v = JSON.parse(s); return v; } catch(e) { return parseFloat(s) || 0; }
 }
+// Robust numeric read for decimal fields. Accepts comma OR period decimals (so a
+// locale like de-AT that types "0,37" is read correctly) and, when the field is blank
+// or unparseable, returns `fallback` — NEVER a hardcoded default. This is why saving no
+// longer silently reverts a value (e.g. Resp delay) to a constant: an empty/invalid read
+// preserves the last stored value instead of clobbering it.
+function _numField(id, fallback) {
+  const raw = String(document.getElementById(id).value).trim().replace(',', '.');
+  if (raw === '') return fallback;
+  const v = parseFloat(raw);
+  return isFinite(v) ? v : fallback;
+}
 
 async function loadTask() {
   _lockUI();
@@ -603,7 +614,9 @@ function collectTaskFields() {
           : (((config.task || {}).reward || {}).amount_count ?? 1),
       pulse_gap_ms: parseFloat(document.getElementById('p-pulse_gap_ms').value) || 150,
       level: parseFloat(document.getElementById('p-level').value) || 1,
-      resp_delay_s: parseFloat(document.getElementById('p-resp_delay_s').value) || 0.6,
+      resp_delay_s: _numField('p-resp_delay_s',
+          (((config || {}).task || {}).reward || {}).resp_delay_s
+          ?? (((config || {}).task || {}).reward || {}).reward_delay_s ?? 0.6),
       response_window: parseFloat(document.getElementById('p-response_window').value) || 1.4,
       // Pav delay 0 = disabled; preserve an explicit 0 (don't fall back to a default)
       pav_delay_s: (function(){const v = parseFloat(document.getElementById('p-pav_delay_s').value); return isFinite(v) ? v : 0;})(),

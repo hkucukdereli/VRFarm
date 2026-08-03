@@ -354,6 +354,9 @@
           <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#ff5722;">
             <input type="checkbox" id="cb-photodiode" checked> Photodiode
           </label>
+          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#ab47bc;">
+            <input type="checkbox" id="cb-timeout" checked> Timeouts
+          </label>
         </div>
         <span class="info" id="raster-info"></span>
       </div>
@@ -406,6 +409,7 @@ let lickEvents = [], lickOffset = null;  // lickOffset is the shared Pi→browse
 let _offsetSamples = [];  // collect first N offsets, use median
 let photodiodeEvents = [];
 let rewardEvents = [];
+let timeoutEvents = [];  // over-lick phase restarts (iti/prestim/poststim) — purple markers
 let rasterLive = false, rasterAnimFrame = null;
 
 // Stim events from SSE
@@ -943,7 +947,7 @@ async function startSession() {
   const btn = document.getElementById('btn-go');
   btn.textContent = 'Starting...';
   log('Starting session...');
-  lickEvents = []; photodiodeEvents = []; rewardEvents = []; stimEvents = [];
+  lickEvents = []; photodiodeEvents = []; rewardEvents = []; stimEvents = []; timeoutEvents = [];
   lickOffset = null;
   currentTrialNum = 0;
   sessionStartTime = null;
@@ -1160,6 +1164,7 @@ function handleEvent(evt) {
       if (phaseStartTime) timeoutExtraMs += Date.now() - phaseStartTime;  // wasted time repeats
       phaseStartTime = Date.now();
       itiStartTime = Date.now();
+      if (rasterLive) { timeoutEvents.push({t: evt.t}); updateRasterInfo(); }
       // ITI restarted → push the predicted onset later (uses the ITI event's leader-clock time).
       if (predTrialIdx != null)
         setPrediction(predTrialIdx, evt.t + (currentItiTotalS || 0) + ((trialTable[predTrialIdx] || {}).prestim_s || 0));
@@ -1169,6 +1174,7 @@ function handleEvent(evt) {
     case 'poststim_restart':
       if (phaseStartTime) timeoutExtraMs += Date.now() - phaseStartTime;
       phaseStartTime = Date.now();
+      if (rasterLive) { timeoutEvents.push({t: evt.t}); updateRasterInfo(); }
       log((evt.type === 'prestim_restart' ? 'Pre-stim' : 'Post-stim') + ' restarted (excess licking)');
       break;
     case 'global_timeout':
@@ -1334,7 +1340,7 @@ function toggleLive() {
 
 async function startLive() {
   // Clear all event arrays — only show data from now on
-  lickEvents = []; rewardEvents = []; photodiodeEvents = []; stimEvents = [];
+  lickEvents = []; rewardEvents = []; photodiodeEvents = []; stimEvents = []; timeoutEvents = [];
   lickOffset = null;
   _offsetSamples = [];
   // Flush server-side event queue so we only see new events
@@ -1452,6 +1458,7 @@ function drawUnifiedRaster() {
     {cb: 'cb-lick', events: lickEvents, color: '#4caf50'},
     {cb: 'cb-reward', events: rewardEvents, color: '#2196f3'},
     {cb: 'cb-photodiode', events: photodiodeEvents, color: '#ff5722'},
+    {cb: 'cb-timeout', events: timeoutEvents, color: '#ab47bc'},   // over-lick restarts (purple)
   ];
   for (const tr of traces) {
     if (!document.getElementById(tr.cb).checked) continue;
@@ -1489,6 +1496,7 @@ function updateRasterInfo() {
   if (lickEvents.length) parts.push(lickEvents.length + ' licks');
   if (rewardEvents.length) parts.push(rewardEvents.length + ' rewards');
   if (photodiodeEvents.length) parts.push(photodiodeEvents.length + ' pulses');
+  if (timeoutEvents.length) parts.push(timeoutEvents.length + ' timeouts');
   const el = document.getElementById('raster-info');
   if (el) el.textContent = parts.join(' | ');
 }

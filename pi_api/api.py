@@ -150,6 +150,31 @@ def list_files(session_id):
     return jsonify({"files": files})
 
 
+@app.route("/api/consolidate/<session_id>", methods=["POST"])
+def consolidate(session_id):
+    """Leader only. Fold the session's sidecars (metadata.yaml, stimuli.npz, trials.yaml,
+    frame_timestamps.npy) into <session_id>.h5 and delete them, leaving one self-contained
+    .h5 (+ video.h264) to transfer. Idempotent."""
+    data = request.get_json(silent=True) or {}
+    subj, subj_date, _ = _parse_session_id(session_id)
+    session_dir = (DATA_DIR / subj / subj_date / session_id) if subj else (DATA_DIR / session_id)
+    vd = (data.get("video_dir") or "").strip() or "/media/vruser/ssd/video"
+    video_session_dir = (Path(vd) / subj / subj_date / session_id) if subj else (Path(vd) / session_id)
+    try:
+        if str(RIG_DIR) not in sys.path:
+            sys.path.insert(0, str(RIG_DIR))
+        from shared.consolidate import consolidate_session
+        res = consolidate_session(
+            session_dir, video_session_dir if video_session_dir.exists() else None)
+        return jsonify(res)
+    except FileNotFoundError as e:
+        return jsonify({"ok": False, "error": str(e)}), 404
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/start", methods=["POST"])
 def start():
     """Start leader.py or follower.py as a subprocess."""

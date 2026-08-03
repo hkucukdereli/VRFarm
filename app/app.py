@@ -894,6 +894,25 @@ def transfer():
     except OSError as e:
         return jsonify({"ok": False, "error": f"Cannot create destination {dest}: {e}"})
 
+    # Build the final self-contained .h5 on the Leader first: merge the sidecars
+    # (metadata.yaml, stimuli.npz, trials.yaml, frame_timestamps.npy) into it and delete them,
+    # so only <session>.h5 + video.h264 remain to pull.
+    steps = []
+    leader = next((p for p in rig["pis"] if p.get("role") == "leader"), rig["pis"][0])
+    try:
+        cj = requests.post(
+            f"http://{leader['ip']}:{api_port}/api/consolidate/{session_id}",
+            json={"video_dir": rig.get("data", {}).get("video_dir", "")}, timeout=120).json()
+        if cj.get("ok") and cj.get("skipped"):
+            steps.append(f"Consolidate: {cj['skipped']}")
+        elif cj.get("ok"):
+            got = ', '.join(k for k, v in cj.get("merged", {}).items() if v) or "none"
+            steps.append(f"Consolidated .h5 (merged {got}; removed {', '.join(cj.get('removed', [])) or 'none'})")
+        else:
+            steps.append(f"⚠️  Consolidate failed: {cj.get('error', '?')}")
+    except Exception as e:
+        steps.append(f"⚠️  Consolidate error (transferring raw files): {e}")
+
     transferred = []
     for pi in rig["pis"]:
         try:
@@ -934,7 +953,7 @@ def transfer():
 
     _app_logger.info(f"TRANSFER session={session_id} files={len(transferred)}")
     state["phase"] = "setup"
-    return jsonify({"ok": True, "files": transferred})
+    return jsonify({"ok": True, "files": steps + transferred})
 
 
 @app.route("/api/state")

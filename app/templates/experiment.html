@@ -596,7 +596,7 @@ function collectTaskFields() {
       size_deg: parseFloat(document.getElementById('p-size_deg').value) || 8,
       shape: document.getElementById('p-shape').value || 'square',
       duration_s: parseFloat(document.getElementById('p-duration_s').value) || 2,
-      altitude_deg: parseFloat(document.getElementById('p-altitude_deg').value) || 10,
+      altitude_deg: _numField('p-altitude_deg', 10),
       go_rule: document.getElementById('p-go_rule').value,
       contrast: { values: contrastValues, proportions: contrastProportions },
       photodiode_sync_enabled: document.getElementById('p-photodiode_sync_enabled').checked,
@@ -612,12 +612,12 @@ function collectTaskFields() {
       amount_count: document.getElementById('p-amount_mode').value === 'count'
           ? (parseInt(document.getElementById('p-amount_value').value) || 1)
           : (((config.task || {}).reward || {}).amount_count ?? 1),
-      pulse_gap_ms: parseFloat(document.getElementById('p-pulse_gap_ms').value) || 150,
+      pulse_gap_ms: _numField('p-pulse_gap_ms', 150),
       level: parseFloat(document.getElementById('p-level').value) || 1,
       resp_delay_s: _numField('p-resp_delay_s',
           (((config || {}).task || {}).reward || {}).resp_delay_s
           ?? (((config || {}).task || {}).reward || {}).reward_delay_s ?? 0.6),
-      response_window: parseFloat(document.getElementById('p-response_window').value) || 1.4,
+      response_window: _numField('p-response_window', 1.4),
       // Pav delay 0 = disabled; preserve an explicit 0 (don't fall back to a default)
       pav_delay_s: (function(){const v = parseFloat(document.getElementById('p-pav_delay_s').value); return isFinite(v) ? v : 0;})(),
       timeout_rule: document.getElementById('p-timeout_rule').value,
@@ -645,8 +645,8 @@ function collectTaskFields() {
       enabled: (parseFloat(document.getElementById('p-level').value) === 2.5)
                || document.getElementById('p-adaptive_enabled').checked,
       initial_state: parseFloat(document.getElementById('p-adaptive_initial').value) || 0,
-      step_up: parseFloat(document.getElementById('p-adaptive_step_up').value) || 0.2,
-      step_down: parseFloat(document.getElementById('p-adaptive_step_down').value) || 0.2,
+      step_up: _numField('p-adaptive_step_up', 0.2),
+      step_down: _numField('p-adaptive_step_down', 0.2),
     },
   };
   // Keep the JS-side task copy current so nothing goes stale between saves — specifically the

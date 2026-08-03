@@ -344,23 +344,43 @@
     <!-- Unified Raster -->
     <div class="raster-panel" id="panel-raster">
       <div class="raster-header">
-        <div style="display:flex; align-items:center; gap:12px;">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <h3 style="margin:0; font-size:11px; letter-spacing:0.5px; color:#aaa;">EVENTS</h3>
           <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#4caf50;">
             <input type="checkbox" id="cb-lick" checked> Licks
           </label>
           <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#2196f3;">
             <input type="checkbox" id="cb-reward" checked> Rewards
           </label>
-          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#ff5722;">
-            <input type="checkbox" id="cb-photodiode" checked> Photodiode
-          </label>
           <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#ab47bc;">
             <input type="checkbox" id="cb-timeout" checked> Timeouts
+          </label>
+          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#2196f3;">
+            <input type="checkbox" id="cb-stim-events" checked> Stim
+          </label>
+          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#ffc107;">
+            <input type="checkbox" id="cb-respwin" checked> Resp win
           </label>
         </div>
         <span class="info" id="raster-info"></span>
       </div>
       <canvas class="raster-canvas" id="canvas-raster" style="height:40px;"></canvas>
+    </div>
+
+    <div class="raster-panel" id="panel-raster-sync">
+      <div class="raster-header">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <h3 style="margin:0; font-size:11px; letter-spacing:0.5px; color:#aaa;">SYNC</h3>
+          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#ff5722;">
+            <input type="checkbox" id="cb-photodiode" checked> Photodiode
+          </label>
+          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#2196f3;">
+            <input type="checkbox" id="cb-stim-sync" checked> Stim
+          </label>
+        </div>
+        <span class="info" id="raster-info-sync"></span>
+      </div>
+      <canvas class="raster-canvas" id="canvas-raster-sync" style="height:40px;"></canvas>
     </div>
 
     <!-- Trial table -->
@@ -418,7 +438,8 @@ let trialTable = [];  // populated from /api/trial_table after deploy
 const RASTER_PAST = 10;    // seconds of history shown left of the "now" play-head
 const RASTER_FUTURE = 20;  // seconds of future shown right of it (scheduled stim windows, etc.)
 const RASTER_WINDOW = RASTER_PAST + RASTER_FUTURE;  // total span (s)
-const STIM_COLOR = 'rgba(33, 150, 243, 0.15)';  // blue translucent
+const STIM_COLOR = 'rgba(33, 150, 243, 0.15)';  // blue translucent (stim window, full height)
+const RESPWIN_COLOR = 'rgba(255, 193, 7, 0.28)';  // amber (response window, top 1/3)
 
 // Today's date as yyyymmdd (LOCAL, not UTC — avoids the evening off-by-one). Set once at load;
 // stays editable and is not reset when an experiment is loaded.
@@ -1092,7 +1113,7 @@ function handleEvent(evt) {
     case 'stim':
       if (evt.on) {
         const dur = trialTable[evt.trial] ? trialTable[evt.trial].duration_s : 2.0;
-        if (rasterLive) stimEvents.push({trial: evt.trial, t_on: evt.t, t_off: evt.t + dur});
+        if (rasterLive) stimEvents.push({trial: evt.trial, t_on: evt.t, t_off: evt.t + dur, ..._respWindow(evt.t)});
         showStimThumb(evt.trial, evt.az);
         // Real stim replaces the predicted window; re-anchor the pavlovian-reward prediction
         // to the true onset (evt.t).
@@ -1373,54 +1394,93 @@ async function stopLive() {
 
 // ── Unified raster drawing ──
 
+// Draw both stacked rasters each frame. They share one time axis (same RASTER_PAST/FUTURE +
+// play-head), so they stay synced. EVENTS: licks/rewards/timeouts + stim + response window +
+// the next-trial preview. SYNC: photodiode + stim (+ future sync in/out).
 function drawUnifiedRaster() {
-  const canvas = document.getElementById('canvas-raster');
+  drawRaster('canvas-raster', {
+    stimCb: 'cb-stim-events', respWinCb: 'cb-respwin', showPredicted: true,
+    traces: [
+      {cb: 'cb-lick', events: lickEvents, color: '#4caf50'},
+      {cb: 'cb-reward', events: rewardEvents, color: '#2196f3'},
+      {cb: 'cb-timeout', events: timeoutEvents, color: '#ab47bc'},   // over-lick restarts (purple)
+    ],
+  });
+  drawRaster('canvas-raster-sync', {
+    stimCb: 'cb-stim-sync', respWinCb: null, showPredicted: false,
+    traces: [
+      {cb: 'cb-photodiode', events: photodiodeEvents, color: '#ff5722'},
+      // future: sync in/out traces
+    ],
+  });
+}
+
+// Draw one raster into `canvasId`. opts: {stimCb, respWinCb, showPredicted, traces:[{cb,events,color}]}.
+function drawRaster(canvasId, opts) {
+  const canvas = document.getElementById(canvasId);
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
   if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
     canvas.width = canvas.clientWidth;
     canvas.height = canvas.clientHeight;
   }
-  const w = canvas.width, h = canvas.height;
+  const w = canvas.width, h = canvas.height, plotH = h - 12;   // bottom 12px = time labels
   ctx.fillStyle = '#0a0a1a';
   ctx.fillRect(0, 0, w, h);
 
-  // Don't draw until we have a time sync
-  if (lickOffset === null) return;
+  if (lickOffset === null) return;   // no time sync yet
   const now = Date.now() / 1000 - lickOffset;
 
-  // Time-to-x: the "now" play-head sits RASTER_PAST seconds from the left; history is left of
-  // it (negative t), the future is right of it (positive t). age = now - t (>0 past, <0 future).
+  // Shared time axis: "now" play-head RASTER_PAST s from the left; past left, future right.
   const xForAge = age => ((RASTER_PAST - age) / RASTER_WINDOW) * w;
-  const x0 = xForAge(0);   // the 0-sec / "now" play-head
+  const x0 = xForAge(0);
 
-  // Subtle shading of the future (right) region.
+  // Future-region shade.
   ctx.fillStyle = 'rgba(255,255,255,0.03)';
-  ctx.fillRect(x0, 0, w - x0, h - 12);
+  ctx.fillRect(x0, 0, w - x0, plotH);
 
-  // Stim windows (blue). Drawn from onset with the trial-table duration (t_off = t_on +
-  // duration_s); with the future region the full window is visible AHEAD of the play-head,
-  // then scrolls left as it plays.
-  for (const stim of stimEvents) {
-    const x1 = Math.max(0, xForAge(now - stim.t_on));
-    const x2 = Math.min(w, xForAge(now - stim.t_off));
-    if (x2 <= x1) continue;   // fully off-screen
+  const stimOn = opts.stimCb && document.getElementById(opts.stimCb)?.checked;
+  const rwOn = opts.respWinCb && document.getElementById(opts.respWinCb)?.checked;
+
+  // Stim windows — full height, from onset with the trial-table duration (extend into the future).
+  if (stimOn) {
     ctx.fillStyle = STIM_COLOR;
-    ctx.fillRect(x1, 0, x2 - x1, h - 12);
+    for (const stim of stimEvents) {
+      const x1 = Math.max(0, xForAge(now - stim.t_on));
+      const x2 = Math.min(w, xForAge(now - stim.t_off));
+      if (x2 > x1) ctx.fillRect(x1, 0, x2 - x1, plotH);
+    }
+  }
+  // Response windows — top 1/3, amber (opens resp_delay after onset).
+  if (rwOn) {
+    ctx.fillStyle = RESPWIN_COLOR;
+    for (const stim of stimEvents) {
+      if (stim.rw_on == null) continue;
+      const x1 = Math.max(0, xForAge(now - stim.rw_on));
+      const x2 = Math.min(w, xForAge(now - stim.rw_off));
+      if (x2 > x1) ctx.fillRect(x1, 0, x2 - x1, plotH / 3);
+    }
   }
 
-  // Predicted upcoming stim window (dashed = not yet real; cleared once the real stim fires).
-  if (predStim) {
-    const x1 = Math.max(0, xForAge(now - predStim.t_on));
-    const x2 = Math.min(w, xForAge(now - predStim.t_off));
-    if (x2 > x1) {
-      ctx.fillStyle = 'rgba(33,150,243,0.05)';
-      ctx.fillRect(x1, 0, x2 - x1, h - 12);
-      ctx.strokeStyle = 'rgba(33,150,243,0.5)';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([3, 3]);
-      ctx.strokeRect(x1 + 0.5, 0.5, (x2 - x1) - 1, h - 13);
-      ctx.setLineDash([]);
+  // Next-trial preview: predicted stim window (dashed) + response window, cleared once real.
+  if (opts.showPredicted && predStim) {
+    if (stimOn) {
+      const x1 = Math.max(0, xForAge(now - predStim.t_on));
+      const x2 = Math.min(w, xForAge(now - predStim.t_off));
+      if (x2 > x1) {
+        ctx.fillStyle = 'rgba(33,150,243,0.05)';
+        ctx.fillRect(x1, 0, x2 - x1, plotH);
+        ctx.strokeStyle = 'rgba(33,150,243,0.5)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.strokeRect(x1 + 0.5, 0.5, (x2 - x1) - 1, plotH - 1);
+        ctx.setLineDash([]);
+      }
+    }
+    if (rwOn && predStim.rw_on != null) {
+      const r1 = Math.max(0, xForAge(now - predStim.rw_on));
+      const r2 = Math.min(w, xForAge(now - predStim.rw_off));
+      if (r2 > r1) { ctx.fillStyle = 'rgba(255,193,7,0.12)'; ctx.fillRect(r1, 0, r2 - r1, plotH / 3); }
     }
   }
 
@@ -1437,31 +1497,25 @@ function drawUnifiedRaster() {
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.moveTo(x0, 0);
-  ctx.lineTo(x0, h - 12);
+  ctx.lineTo(x0, plotH);
   ctx.stroke();
 
-  // Predicted pavlovian reward (hollow + dashed) in the future — not conditional/adaptive rewards.
-  if (predReward && predReward.t > now) {
+  // Predicted pavlovian reward (hollow + dashed) in the future — not conditional/adaptive.
+  if (opts.showPredicted && predReward && predReward.t > now) {
     const x = xForAge(now - predReward.t);
     if (x >= 0 && x <= w) {
       ctx.strokeStyle = '#2196f3';
       ctx.lineWidth = 1.5;
       ctx.setLineDash([2, 2]);
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h - 12); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, plotH); ctx.stroke();
       ctx.setLineDash([]);
-      ctx.beginPath(); ctx.arc(x, (h - 12) / 2, 3, 0, 2 * Math.PI); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, plotH / 2, 3, 0, 2 * Math.PI); ctx.stroke();
     }
   }
 
-  // Draw each enabled trace (real events — licks/rewards/pulses — sit in the past region).
-  const traces = [
-    {cb: 'cb-lick', events: lickEvents, color: '#4caf50'},
-    {cb: 'cb-reward', events: rewardEvents, color: '#2196f3'},
-    {cb: 'cb-photodiode', events: photodiodeEvents, color: '#ff5722'},
-    {cb: 'cb-timeout', events: timeoutEvents, color: '#ab47bc'},   // over-lick restarts (purple)
-  ];
-  for (const tr of traces) {
-    if (!document.getElementById(tr.cb).checked) continue;
+  // Traces (real events as vertical ticks).
+  for (const tr of opts.traces) {
+    if (!document.getElementById(tr.cb)?.checked) continue;
     ctx.strokeStyle = tr.color;
     ctx.lineWidth = 1.5;
     for (const evt of tr.events) {
@@ -1470,20 +1524,22 @@ function drawUnifiedRaster() {
       const x = xForAge(age);
       ctx.beginPath();
       ctx.moveTo(x, 0);
-      ctx.lineTo(x, h - 12);
+      ctx.lineTo(x, plotH);
       ctx.stroke();
     }
   }
 }
 
 function clearAllCanvases() {
-  const c = document.getElementById('canvas-raster');
-  if (c) {
-    c.width = c.clientWidth;
-    c.height = c.clientHeight;
-    const ctx = c.getContext('2d');
-    ctx.fillStyle = '#0a0a1a';
-    ctx.fillRect(0, 0, c.width, c.height);
+  for (const id of ['canvas-raster', 'canvas-raster-sync']) {
+    const c = document.getElementById(id);
+    if (c) {
+      c.width = c.clientWidth;
+      c.height = c.clientHeight;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#0a0a1a';
+      ctx.fillRect(0, 0, c.width, c.height);
+    }
   }
 }
 
@@ -1492,13 +1548,16 @@ function stopAllLive() {
 }
 
 function updateRasterInfo() {
-  const parts = [];
-  if (lickEvents.length) parts.push(lickEvents.length + ' licks');
-  if (rewardEvents.length) parts.push(rewardEvents.length + ' rewards');
-  if (photodiodeEvents.length) parts.push(photodiodeEvents.length + ' pulses');
-  if (timeoutEvents.length) parts.push(timeoutEvents.length + ' timeouts');
-  const el = document.getElementById('raster-info');
-  if (el) el.textContent = parts.join(' | ');
+  const ev = [];
+  if (lickEvents.length) ev.push(lickEvents.length + ' licks');
+  if (rewardEvents.length) ev.push(rewardEvents.length + ' rewards');
+  if (timeoutEvents.length) ev.push(timeoutEvents.length + ' timeouts');
+  const e1 = document.getElementById('raster-info');
+  if (e1) e1.textContent = ev.join(' | ');
+  const sy = [];
+  if (photodiodeEvents.length) sy.push(photodiodeEvents.length + ' pulses');
+  const e2 = document.getElementById('raster-info-sync');
+  if (e2) e2.textContent = sy.join(' | ');
 }
 
 // ── Clocks ──
@@ -1615,6 +1674,15 @@ function _respDelayS() {
   const rew = (config.task && config.task.reward) || {};
   return rew.resp_delay_s ?? rew.reward_delay_s ?? 0.6;
 }
+function _responseWindowS() {
+  const rew = (config.task && config.task.reward) || {};
+  return rew.response_window ?? 1.4;
+}
+// Response window [rw_on, rw_off] for a stim starting at `onset`: opens resp_delay after onset.
+function _respWindow(onset) {
+  const on = onset + _respDelayS();
+  return {rw_on: on, rw_off: on + _responseWindowS()};
+}
 // Go/no-go per the engine's go_rule (stimulus.go_rule): all=go, right=az>0, else az<0.
 function _isGo(az) {
   const rule = (config.task && config.task.stimulus && config.task.stimulus.go_rule) || 'left';
@@ -1635,7 +1703,7 @@ function _isPavlovian(i) {
 function setPrediction(i, stimOnset) {
   const t = trialTable[i];
   if (!t) { predStim = null; predReward = null; return; }
-  predStim = {t_on: stimOnset, t_off: stimOnset + (t.duration_s || 0)};
+  predStim = {t_on: stimOnset, t_off: stimOnset + (t.duration_s || 0), ..._respWindow(stimOnset)};
   predReward = _isPavlovian(i) ? {t: stimOnset + _respDelayS()} : null;
 }
 

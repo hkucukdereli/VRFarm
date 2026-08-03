@@ -388,6 +388,12 @@ let sessionStartTime = null;
 let trialStartTime = null;
 let itiStartTime = null;
 let currentTrialNum = 0;
+// Phase 2: session ETA + per-phase planned durations (shown as elapsed/total).
+let sessionEstimateMs = null;   // baseline session ETA from the trial table
+let timeoutExtraMs = 0;         // extra time accrued from phase-restart timeouts
+let phaseStartTime = null;      // start of the current enforced phase (ITI/prestim/poststim)
+let currentTrialTotalS = null;  // planned duration of the current trial phase (excl. ITI)
+let currentItiTotalS = null;    // planned duration of the current ITI
 let clockInterval = null;
 
 // Live data
@@ -937,6 +943,11 @@ async function startSession() {
   sessionStartTime = null;
   trialStartTime = null;
   itiStartTime = null;
+  sessionEstimateMs = null;
+  timeoutExtraMs = 0;
+  phaseStartTime = null;
+  currentTrialTotalS = null;
+  currentItiTotalS = null;
   document.getElementById('trial-tbody').innerHTML = '';
   clearAllCanvases();
   currentStimAz = null;
@@ -1086,6 +1097,8 @@ function handleEvent(evt) {
       sessionStartTime = Date.now();
       trialStartTime = null;
       itiStartTime = null;
+      sessionEstimateMs = computeSessionEstimate();   // baseline ETA (elapsed is post-grace)
+      timeoutExtraMs = 0;
       document.getElementById('btn-go').textContent = 'GO';  // grace done
       log('Experiment started.');
       const sid = document.getElementById('subject-id').value;
@@ -1096,6 +1109,8 @@ function handleEvent(evt) {
     case 'trial_start':
       currentTrialNum = evt.trial + 1;
       trialStartTime = Date.now();
+      phaseStartTime = Date.now();   // pre-stim phase begins here
+      currentTrialTotalS = trialPhaseDur(trialTable[evt.trial]);
       itiStartTime = null;
       break;
     case 'trial':
@@ -1104,7 +1119,12 @@ function handleEvent(evt) {
       break;
     case 'iti_start':
       itiStartTime = Date.now();
+      phaseStartTime = Date.now();
+      currentItiTotalS = (evt.duration != null) ? evt.duration : null;
       trialStartTime = null;
+      break;
+    case 'poststim_start':
+      phaseStartTime = Date.now();   // post-stim phase begins here
       break;
     case 'sync_pulse':
       if (rasterLive) { photodiodeEvents.push({t: evt.t}); updateRasterInfo(); }
@@ -1115,8 +1135,16 @@ function handleEvent(evt) {
         String(Math.max(0, Math.ceil(evt.remaining)));
       break;
     case 'iti_restart':
+      if (phaseStartTime) timeoutExtraMs += Date.now() - phaseStartTime;  // wasted time repeats
+      phaseStartTime = Date.now();
       itiStartTime = Date.now();
       log('ITI restarted (excess licking)');
+      break;
+    case 'prestim_restart':
+    case 'poststim_restart':
+      if (phaseStartTime) timeoutExtraMs += Date.now() - phaseStartTime;
+      phaseStartTime = Date.now();
+      log((evt.type === 'prestim_restart' ? 'Pre-stim' : 'Post-stim') + ' restarted (excess licking)');
       break;
     case 'global_timeout':
       log(`Global timeout: no licks in ${(evt.phases || []).join('/')} for ${evt.n_dry} trials — aborting.`);
@@ -1422,6 +1450,11 @@ function stopClock() {
   sessionStartTime = null;
   trialStartTime = null;
   itiStartTime = null;
+  sessionEstimateMs = null;
+  timeoutExtraMs = 0;
+  phaseStartTime = null;
+  currentTrialTotalS = null;
+  currentItiTotalS = null;
   document.getElementById('session-clock').textContent = '00:00:00';
   document.getElementById('trial-clock').textContent = '--:--';
   document.getElementById('iti-clock').textContent = '--:--';
@@ -1430,14 +1463,70 @@ function stopClock() {
 
 function updateClocks() {
   const now = Date.now();
+  // Elapsed / estimated total (estimate grows as timeouts accrue).
   const sessEl = document.getElementById('session-clock');
-  if (sessEl) sessEl.textContent = sessionStartTime ? formatHMS(now - sessionStartTime) : '00:00:00';
+  if (sessEl) {
+    if (sessionStartTime) {
+      const el = formatHMS(now - sessionStartTime);
+      const est = sessionEstimateMs ? sessionEstimateMs + timeoutExtraMs : null;
+      sessEl.innerHTML = est ? `${el}<span style="color:#888">/${formatHMS(est)}</span>` : el;
+    } else sessEl.textContent = '00:00:00';
+  }
+  // Trial timer: elapsed / planned trial-phase duration.
   const trialEl = document.getElementById('trial-clock');
-  if (trialEl) trialEl.textContent = trialStartTime ? formatMS(now - trialStartTime) : '--:--';
+  if (trialEl) {
+    if (trialStartTime) {
+      const el = formatMS(now - trialStartTime);
+      trialEl.innerHTML = currentTrialTotalS
+        ? `${el}<span style="color:#888">/${formatMS(currentTrialTotalS * 1000)}</span>` : el;
+    } else trialEl.textContent = '--:--';
+  }
+  // ITI timer: elapsed / planned ITI duration.
   const itiEl = document.getElementById('iti-clock');
-  if (itiEl) itiEl.textContent = itiStartTime ? formatMS(now - itiStartTime) : '--:--';
+  if (itiEl) {
+    if (itiStartTime) {
+      const el = formatMS(now - itiStartTime);
+      itiEl.innerHTML = currentItiTotalS
+        ? `${el}<span style="color:#666">/${formatMS(currentItiTotalS * 1000)}</span>` : el;
+    } else itiEl.textContent = '--:--';
+  }
   const trialNum = document.getElementById('trial-num');
   if (trialNum) trialNum.textContent = currentTrialNum || '--';
+}
+
+// ── Phase 2: session-time estimate ──
+// Planned wall-clock (seconds) of one trial's phases, EXCLUDING its ITI. Mirrors the engine:
+// pre-stim, then max(resp_delay + response_window, visual duration) for stim+response, then
+// post-stim (the engine waits 0.5s when there is no post-stim period).
+function trialPhaseDur(t) {
+  if (!t) return null;
+  const rew = (config.task && config.task.reward) || {};
+  const respDelay = rew.resp_delay_s ?? rew.reward_delay_s ?? 0.6;
+  const respWin = rew.response_window ?? 1.4;
+  const stim = Math.max(respDelay + respWin, t.duration_s || 0);
+  const post = (t.poststim_s > 0) ? t.poststim_s : 0.5;
+  return (t.prestim_s || 0) + stim + post;
+}
+
+// Baseline session ETA (ms) from the trial table + task timing, referenced to experiment_start
+// (post-grace). Approximate: response windows may end early on a lick (shorter), and block/global
+// delays use range midpoints (exact sampled values live in the NPZ, not the client). Timeouts are
+// added live via timeoutExtraMs. Returns null when no trial table is loaded.
+function computeSessionEstimate() {
+  if (!trialTable || !trialTable.length) return null;
+  const sess = (config.task && config.task.session) || {};
+  const mid = v => Array.isArray(v) ? (v[0] + v[1]) / 2 : (parseFloat(v) || 0);
+  let total = 0, itiSum = 0;
+  for (const t of trialTable) {
+    total += (t.iti_s || 0) + trialPhaseDur(t);
+    itiSum += (t.iti_s || 0);
+  }
+  total += itiSum / trialTable.length;               // trailing ITI after the last trial ≈ mean
+  total += mid(sess.global_delay);
+  const nBlocks = trialTable.reduce((m, t) => Math.max(m, t.block || 0), 0) + 1;
+  const skip = sess.block_delay_skip_first ? 1 : 0;
+  total += mid(sess.block_delay) * Math.max(0, nBlocks - skip);
+  return total * 1000;
 }
 
 // ── Trial table ──

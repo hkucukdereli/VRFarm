@@ -555,12 +555,18 @@ class Leader:
             else:
                 self._wait_for_event(0.5)  # brief pause before outcome when no post-stim
 
-            # ── Outcome ──
+            # ── Outcome ── hit/miss and the response latency are measured from licks WITHIN the
+            # response window [response_window_t, +rw_dur]. Pre-stim (anticipatory) and post-stim
+            # licks do NOT count as a response — for pavlovian trials too: the reward may be free,
+            # but the OUTCOME is still whether the mouse licked inside the window.
             outcome_t = time.time()
             self._trial_ctx["outcome_t"] = outcome_t
-            self._trial_ctx["first_lick_t"] = (
-                self._trial_licks[0] if self._trial_licks else float("nan"))
-            self._trial_ctx["lick_times"] = self._trial_licks[:]
+            rw_open = self._trial_ctx.get("response_window_t", true_onset_t)
+            rw_close = rw_open + rw_dur
+            window_licks = [t for t in self._trial_licks if rw_open <= t < rw_close]
+            self._trial_ctx["responded"] = bool(window_licks)               # in-window lick = hit
+            self._trial_ctx["first_lick_t"] = window_licks[0] if window_licks else float("nan")
+            self._trial_ctx["lick_times"] = self._trial_licks[:]            # full record (all phases)
 
             # ── Record trial ──
             self._write_trial(stim)
@@ -571,7 +577,7 @@ class Leader:
             # the UI), so step whenever nominal_level==2.5 — matching the unconditional
             # 2.5 draw at line 403 (previously the `enabled` flag could desync them).
             if nominal_level == 2.5:
-                licked = len(self._trial_licks) > 0
+                licked = bool(self._trial_ctx.get("responded"))   # step on the in-window response
                 if licked:
                     adaptive_state += adaptive_cfg.get("step_up", 0.2)
                 else:
@@ -690,19 +696,17 @@ class Leader:
         adaptive_on = (ctx.get("nominal_level") == 2.5)
         adaptive_state = ctx.get("adaptive_state", 0.0) if adaptive_on else 1.0
 
-        # Reaction time: first lick within response window, relative to rw_t
-        rt_ms = None
-        for lt in self._trial_licks:
-            if lt >= rw_t:
-                rt_ms = round((lt - rw_t) * 1000, 1)
-                break
+        # Reaction time: the first in-window lick (first_lick_t, set at outcome), relative to
+        # the response-window opening. NaN (no in-window response) -> no RT.
+        fl = ctx.get("first_lick_t", float("nan"))
+        rt_ms = round((fl - rw_t) * 1000, 1) if fl == fl else None   # fl != fl only when NaN
 
         self._publish({
             "type": "trial",
             "trial_num": self.trial_num,
             "stim_az": float(stim.get("stim_az_deg", 0)),
             "contrast": float(stim.get("contrast", 0)),
-            "outcome": "hit" if self._trial_licks else "miss",
+            "outcome": "hit" if ctx.get("responded") else "miss",
             "reward_type": "operant" if is_operant else "pavlovian",
             "rt_ms": rt_ms,
             "level": level,
@@ -804,7 +808,7 @@ class Leader:
         f["stim_az_deg"][i] = float(stim.get("stim_az_deg", 0))
         f["contrast"][i] = float(stim.get("contrast", 0))            # raw metric value
         f["corr_contrast"][i] = float(stim.get("corr_contrast", 0))  # rendered fraction
-        f["trial_outcome"][i] = "hit" if self._trial_licks else "miss"
+        f["trial_outcome"][i] = "hit" if self._trial_ctx.get("responded") else "miss"
         f["level_effective"][i] = self._trial_ctx.get("level", 0)
         # Same gate as the published event (line 643): P(L3) for adaptive 2.5, else 1 —
         # so HDF5, the trial event, and the live table all report the same number.

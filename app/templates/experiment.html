@@ -447,8 +447,8 @@ let rasterLive = false, rasterAnimFrame = null;
 // Stim events from SSE
 let stimEvents = [];  // [{trial, t_on, t_off}]
 let trialTable = [];  // populated from /api/trial_table after deploy
-const RASTER_PAST = 10;    // seconds of history shown left of the "now" play-head
-const RASTER_FUTURE = 20;  // seconds of future shown right of it (scheduled stim windows, etc.)
+const RASTER_PAST = 20;    // seconds of history shown left of the "now" play-head (−20→0)
+const RASTER_FUTURE = 10;  // seconds of future shown right of it (0→+10; scheduled stim/reward)
 const RASTER_WINDOW = RASTER_PAST + RASTER_FUTURE;  // total span (s)
 const STIM_COLOR = 'rgba(33, 150, 243, 0.15)';  // blue translucent (stim window, full height)
 const RESPWIN_COLOR = 'rgba(255, 193, 7, 0.28)';  // amber (response window, top 1/3)
@@ -1604,16 +1604,16 @@ function drawRaster(canvasId, opts) {
   ctx.lineTo(x0, plotH);
   ctx.stroke();
 
-  // Predicted pavlovian reward (hollow + dashed) in the future — not conditional/adaptive.
-  if (opts.showPredicted && predReward && predReward.t > now) {
+  // Predicted pavlovian reward in the future — drawn DIMMED (alpha); the trace loop then draws the
+  // real reward at full colour once it's delivered, so the mark "solidifies" in place. Gated on the
+  // reward checkbox; not shown for conditional/adaptive trials (predReward is null there).
+  if (opts.showPredicted && predReward && predReward.t > now
+      && document.getElementById('cb-reward')?.checked) {
     const x = xForAge(now - predReward.t);
     if (x >= 0 && x <= w) {
-      ctx.strokeStyle = '#2196f3';
+      ctx.strokeStyle = 'rgba(33,150,243,0.35)';   // dim blue = predicted (full #2196f3 once real)
       ctx.lineWidth = 1.5;
-      ctx.setLineDash([2, 2]);
       ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, plotH); ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.beginPath(); ctx.arc(x, plotH / 2, 3, 0, 2 * Math.PI); ctx.stroke();
     }
   }
 

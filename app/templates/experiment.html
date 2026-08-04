@@ -51,8 +51,14 @@
   .session-bar .trial-clock { font-size: 16px; font-weight: 600; font-family: monospace; color: #ff9800; }
 
   /* Video / Stim row */
-  .video-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+  .video-row { display: grid; grid-template-columns: 0.9fr 1.1fr; gap: 10px; margin-bottom: 10px; }
+  .video-col { display: grid; grid-template-rows: auto auto; gap: 10px; align-content: start; }
   .video-box { background: #0a0a1a; border-radius: 8px; overflow: hidden; position: relative; min-height: 320px; }
+  .video-box.half { min-height: 160px; }
+  .video-box.half .box-content { min-height: 130px; }
+  #panel-liveplots { display: flex; flex-direction: column; }
+  #panel-liveplots .box-content { flex: 1; min-height: 0; padding: 4px; }
+  #rt-hist-canvas { width: 100%; height: 100%; display: block; }
   .video-box .box-header { display: flex; justify-content: space-between; align-items: center;
                             padding: 6px 10px; background: #16213e; }
   .video-box .box-header h3 { margin: 0; }
@@ -327,24 +333,35 @@
       </div>
     </div>
 
-    <!-- Camera + Stimulus -->
+    <!-- Camera (+ half-height Stimulus) | Live plots -->
     <div class="video-row">
-      <div class="video-box" id="panel-camera">
-        <div class="box-header">
-          <h3><label style="margin:0; display:inline-flex; align-items:center; gap:4px; cursor:pointer;"><input type="checkbox" id="cb-camera" checked> Camera</label></h3>
-          <button id="btn-camera-reset" onclick="resetCamera()" title="Recover a frozen/wedged camera: rebinds the sensor driver on the Pi and re-mounts the feed"
-                  style="font-size:11px; padding:2px 8px; background:#16213e; color:#8fa; border:1px solid #2a3a5e; border-radius:4px; cursor:pointer;">⟳ Reset</button>
+      <div class="video-col">
+        <div class="video-box" id="panel-camera">
+          <div class="box-header">
+            <h3><label style="margin:0; display:inline-flex; align-items:center; gap:4px; cursor:pointer;"><input type="checkbox" id="cb-camera" checked> Camera</label></h3>
+            <button id="btn-camera-reset" onclick="resetCamera()" title="Recover a frozen/wedged camera: rebinds the sensor driver on the Pi and re-mounts the feed"
+                    style="font-size:11px; padding:2px 8px; background:#16213e; color:#8fa; border:1px solid #2a3a5e; border-radius:4px; cursor:pointer;">⟳ Reset</button>
+          </div>
+          <div class="box-content" id="camera-content">
+            <span class="placeholder">Camera off</span>
+          </div>
         </div>
-        <div class="box-content" id="camera-content">
-          <span class="placeholder">Camera off</span>
+        <div class="video-box half" id="panel-stim">
+          <div class="box-header">
+            <h3><label style="margin:0; display:inline-flex; align-items:center; gap:4px; cursor:pointer;"><input type="checkbox" id="cb-stim" checked> Stimulus</label></h3>
+          </div>
+          <div class="box-content" id="stim-content">
+            <span class="placeholder">No stimulus</span>
+          </div>
         </div>
       </div>
-      <div class="video-box" id="panel-stim">
+      <div class="video-box" id="panel-liveplots">
         <div class="box-header">
-          <h3><label style="margin:0; display:inline-flex; align-items:center; gap:4px; cursor:pointer;"><input type="checkbox" id="cb-stim" checked> Stimulus</label></h3>
+          <h3>Live plots</h3>
+          <span style="font-size:11px; color:#888">RT histogram · hit trials · 100 ms bins</span>
         </div>
-        <div class="box-content" id="stim-content">
-          <span class="placeholder">No stimulus</span>
+        <div class="box-content" id="liveplots-content">
+          <canvas id="rt-hist-canvas"></canvas>
         </div>
       </div>
     </div>
@@ -446,6 +463,8 @@ let rasterLive = false, rasterAnimFrame = null;
 
 // Stim events from SSE
 let stimEvents = [];  // [{trial, t_on, t_off}]
+let rtHits = [];      // hit-trial response times (ms) for the Live-plots RT histogram
+const RT_BIN_MS = 100;
 let trialTable = [];  // populated from /api/trial_table after deploy
 const RASTER_PAST = 20;    // seconds of history shown left of the "now" play-head (−20→0)
 const RASTER_FUTURE = 10;  // seconds of future shown right of it (0→+10; scheduled stim/reward)
@@ -1009,7 +1028,7 @@ async function startSession() {
   const btn = document.getElementById('btn-go');
   btn.textContent = 'Starting...';
   log('Starting session...');
-  lickEvents = []; photodiodeEvents = []; rewardEvents = []; stimEvents = []; timeoutEvents = [];
+  lickEvents = []; photodiodeEvents = []; rewardEvents = []; stimEvents = []; timeoutEvents = []; rtHits = [];
   lickOffset = null;
   currentTrialNum = 0;
   sessionStartTime = null;
@@ -1351,8 +1370,10 @@ function initStimCanvas() {
   canvas.id = 'stim-canvas';
   canvas.style.display = 'block';
   el.appendChild(canvas);
-  const w = el.clientWidth || 400;
-  const h = Math.round(w * 9 / 16);
+  let w = el.clientWidth || 400;
+  let h = Math.round(w * 9 / 16);
+  const maxH = el.clientHeight;               // letterbox into the half-height card (keep 16:9)
+  if (maxH && h > maxH) { h = maxH; w = Math.round(h * 16 / 9); }
   canvas.width = w;
   canvas.height = h;
   canvas.style.width = w + 'px';
@@ -1465,7 +1486,7 @@ function toggleLive() {
 
 async function startLive() {
   // Clear all event arrays — only show data from now on
-  lickEvents = []; rewardEvents = []; photodiodeEvents = []; stimEvents = []; timeoutEvents = [];
+  lickEvents = []; rewardEvents = []; photodiodeEvents = []; stimEvents = []; timeoutEvents = []; rtHits = [];
   lickOffset = null;
   _offsetSamples = [];
   // Flush server-side event queue so we only see new events
@@ -1475,7 +1496,7 @@ async function startLive() {
   document.getElementById('btn-live').className = 'btn btn-sm btn-red';
   // Raster
   if (!rasterAnimFrame) {
-    (function frame() { drawUnifiedRaster(); rasterAnimFrame = requestAnimationFrame(frame); })();
+    (function frame() { drawUnifiedRaster(); drawRtHist(); rasterAnimFrame = requestAnimationFrame(frame); })();
   }
   // Camera (if checked)
   if (document.getElementById('cb-camera').checked) await _startCamera();
@@ -1847,6 +1868,56 @@ function addTrialRow(evt) {
     `<td class="${outCls}">${evt.outcome}</td>` +
     `<td>${rt}</td>` +
     `<td>${evt.resp_licks ?? '--'}</td></tr>`);
+  // Live RT histogram: accumulate hit-trial RTs (same value the table's RT column shows).
+  if (evt.outcome === 'hit' && evt.rt_ms != null && isFinite(evt.rt_ms)) rtHits.push(evt.rt_ms);
+  drawRtHist();
+}
+
+// Live-plots RT histogram — hit trials only, 100 ms bins, redrawn each trial (+ in the raster rAF
+// loop for resize). Lightweight canvas, mirrors the raster style.
+function drawRtHist() {
+  const canvas = document.getElementById('rt-hist-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
+    canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight;
+  }
+  const w = canvas.width, h = canvas.height;
+  ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
+  const padL = 30, padR = 8, padT = 14, padB = 20;
+  const plotW = w - padL - padR, plotH = h - padT - padB;
+  if (plotW <= 4 || plotH <= 4) return;
+  if (!rtHits.length) {
+    ctx.fillStyle = '#556'; ctx.font = '11px monospace';
+    ctx.fillText('no hit trials yet', padL, padT + plotH / 2);
+    return;
+  }
+  let maxRt = 0;
+  for (const rt of rtHits) if (rt > maxRt) maxRt = rt;
+  const nBins = Math.max(1, Math.ceil((maxRt + 1) / RT_BIN_MS));
+  const bins = new Array(nBins).fill(0);
+  for (const rt of rtHits) bins[Math.min(nBins - 1, Math.floor(rt / RT_BIN_MS))]++;
+  let maxCount = 1;
+  for (const c of bins) if (c > maxCount) maxCount = c;
+  const bw = plotW / nBins;
+  ctx.fillStyle = '#26a69a';
+  for (let i = 0; i < nBins; i++) {
+    const bh = (bins[i] / maxCount) * plotH;
+    if (bh > 0) ctx.fillRect(padL + i * bw + 1, padT + plotH - bh, Math.max(1, bw - 2), bh);
+  }
+  ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, padT + plotH);
+  ctx.lineTo(padL + plotW, padT + plotH); ctx.stroke();
+  ctx.fillStyle = '#666'; ctx.font = '9px monospace';
+  ctx.fillText(String(maxCount), 4, padT + 7);
+  ctx.fillText('0', 4, padT + plotH);
+  const xStep = Math.max(1, Math.ceil(nBins / 8));
+  for (let i = 0; i <= nBins; i += xStep) {
+    ctx.fillText((i * RT_BIN_MS / 1000).toFixed(1), padL + i * bw - 6, h - 6);
+  }
+  ctx.fillText('s', padL + plotW - 2, h - 6);
+  ctx.fillStyle = '#888';
+  ctx.fillText(`${rtHits.length} hits`, padL + 4, padT + 7);
 }
 
 // ── Phase / buttons ──

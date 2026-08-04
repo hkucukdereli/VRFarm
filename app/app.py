@@ -16,6 +16,7 @@ import queue
 import socket
 import struct
 import sys
+import tempfile
 import threading
 import time
 from datetime import date, datetime
@@ -58,6 +59,7 @@ _cmd_sock = None
 
 # Trial data for live display
 _trials = []
+_rt_hits_path = None   # temp file (controller) of hit-trial response times (ms), one per line
 
 # ── Logging ──
 
@@ -636,6 +638,18 @@ def go():
     _start_udp_listener(rig["network"]["event_port"])
     print("[go] UDP listener started")
 
+    # Reset the live-RT temp file for this session (hit-trial RTs in ms, one per line, appended by
+    # the UDP listener). Lightweight persistence on the controller alongside the browser histogram.
+    global _rt_hits_path
+    _rt_hits_path = os.path.join(tempfile.gettempdir(), f"vrfarm_rt_{state['session_id']}.txt")
+    try:
+        with open(_rt_hits_path, "w") as f:
+            f.write("# response_time_ms (hit trials)\n")
+        print(f"[go] RT temp file: {_rt_hits_path}")
+    except Exception as e:
+        print(f"[go] could not open RT temp file: {e}")
+        _rt_hits_path = None
+
     # Stop any leftover processes, release devices on all Pis
     for pi in rig["pis"]:
         try:
@@ -1191,6 +1205,15 @@ def _start_udp_listener(event_port: int):
                 # Track trials
                 if event.get("type") == "trial":
                     _trials.append(event)
+                    # Append hit-trial RT (ms) to the live-RT temp file for lightweight persistence.
+                    if _rt_hits_path and event.get("outcome") == "hit":
+                        rt = event.get("rt_ms")
+                        if isinstance(rt, (int, float)) and not isinstance(rt, bool) and rt == rt:
+                            try:
+                                with open(_rt_hits_path, "a") as f:
+                                    f.write(f"{rt:.1f}\n")
+                            except Exception:
+                                pass
                 # Push to SSE queue
                 try:
                     _event_queue.put_nowait(event)

@@ -31,7 +31,11 @@ devices:
     i2c_address: '0x5A'
     type: lick_sensor
   photodiode:
+    debounce_enabled: true
+    debounce_ms: 5
     enabled: true
+    glitch_enabled: true
+    glitch_ms: 0.5
     gpio: 24
     pulse_every_n_frames: 5
     sync_corner: top-left

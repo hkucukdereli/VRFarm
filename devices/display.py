@@ -321,6 +321,46 @@ class Display(Device):
         self._screen.blit(surf, (0, 0))
         pygame.display.flip()
 
+    def run_sync_test(self, every_n: int, stop_event):
+        """Setup-UI diagnostic: flash the red photodiode sync square ON for one frame every
+        `every_n` frames (black otherwise), flipping every frame, until `stop_event` is set.
+        Simulates the session's sync pulses so the photodiode/scope can be exercised without
+        running a real experiment. Runs in the pygame display thread (blocking)."""
+        import pygame
+        if self._screen is None:
+            return
+        every_n = max(1, int(every_n))
+        rect = pygame.Rect(*self._sync_test_rect())
+        clock = pygame.time.Clock()
+        frame = 0
+        while not stop_event.is_set():
+            self._screen.fill((0, 0, 0))
+            if frame % every_n == 0:
+                self._screen.fill((255, 0, 0), rect)   # red sync square (off-screen dead band)
+            pygame.display.flip()
+            try:
+                pygame.event.pump()                    # keep the fullscreen window responsive
+            except Exception:
+                pass
+            clock.tick(120)                            # cap; vsync also paces the flip if available
+            frame += 1
+        self._screen.fill((0, 0, 0))
+        pygame.display.flip()
+
+    def _sync_test_rect(self):
+        """Rect for the TEST flash: the real warp-derived sync-square rect when a warp is loaded,
+        else a corner square of sync_size_px (or a 120px default) at sync_corner — so the test
+        still produces a pulse before a warp exists."""
+        r = self._sync_patch_rect() if self._warp is not None else None
+        if r is not None:
+            return r
+        w, h = self.resolution
+        s = int(self.sync_size_px or 120)
+        s = max(8, min(s, min(w, h)))
+        x = 0 if "left" in self.sync_corner else w - s
+        y = 0 if "top" in self.sync_corner else h - s
+        return (x, y, s, s)
+
     def _draw_sync_border(self, on: bool):
         """Photodiode sync: when `on`, draw a SINGLE pure-red square flush in the configured
         panel corner (sync_corner, default top-left), sized sync_size_px but never larger

@@ -547,6 +547,10 @@ def api_init_devices():
         if ip:
             ok, msg = _init("photodiode", ip, "/api/init_photodiode", {
                 "gpio": devices["photodiode"].get("gpio", 24),
+                "glitch_enabled": devices["photodiode"].get("glitch_enabled", True),
+                "glitch_ms": devices["photodiode"].get("glitch_ms", 0.5),
+                "debounce_enabled": devices["photodiode"].get("debounce_enabled", True),
+                "debounce_ms": devices["photodiode"].get("debounce_ms", 5),
             }, "Photodiode")
             results["photodiode"] = {"ok": ok, "message": msg}
 

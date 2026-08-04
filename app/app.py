@@ -198,6 +198,10 @@ def api_load_rig():
                 elif dev_name == "photodiode":
                     r = requests.post(f"http://{ip}:{api_port}/api/init_photodiode", json={
                         "gpio": dev_cfg.get("gpio", 24),
+                        "glitch_enabled": dev_cfg.get("glitch_enabled", True),
+                        "glitch_ms": dev_cfg.get("glitch_ms", 0.5),
+                        "debounce_enabled": dev_cfg.get("debounce_enabled", True),
+                        "debounce_ms": dev_cfg.get("debounce_ms", 5),
                     }, timeout=10)
                     if not r.json().get("ok"):
                         err = r.json().get("error",

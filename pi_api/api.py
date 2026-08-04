@@ -38,6 +38,7 @@ _devices_lock = threading.Lock()
 _camera_lock = threading.Lock()
 _lick_events: list = []
 _photodiode_events: list = []
+_photodiode_raw: list = []   # diagnostic raw transitions {t, level} for the setup-UI scope
 _reward_events: list = []
 
 
@@ -410,6 +411,7 @@ import queue
 _display_cmd_q: queue.Queue = queue.Queue()
 _display_result_q: queue.Queue = queue.Queue()
 _display_thread: threading.Thread | None = None
+_sync_test_stop = threading.Event()   # set to stop the photodiode sync-square flash test
 
 
 def _display_thread_fn():
@@ -481,6 +483,19 @@ def _display_thread_fn():
                     with _devices_lock:
                         _devices.pop("display", None)
                 _display_result_q.put({"ok": True})
+            elif action == "sync_test":
+                if not dev or getattr(dev, "_screen", None) is None:
+                    _display_result_q.put({"ok": False, "error": "Display not initialized"})
+                else:
+                    # Ack BEFORE the (blocking) flash loop so the HTTP start returns immediately;
+                    # the loop then owns this thread until _sync_test_stop is set out-of-band.
+                    _sync_test_stop.clear()
+                    _display_result_q.put({"ok": True, "message": "sync test running"})
+                    try:
+                        dev.run_sync_test(int(cmd.get("every_n", 5)), _sync_test_stop)
+                    except Exception as e:
+                        print("[display] sync_test error:", e, flush=True)
+                    # result already sent; do NOT put again (would desync the result queue)
             else:
                 _display_result_q.put({"ok": False, "error": f"Unknown action: {action}"})
         except Exception as e:
@@ -708,7 +723,13 @@ def init_photodiode():
     gpio = data.get("gpio", 24)
     try:
         dev = Photodiode()
-        dev.init(rig_config={"gpio": gpio}, task_params={})
+        dev.init(rig_config={
+            "gpio": gpio,
+            "glitch_enabled": data.get("glitch_enabled", True),
+            "glitch_ms": data.get("glitch_ms", 0.5),
+            "debounce_enabled": data.get("debounce_enabled", True),
+            "debounce_ms": data.get("debounce_ms", 5),
+        }, task_params={})
         with _devices_lock:
             _devices["photodiode"] = dev
         check = dev.check()
@@ -924,11 +945,24 @@ def monitor_photodiode():
     if not dev:
         try:
             dev = Photodiode()
-            dev.init(rig_config={"gpio": gpio}, task_params={})
+            dev.init(rig_config={
+                "gpio": gpio,
+                "glitch_enabled": data.get("glitch_enabled", True),
+                "glitch_ms": data.get("glitch_ms", 0.5),
+                "debounce_enabled": data.get("debounce_enabled", True),
+                "debounce_ms": data.get("debounce_ms", 5),
+            }, task_params={})
             with _devices_lock:
                 _devices["photodiode"] = dev
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
+    else:
+        # Reusing an already-inited device: a prior raw scope may have left the daemon glitch
+        # filter at 0. Re-assert the configured steady filter so the detected monitor is correct.
+        try:
+            dev._pi.set_glitch_filter(dev.gpio, getattr(dev, "_glitch_us", 0))
+        except Exception:
+            pass
 
     _photodiode_events = []
 
@@ -977,6 +1011,90 @@ def probe_off():
 def photodiode_data():
     """Return collected photodiode pulse events (polled by UI)."""
     return jsonify({"events": _photodiode_events})
+
+
+@app.route("/api/photodiode_raw_start", methods=["POST"])
+def photodiode_raw_start():
+    """Start RAW transition capture (both edges, glitch filter OFF) for the setup-UI diagnostic
+    scope. Reuses the initialized photodiode device; lazily inits from the posted config if needed."""
+    global _photodiode_raw
+    _ensure_rig_path()
+    data = request.json or {}
+    with _devices_lock:
+        dev = _devices.get("photodiode")
+    if not dev:
+        from devices.photodiode import Photodiode
+        try:
+            dev = Photodiode()
+            dev.init(rig_config={
+                "gpio": data.get("gpio", 24),
+                "glitch_enabled": data.get("glitch_enabled", True),
+                "glitch_ms": data.get("glitch_ms", 0.5),
+                "debounce_enabled": data.get("debounce_enabled", True),
+                "debounce_ms": data.get("debounce_ms", 5),
+            }, task_params={})
+            with _devices_lock:
+                _devices["photodiode"] = dev
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+    _photodiode_raw = []
+
+    def on_tr(evt):
+        _photodiode_raw.append(evt)
+        if len(_photodiode_raw) > 20000:      # cap: keep the most recent transitions
+            del _photodiode_raw[:len(_photodiode_raw) - 20000]
+
+    try:
+        dev.start_raw_capture(on_tr)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/photodiode_raw_data")
+def photodiode_raw_data():
+    """Return-and-clear raw transitions buffered since the last poll (the scope accumulates them
+    client-side into a rolling window)."""
+    global _photodiode_raw
+    buf = _photodiode_raw
+    _photodiode_raw = []
+    return jsonify({"ok": True, "transitions": buf})
+
+
+@app.route("/api/photodiode_raw_stop", methods=["POST"])
+def photodiode_raw_stop():
+    """Stop raw capture and restore the device's configured glitch filter."""
+    with _devices_lock:
+        dev = _devices.get("photodiode")
+    if dev:
+        try:
+            dev.stop_raw_capture()
+        except Exception:
+            pass
+    return jsonify({"ok": True})
+
+
+@app.route("/api/photodiode_test_start", methods=["POST"])
+def photodiode_test_start():
+    """Flash the red photodiode sync square every N frames on THIS Pi's display (the follower),
+    simulating a session's sync pulses so the photodiode/scope can be exercised from the setup UI.
+    Runs in the display thread; stop via /api/photodiode_test_stop."""
+    data = request.json or {}
+    every_n = int(data.get("every_n", 5))
+    with _devices_lock:
+        dev = _devices.get("display")
+    if not dev or getattr(dev, "_screen", None) is None:
+        return jsonify({"ok": False, "error": "Display not initialized on this Pi"}), 400
+    _sync_test_stop.set()      # stop any prior run and let the display thread return to the queue
+    time.sleep(0.05)
+    return jsonify(_display_command({"action": "sync_test", "every_n": every_n}, timeout=5))
+
+
+@app.route("/api/photodiode_test_stop", methods=["POST"])
+def photodiode_test_stop():
+    """Stop the sync-square flash test (sets the stop Event out-of-band from the command queue)."""
+    _sync_test_stop.set()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/deliver_reward", methods=["POST"])

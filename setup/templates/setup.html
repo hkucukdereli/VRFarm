@@ -1282,6 +1282,10 @@ let photodiodeEvents = [];
 let photodiodeClockOffset = null;
 let photodidePollInterval = null;
 let photodiodeAnimFrame = null;
+let photodiodeRaw = [];         // rolling raw transitions {t, level} (~last 2s) for the scope
+let photodiodeTrigger = null;   // latest raw rising-edge time = scope trigger
+let photodiodeEdgeCount = 0;    // total raw rising edges since monitor start
+let _pdPolling = false;         // in-flight guard so overlapping polls can't race the raw buffer
 
 let rewardEvents = [];
 let rewardClockOffset = null;
@@ -1480,49 +1484,90 @@ function drawRewardRaster() {
 async function startPhotodiodeMonitor() {
   const pi = getPiForDevice('photodiode');
   if (!pi) { log('Photodiode not assigned to a Pi'); return; }
-  const gpio = (rig.devices.photodiode || {}).gpio || 24;
-  const result = await proxyPi(pi.ip, '/api/monitor_photodiode', {gpio});
+  const pd = rig.devices.photodiode || {};
+  const result = await proxyPi(pi.ip, '/api/photodiode_raw_start', {gpio: pd.gpio || 24});
   if (result.ok) {
     deviceState.photodiode = deviceState.photodiode || {};
     deviceState.photodiode.monitoring = true;
-    photodiodeClockOffset = null;
+    photodiodeRaw = []; photodiodeTrigger = null; photodiodeEdgeCount = 0;
     renderDeviceList();
-    photodidePollInterval = setInterval(() => pollPhotodiodeData(pi.ip), 200);
+    photodidePollInterval = setInterval(() => pollPhotodiodeRaw(pi.ip), 200);
     startPhotodiodeAnimation();
-    log('Photodiode monitoring started.');
+    log('Photodiode scope started (raw transitions; glitch filter off during capture).');
   } else { log('Failed: ' + (result.error || '')); }
 }
 
 async function stopPhotodiodeMonitor() {
+  if (deviceState.photodiode && deviceState.photodiode.testing) await stopPhotodiodeTest();
   const pi = getPiForDevice('photodiode');
-  if (pi) await proxyPi(pi.ip, '/api/stop_monitor_photodiode');
+  if (pi) await proxyPi(pi.ip, '/api/photodiode_raw_stop');
   deviceState.photodiode = deviceState.photodiode || {};
   deviceState.photodiode.monitoring = false;
   if (photodidePollInterval) { clearInterval(photodidePollInterval); photodidePollInterval = null; }
   stopPhotodiodeAnimation();
   renderDeviceList();
-  log('Photodiode monitoring stopped.');
+  log('Photodiode scope stopped.');
 }
 
-async function pollPhotodiodeData(ip) {
-  const result = await proxyPi(ip, '/api/photodiode_data', {}, 'GET');
-  photodiodeEvents = result.events || [];
-  if (photodiodeClockOffset === null && photodiodeEvents.length > 0) {
-    photodiodeClockOffset = Date.now() / 1000 - photodiodeEvents[photodiodeEvents.length - 1].t;
+// Test: flash the red sync square every N frames on the follower display so the photodiode sees
+// real pulses (opens the scope too). Simulates the stimulus sync square during an experiment.
+async function startPhotodiodeTest() {
+  if (!(deviceState.photodiode && deviceState.photodiode.monitoring)) await startPhotodiodeMonitor();
+  const dpi = getPiForDevice('display');
+  if (!dpi) { log('Display not assigned to a Pi'); return; }
+  const pd = rig.devices.photodiode || {};
+  const everyN = pd.pulse_every_n_frames || 5;
+  const r = await proxyPi(dpi.ip, '/api/photodiode_test_start', {every_n: everyN});
+  if (r && r.ok) {
+    deviceState.photodiode = deviceState.photodiode || {};
+    deviceState.photodiode.testing = true;
+    renderDeviceList();
+    log('Photodiode test: flashing sync square every ' + everyN + ' frames.');
+  } else {
+    log('Test failed: ' + ((r && r.error) || 'is the display initialized on the follower?'));
   }
-  const lastEl = document.getElementById('last-pulse-time');
-  if (lastEl && photodiodeEvents.length > 0) {
-    const lastT = photodiodeEvents[photodiodeEvents.length - 1].t;
-    const d = new Date(lastT * 1000);
-    lastEl.textContent = d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
+}
+
+async function stopPhotodiodeTest() {
+  const dpi = getPiForDevice('display');
+  if (dpi) await proxyPi(dpi.ip, '/api/photodiode_test_stop');
+  deviceState.photodiode = deviceState.photodiode || {};
+  deviceState.photodiode.testing = false;
+  renderDeviceList();
+  log('Photodiode test stopped.');
+}
+
+async function pollPhotodiodeRaw(ip) {
+  if (_pdPolling) return;                                       // don't overlap polls (raw buffer race)
+  _pdPolling = true;
+  try {
+    const result = await proxyPi(ip, '/api/photodiode_raw_data', {}, 'GET');
+    const trs = (result && result.transitions) || [];
+    if (trs.length) {
+      for (const e of trs) photodiodeRaw.push(e);
+      const newest = photodiodeRaw[photodiodeRaw.length - 1].t;
+      const cutoff = newest - 2;                                // keep ~last 2s
+      while (photodiodeRaw.length && photodiodeRaw[0].t < cutoff) photodiodeRaw.shift();
+      for (let i = photodiodeRaw.length - 1; i >= 0; i--) {     // latest rising edge = trigger
+        if (photodiodeRaw[i].level === 1) { photodiodeTrigger = photodiodeRaw[i].t; break; }
+      }
+      photodiodeEdgeCount += trs.filter(e => e.level === 1).length;
+      const lastEl = document.getElementById('last-pulse-time');
+      if (lastEl) {
+        const d = new Date(newest * 1000);
+        lastEl.textContent = d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
+      }
+    }
+    const countEl = document.getElementById('pulse-count');
+    if (countEl) countEl.textContent = photodiodeEdgeCount;
+  } finally {
+    _pdPolling = false;
   }
-  const countEl = document.getElementById('pulse-count');
-  if (countEl) countEl.textContent = photodiodeEvents.length;
 }
 
 function startPhotodiodeAnimation() {
   function frame() {
-    drawPhotodiodeRaster();
+    drawPhotodiodeScope();
     photodiodeAnimFrame = requestAnimationFrame(frame);
   }
   photodiodeAnimFrame = requestAnimationFrame(frame);
@@ -1532,38 +1577,126 @@ function stopPhotodiodeAnimation() {
   if (photodiodeAnimFrame) { cancelAnimationFrame(photodiodeAnimFrame); photodiodeAnimFrame = null; }
 }
 
-function drawPhotodiodeRaster() {
+// Re-apply steady (glitch) + hold-off to raw transitions IN THE BROWSER, mirroring the device:
+//  - STEADY: a rising edge is confirmed only if the level holds high >= steadyMs (else it's a
+//    glitch); pigpio reports it delayed by steadyMs, so we mark it at t_rise + steadyMs.
+//  - HOLD-OFF: after an accepted edge, ignore confirmed edges within holdMs.
+// steadyMs/holdMs of 0 disable that stage (matches "0 = off" on the device).
+function _computeDetectedEdges(trs, steadyMs, holdMs) {
+  const steadyS = steadyMs / 1000, holdS = holdMs / 1000;
+  // STEADY = the pigpio glitch filter modelled as a TWO-EDGE level debounce: a raw level change
+  // is "confirmed" (flips the filtered level) only if the new level holds >= steadyS. A confirmed
+  // 0->1 flip is a detected rising edge (reported delayed by steadyS, like pigpio). A short low
+  // dip inside a high plateau is thus suppressed and yields NO extra rising edge — matching the
+  // hardware, unlike a one-sided high-dwell test.
+  const confirmed = [];
+  let filt = trs.length ? (trs[0].level === 1 ? 0 : 1) : 0;    // filtered level before trs[0]
+  for (let i = 0; i < trs.length; i++) {
+    const lvl = trs[i].level;
+    if (lvl === filt) continue;                                // no change vs the filtered baseline
+    const next = trs[i + 1];
+    const dwell = next ? (next.t - trs[i].t) : Infinity;       // how long the new level holds
+    if (dwell >= steadyS) {                                    // stable enough -> confirmed change
+      if (lvl === 1) confirmed.push(trs[i].t + steadyS);       // 0->1 = detected rising edge
+      filt = lvl;
+    }
+    // else: glitch too brief -> filtered level unchanged; its reversing edge is skipped (lvl===filt)
+  }
+  const accepted = [];
+  let last = -Infinity;
+  for (const t of confirmed) {
+    if (t - last >= holdS) { accepted.push(t); last = t; }     // hold-off lockout
+  }
+  return { confirmed, accepted };
+}
+
+// Triggered digital scope: the latest raw rising edge is t=0; ms timebase so the 1–2ms pulse
+// shape is visible. Draws the digital step waveform + raw rising edges (faint) + browser-computed
+// detected edges (bold) + hold-off lockout shading. Steady/hold-off read live from rig.
+function drawPhotodiodeScope() {
   const canvas = document.getElementById('photodiode-canvas');
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
   const w = canvas.width, h = canvas.height;
-  ctx.fillStyle = '#0a0a1a';
-  ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
 
-  const windowS = 30;
-  const now = photodiodeClockOffset !== null
-    ? (Date.now() / 1000 - photodiodeClockOffset)
-    : (photodiodeEvents.length > 0 ? photodiodeEvents[photodiodeEvents.length - 1].t : 0);
+  const pd = rig.devices.photodiode || {};
+  const steadyMs = (pd.glitch_enabled ?? true) ? (parseFloat(pd.glitch_ms ?? 0.5) || 0) : 0;
+  const holdMs   = (pd.debounce_enabled ?? true) ? (parseFloat(pd.debounce_ms ?? 5) || 0) : 0;
 
-  // Time axis labels
-  ctx.fillStyle = '#444';
+  const preMs = 2, postMs = Math.min(40, Math.max(12, holdMs + 8));
+  const totalS = (preMs + postMs) / 1000;
+
+  if (photodiodeTrigger === null) {
+    ctx.fillStyle = '#556'; ctx.font = '11px monospace';
+    ctx.fillText('waiting for a rising edge…', 10, h / 2);
+    return;
+  }
+  const t0 = photodiodeTrigger;
+  const winStart = t0 - preMs / 1000, winEnd = t0 + postMs / 1000;
+  const xOf = t => ((t - winStart) / totalS) * w;
+  const yHigh = 14, yLow = h - 22;
+
+  // level just before the window (for the step trace start)
+  let lvl = 0, haveBefore = false;
+  for (let i = photodiodeRaw.length - 1; i >= 0; i--) {
+    if (photodiodeRaw[i].t < winStart) { lvl = photodiodeRaw[i].level; haveBefore = true; break; }
+  }
+  const trs = photodiodeRaw.filter(e => e.t >= winStart && e.t <= winEnd);
+  if (!haveBefore && trs.length) lvl = trs[0].level === 1 ? 0 : 1;
+
+  // pad the left by holdMs so an accepted edge just before the window still casts its lockout in.
+  const padS = holdMs / 1000 + 0.05;
+  const { accepted } = _computeDetectedEdges(
+    photodiodeRaw.filter(e => e.t >= winStart - padS && e.t <= winEnd + 0.05), steadyMs, holdMs);
+  const drawn = accepted.filter(t => t >= winStart && t <= winEnd);   // edges actually shown
+
+  // hold-off lockout shading
+  if (holdMs > 0) {
+    ctx.fillStyle = 'rgba(255,193,7,0.10)';
+    for (const t of accepted) {
+      const x1 = Math.max(0, xOf(t)), x2 = Math.min(w, xOf(t + holdMs / 1000));
+      if (x2 > x1) ctx.fillRect(x1, 0, x2 - x1, h - 12);
+    }
+  }
+
+  // digital step waveform
+  ctx.strokeStyle = '#4fc3f7'; ctx.lineWidth = 1.5; ctx.beginPath();
+  let py = lvl ? yHigh : yLow; ctx.moveTo(0, py);
+  for (const e of trs) {
+    const x = xOf(e.t); ctx.lineTo(x, py); py = e.level ? yHigh : yLow; ctx.lineTo(x, py);
+  }
+  ctx.lineTo(w, py); ctx.stroke();
+
+  // trigger marker
+  ctx.strokeStyle = '#555'; ctx.setLineDash([3, 3]); ctx.beginPath();
+  ctx.moveTo(xOf(t0), 0); ctx.lineTo(xOf(t0), h - 12); ctx.stroke(); ctx.setLineDash([]);
+
+  // raw rising edges (faint)
+  ctx.strokeStyle = '#ff8a65'; ctx.lineWidth = 1;
+  for (const e of trs) {
+    if (e.level !== 1) continue; const x = xOf(e.t);
+    ctx.beginPath(); ctx.moveTo(x, yHigh - 5); ctx.lineTo(x, yLow + 5); ctx.stroke();
+  }
+  // accepted (detected) edges — bold green
+  ctx.strokeStyle = '#66bb6a'; ctx.lineWidth = 2;
+  for (const t of drawn) {
+    const x = xOf(t);
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h - 12); ctx.stroke();
+  }
+
+  // ms axis labels relative to trigger
+  ctx.fillStyle = '#556'; ctx.font = '9px monospace';
+  const step = Math.max(2, Math.round((preMs + postMs) / 6));
+  for (let ms = -preMs; ms <= postMs; ms += step) {
+    ctx.fillText((ms > 0 ? '+' : '') + ms, xOf(t0 + ms / 1000) + 1, h - 2);
+  }
+  // legend
   ctx.font = '9px monospace';
-  for (let s = 0; s <= 30; s += 5) {
-    const x = ((windowS - s) / windowS) * w;
-    ctx.fillText('-' + s + 's', x, h - 2);
-  }
-
-  ctx.strokeStyle = '#ff5722';
-  ctx.lineWidth = 1.5;
-  for (const evt of photodiodeEvents) {
-    const age = now - evt.t;
-    if (age > windowS || age < 0) continue;
-    const x = ((windowS - age) / windowS) * w;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, h - 12);
-    ctx.stroke();
-  }
+  ctx.fillStyle = '#4fc3f7'; ctx.fillText('raw', 4, 10);
+  ctx.fillStyle = '#66bb6a'; ctx.fillText('detected', 34, 10);
+  ctx.fillStyle = '#888';
+  ctx.fillText(`steady ${steadyMs} · hold-off ${holdMs} ms · ${drawn.length} kept`, 100, 10);
 }
 
 function updateRewardMs() {
@@ -2046,6 +2179,10 @@ function renderPhotodiodeControls(dev) {
   // (symmetric left/right, so one cap serves all four corners).
   const sizeCap = (geoData && geoData.calibration && geoData.calibration.frame_x) || 400;
   const sizePx = dev.sync_size_px || 0;   // 0 = auto (full dead-band width)
+  const glitchOn = dev.glitch_enabled ?? true;
+  const glitchMs = dev.glitch_ms ?? 0.5;
+  const holdOn = dev.debounce_enabled ?? true;
+  const holdMs = dev.debounce_ms ?? 5;
   const ds = deviceState.photodiode || {};
   const monitoring = ds.monitoring;
 
@@ -2074,12 +2211,40 @@ function renderPhotodiodeControls(dev) {
                title="0 = auto (full dead-band width). Max ${sizeCap}px = frame_x from geo calibration — the leftover width outside the visible area (symmetric left/right)."
                onchange="this.value = Math.max(0, Math.min(${sizeCap}, parseInt(this.value) || 0)); rig.devices.photodiode.sync_size_px = parseInt(this.value); renderDeviceList()">
       </div>
+      <div class="device-field">
+        <label>Steady filter</label>
+        <input type="checkbox" ${glitchOn ? 'checked' : ''}
+               title="pigpio glitch filter: report an edge only after the level holds this long, dropping anything narrower. NOTE: also delays every reported edge by this amount. Uncheck or 0 = off."
+               onchange="rig.devices.photodiode.glitch_enabled = this.checked; renderDeviceList()">
+        <input type="number" value="${glitchMs}" min="0" max="50" step="0.1" style="width:50px"
+               onchange="rig.devices.photodiode.glitch_ms = parseFloat(this.value) || 0; renderDeviceList()"><span style="font-size:10px;color:#888">ms</span>
+      </div>
+      <div class="device-field">
+        <label>Hold-off</label>
+        <input type="checkbox" ${holdOn ? 'checked' : ''}
+               title="Debounce: after a rising edge is accepted, ignore further edges for this long (kills the spike→plateau double-trigger and ringing). No timing delay on the accepted edge. Uncheck or 0 = off."
+               onchange="rig.devices.photodiode.debounce_enabled = this.checked; renderDeviceList()">
+        <input type="number" value="${holdMs}" min="0" max="1000" step="0.5" style="width:50px"
+               onchange="rig.devices.photodiode.debounce_ms = parseFloat(this.value) || 0; renderDeviceList()"><span style="font-size:10px;color:#888">ms</span>
+      </div>
       ${monitoring
         ? `<button class="btn btn-red btn-sm" onclick="stopPhotodiodeMonitor()">Stop</button>`
         : `<button class="btn btn-blue btn-sm" onclick="startPhotodiodeMonitor()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
-      ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">Pulses: <span id="pulse-count">0</span> | Last: <span id="last-pulse-time">--</span></span>` : ''}
+      ${ds.testing
+        ? `<button class="btn btn-red btn-sm" onclick="stopPhotodiodeTest()">Stop test</button>`
+        : `<button class="btn btn-sm" onclick="startPhotodiodeTest()" ${ds.initialized !== true ? 'disabled' : ''} title="Flash the red sync square every N frames on the display (simulates the stimulus sync pulse) and open the scope">Test</button>`}
+      ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">Edges: <span id="pulse-count">0</span> | Last: <span id="last-pulse-time">--</span></span>` : ''}
     </div>
-    ${monitoring ? `<canvas id="photodiode-canvas" class="lick-canvas" width="400" height="60"></canvas>` : ''}
+    ${monitoring ? `<canvas id="photodiode-canvas" class="lick-canvas" width="460" height="120" style="width:460px;height:120px;max-width:100%"></canvas>
+      <div style="display:flex; gap:14px; align-items:center; font-size:10px; color:#aaa; margin-top:3px; flex-wrap:wrap">
+        <label>steady <input type="range" min="0" max="5" step="0.1" value="${glitchMs}" style="vertical-align:middle; width:90px"
+          oninput="rig.devices.photodiode.glitch_ms=parseFloat(this.value); document.getElementById('pd-steady-v').textContent=this.value"><span id="pd-steady-v">${glitchMs}</span> ms</label>
+        <label>hold-off <input type="range" min="0" max="20" step="0.5" value="${holdMs}" style="vertical-align:middle; width:90px"
+          oninput="rig.devices.photodiode.debounce_ms=parseFloat(this.value); document.getElementById('pd-hold-v').textContent=this.value"><span id="pd-hold-v">${holdMs}</span> ms</label>
+        <button class="btn btn-sm btn-blue" onclick="saveRig()">Save to rig</button>
+        <span style="color:#666">tune live; Save persists · re-Init applies the steady filter to hardware</span>
+      </div>` : ''}
+    <div style="font-size:10px; color:#666; margin-top:2px">Filters: steady ${glitchOn ? glitchMs + ' ms' : 'off'} · hold-off ${holdOn ? holdMs + ' ms' : 'off'} <span style="color:#555">(re-Init to apply a change)</span></div>
     <div style="font-size:10px; color:#666; margin-top:2px">Rising edge detection on GPIO${gpio} — pure-red sync square at ${corner}, ${sizePx ? sizePx + 'px' : 'auto (' + sizeCap + 'px = dead-band width)'}</div>`;
 }
 

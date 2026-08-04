@@ -18,12 +18,21 @@ from pathlib import Path
 
 
 def _sample_durations(rng, cfg, size):
-    """Sample durations from config: scalar (fixed) or [min, max] (uniform random).
-    Returns float32 array of given size.
+    """Sample durations from config. A [min, max] pair => uniform random per element; a scalar (5)
+    OR a single-element list ([5]) => that fixed value; anything else => 0. Returns a float32 array
+    of the given size.
     """
-    if isinstance(cfg, list) and len(cfg) == 2:
-        return rng.uniform(cfg[0], cfg[1], size=size).astype(np.float32)
-    val = float(cfg) if isinstance(cfg, (int, float)) else 0.0
+    if isinstance(cfg, (list, tuple)):
+        if len(cfg) == 2:
+            lo, hi = sorted((float(cfg[0]), float(cfg[1])))   # order-insensitive; [7,5] == [5,7]
+            if hi > lo:
+                return rng.uniform(lo, hi, size=size).astype(np.float32)
+            val = lo                                          # [5,5] => fixed 5 (no empty-range crash)
+        else:
+            # [5] => fixed 5 (single-value list, same as the scalar 5); [] or >2 entries => 0
+            val = float(cfg[0]) if len(cfg) == 1 else 0.0
+    else:
+        val = float(cfg) if isinstance(cfg, (int, float)) else 0.0
     return np.full(size, val, dtype=np.float32)
 
 

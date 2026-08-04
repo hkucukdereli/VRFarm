@@ -1760,7 +1760,10 @@ function trialPhaseDur(t) {
 function computeSessionEstimate() {
   if (!trialTable || !trialTable.length) return null;
   const sess = (config.task && config.task.session) || {};
-  const mid = v => Array.isArray(v) ? (v[0] + v[1]) / 2 : (parseFloat(v) || 0);
+  // [min,max] => midpoint; single value 5 or [5] => that value; else 0.
+  const mid = v => Array.isArray(v)
+    ? (v.length === 2 ? (v[0] + v[1]) / 2 : (parseFloat(v[0]) || 0))
+    : (parseFloat(v) || 0);
   let total = 0, itiSum = 0;
   for (const t of trialTable) {
     total += (t.iti_s || 0) + trialPhaseDur(t);

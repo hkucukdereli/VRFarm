@@ -46,6 +46,7 @@ state = {
     "task_path": None,
     "session": {},          # subject_id, date, session_num, level, notes
     "session_id": None,
+    "session_dir": None,    # controller-side data folder for this session (created at Go)
     "deployed": False,
 }
 
@@ -620,7 +621,21 @@ def go():
 
     # Per-device "save data" choices from the Actions row (default: save everything). Camera unchecked
     # -> livestream only (no video file); a behavioral device unchecked -> Leader skips its HDF5 datasets.
-    save = (request.get_json(silent=True) or {}).get("save", {})
+    _body = request.get_json(silent=True) or {}
+    save = _body.get("save", {})
+    # Create the session data folder NOW (so the live plots can be saved into it at end/stop,
+    # regardless of whether the data is later transferred). Uses the transfer destination if the
+    # UI field is set, else the controller default — the same layout transfer() writes to.
+    dest_override = str(_body.get("dest_dir", "")).strip()
+    try:
+        dest_root = Path(dest_override).expanduser() if dest_override else _data_dir()
+        sdir = _session_dir(dest_root)
+        sdir.mkdir(parents=True, exist_ok=True)
+        state["session_dir"] = str(sdir)
+        print(f"[go] session dir: {sdir}")
+    except Exception as e:
+        print(f"[go] could not create session dir: {e}")
+        state["session_dir"] = None
     rig_filename = Path(state["rig_path"]).name
     task_filename = Path(state["task_path"]).name
 
@@ -885,6 +900,45 @@ def _data_dir() -> Path:
     return Path(env).expanduser() if env else Path.home() / "VRFarm" / "data"
 
 
+def _session_dir(dest_root) -> Path:
+    """Session data folder: <root>/<subject>/<subject>_<date>/<session_id> — the same layout used
+    by transfer(), so plots saved at Go land alongside the data if/when it's transferred."""
+    subject_id = state["session"]["subject_id"]
+    date_str = state["session"]["date"]
+    return Path(dest_root) / subject_id / f"{subject_id}_{date_str}" / state["session_id"]
+
+
+@app.route("/api/save_plots", methods=["POST"])
+def save_plots():
+    """Write the browser's live-plot PNGs into the session folder (created at Go) so the plots
+    persist for later review regardless of whether the data is transferred."""
+    import base64
+    req = request.get_json(silent=True) or {}
+    plots = req.get("plots", {})
+    sess_dir = state.get("session_dir")
+    if not sess_dir:
+        if not state.get("session_id"):
+            return jsonify({"ok": False, "error": "No active session"}), 400
+        sess_dir = str(_session_dir(_data_dir()))   # fallback: default data dir
+    d = Path(sess_dir)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return jsonify({"ok": False, "error": f"Cannot create {d}: {e}"}), 500
+    written = []
+    for name, dataurl in plots.items():
+        if not isinstance(dataurl, str) or "," not in dataurl:
+            continue
+        try:
+            raw = base64.b64decode(dataurl.split(",", 1)[1])
+            safe = "".join(c for c in str(name) if c.isalnum() or c in "-_") or "plot"
+            (d / f"{safe}.png").write_bytes(raw)
+            written.append(f"{safe}.png")
+        except Exception:
+            pass
+    return jsonify({"ok": True, "dir": str(d), "written": written})
+
+
 @app.route("/api/transfer", methods=["POST"])
 def transfer():
     """Download session data from Pis to the controller."""
@@ -897,9 +951,7 @@ def transfer():
     dest_root = Path(dest_override).expanduser() if dest_override else default_data_dir
     session_id = state["session_id"]
     subject_id = state["session"]["subject_id"]
-    date_str = state["session"]["date"]
-    subject_date = f"{subject_id}_{date_str}"
-    dest = dest_root / subject_id / subject_date / session_id
+    dest = _session_dir(dest_root)
     try:
         dest.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -1178,6 +1230,16 @@ def _send_command(ip: str, port: int, msg: dict):
         _cmd_sock.sendto(payload, (ip, port))
 
 
+def _event_is_go(event: dict) -> bool:
+    """Whether a trial event is a GO trial (should lick), per the task go_rule + stim azimuth.
+    Mirrors the engine (_classify_go) and the UI (_isGo): all->go, right->az>0, else az<0."""
+    rule = (state.get("task_config") or {}).get("stimulus", {}).get("go_rule", "left")
+    if rule == "all":
+        return True
+    az = event.get("stim_az", 0) or 0
+    return az > 0 if rule == "right" else az < 0
+
+
 def _start_udp_listener(event_port: int):
     """Start background thread listening for UDP events from Leader."""
     global _udp_thread, _udp_running
@@ -1198,8 +1260,9 @@ def _start_udp_listener(event_port: int):
                 # Track trials
                 if event.get("type") == "trial":
                     _trials.append(event)
-                    # Append hit-trial RT (ms) to the live-RT temp file for lightweight persistence.
-                    if _rt_hits_path and event.get("outcome") == "hit":
+                    # Append GO-trial hit RTs (ms) to the live-RT temp file (matches the histogram;
+                    # a nogo-trial lick is a false alarm, not a hit).
+                    if _rt_hits_path and event.get("outcome") == "hit" and _event_is_go(event):
                         rt = event.get("rt_ms")
                         if isinstance(rt, (int, float)) and not isinstance(rt, bool) and rt == rt:
                             try:

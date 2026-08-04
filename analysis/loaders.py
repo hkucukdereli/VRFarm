@@ -134,6 +134,59 @@ def session_info(path):
     return info
 
 
+def response_times(path, ref="onset", within_window=False):
+    """Per-trial first-lick latency (s) — the response/reaction time.
+
+    ref="onset"  : measured from the stimulus onset (true_onset_t, the photodiode-corrected
+                   onset, with a stim_onset_t fallback where the sync failed).
+    ref="window" : measured from when the response window opens (response_window_t).
+
+    within_window=True restricts the qualifying lick to the response window: it must land before
+    the window closes (response_window_t + reward.response_window). Because per-trial licks are
+    recorded across the WHOLE trial (pre-stim → stim → response window → post-stim), the default
+    (False) can return a latency into the post-stim period — a first post-onset lick that occurs
+    after the window has closed — so RTs can exceed resp_delay + response_window. Set True to
+    exclude those late licks.
+
+    Uses the full per-trial lick_times when the lick device was saved (first lick at/after the
+    reference — so pre-stim/anticipatory licks don't count); otherwise falls back to the recorded
+    first_lick_t. Returns a length-n_trials array; NaN for trials with no qualifying lick.
+    """
+    s = load_session(path)
+    tr = s.get("trials", {})
+    n = len(tr.get("trial_num", []))
+    if n == 0:
+        return np.array([])
+    win_open = np.asarray(tr["response_window_t"], float)
+    if ref == "window":
+        ref_t = win_open
+    else:
+        onset = np.asarray(tr["true_onset_t"], float)
+        ref_t = np.where(np.isfinite(onset), onset, np.asarray(tr["stim_onset_t"], float))
+
+    hi = np.full(n, np.inf)
+    if within_window:
+        rw = float(((s.get("attrs", {}).get("task_config") or {}).get("reward", {})
+                    ).get("response_window", 1.4))
+        hi = win_open + rw   # window close time; licks at/after this are post-stim
+
+    lick_times = s.get("lick", {}).get("lick_times")   # list of per-trial arrays, or None
+    first_lick = np.asarray(tr.get("first_lick_t", np.full(n, np.nan)), float)
+    out = np.full(n, np.nan)
+    for i in range(n):
+        r = ref_t[i]
+        if not np.isfinite(r):
+            continue
+        if lick_times is not None:
+            a = np.asarray(lick_times[i], float)
+            a = a[(a >= r) & (a < hi[i])]
+            if a.size:
+                out[i] = a[0] - r
+        elif np.isfinite(first_lick[i]) and r <= first_lick[i] < hi[i]:
+            out[i] = first_lick[i] - r
+    return out
+
+
 # ── stimulus plan + camera timestamps (now inside the h5; .npz/.npy fallback) ──
 
 def load_stims(path):

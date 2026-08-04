@@ -142,7 +142,7 @@
       <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0 10px;">
         <div><label>Subject ID</label><input type="text" id="subject-id" value="" placeholder="subject id"></div>
         <div><label>Date</label><input type="text" id="session-date" value=""></div>
-        <div><label>Session #</label><input type="number" id="session-num" value="1" min="1"></div>
+        <div><label>Session #</label><input type="number" id="session-num" value="1" min="1" oninput="if (sessionShown) renderSessionNum()"></div>
       </div>
       <div><label>Notes</label><textarea id="session-notes" style="height:56px;"></textarea></div>
     </div>
@@ -279,11 +279,14 @@
       <div>
         <span class="label">Session</span><br>
         <span class="value" id="mv-session-id">--</span>
-        <span id="session-start-time" style="font-size:11px; color:#888; margin-left:6px"></span>
       </div>
       <div>
         <span class="label">Elapsed</span><br>
         <span class="clock" id="session-clock">00:00:00</span>
+      </div>
+      <div>
+        <span class="label">Estimated</span><br>
+        <span class="clock" id="est-clock">00:00:00</span>
       </div>
       <div>
         <span class="label">Trial</span><br>
@@ -291,11 +294,14 @@
       </div>
       <div>
         <span class="label">Trial Timer</span><br>
-        <span class="trial-clock" id="trial-clock">--:--</span>
+        <span class="trial-clock" id="trial-clock">--:-- / --:--</span>
       </div>
       <div>
         <span class="label">ITI Timer</span><br>
-        <span class="trial-clock" id="iti-clock" style="color:#888;">--:--</span>
+        <span class="trial-clock" id="iti-clock" style="color:#888;">--:-- / --:--</span>
+      </div>
+      <div style="margin-left:auto; text-align:right;">
+        <span id="session-start-time" style="font-size:11px; color:#888;"></span>
       </div>
     </div>
 
@@ -417,6 +423,10 @@ let timeoutExtraMs = 0;         // extra time accrued from phase-restart timeout
 let phaseStartTime = null;      // start of the current enforced phase (ITI/prestim/poststim)
 let currentTrialTotalS = null;  // planned duration of the current trial phase (excl. ITI)
 let currentItiTotalS = null;    // planned duration of the current ITI
+let estRemainingMs = null;      // Estimated time LEFT (countdown): full at start, -= (ITI+trial) per trial
+let nextTrialTotalS = null;     // upcoming trial-phase duration (shown when trial not active)
+let nextItiTotalS = null;       // upcoming ITI duration (shown when ITI not active)
+let sessionShown = false;       // Session # + Estimated shown (set after Deploy)
 // Phase 4: predicted upcoming events drawn in the future region of the raster.
 let predStim = null;      // predicted upcoming stim window {t_on, t_off} (leader clock)
 let predReward = null;    // predicted pavlovian reward {t} (L1/L2 only; not adaptive/conditional)
@@ -539,6 +549,10 @@ async function loadTask() {
     populateTaskFields(data.task);
     document.getElementById('experiment-subsections').style.display = '';
     document.getElementById('task-last-saved').textContent = 'Last saved: ' + (data.task.last_saved || '--');
+    // New experiment loaded — the estimate/session# only show after a (re)Deploy.
+    sessionEstimateMs = null; estRemainingMs = null; sessionShown = false;
+    document.getElementById('mv-session-id').textContent = '--';
+    document.getElementById('est-clock').textContent = '00:00:00';
     log('Loaded experiment: ' + task);
   } finally {
     btn.textContent = 'Load Experiment';
@@ -950,6 +964,13 @@ async function deployExperiment() {
         trialTable = ttData.trials || [];
       } catch(e) { trialTable = []; }
       log('Deploy complete.');
+      // Show the estimated session time + session number now that the trial table is known.
+      sessionEstimateMs = computeSessionEstimate();
+      estRemainingMs = null;
+      sessionShown = true;
+      renderSessionNum();
+      const _estEl = document.getElementById('est-clock');
+      if (_estEl) _estEl.textContent = (sessionEstimateMs != null) ? formatHMS(sessionEstimateMs) : '00:00:00';
       setPhase('deployed');
       initStimCanvas();
     } else {
@@ -974,7 +995,6 @@ async function startSession() {
   sessionStartTime = null;
   trialStartTime = null;
   itiStartTime = null;
-  sessionEstimateMs = null;
   timeoutExtraMs = 0;
   phaseStartTime = null;
   currentTrialTotalS = null;
@@ -1000,12 +1020,13 @@ async function startSession() {
     (data.steps || []).forEach(s => log('  ' + s));
     if (data.ok) {
       setPhase('running');
-      startClock();
+      startClock();                      // resets the run-timers; set the run state AFTER it
       startSSE();
-      const sid = document.getElementById('subject-id').value;
-      const snum = document.getElementById('session-num').value;
-      document.getElementById('mv-session-id').textContent = `${sid} #${snum}`;
-      document.getElementById('session-start-time').textContent = 'started ' + new Date().toLocaleTimeString();
+      estRemainingMs = sessionEstimateMs;                     // countdown starts full
+      nextItiTotalS = (trialTable[0] || {}).iti_s ?? null;    // grace: preview the first ITI total
+      nextTrialTotalS = null;
+      renderSessionNum();
+      document.getElementById('session-start-time').textContent = '';   // stamped after grace (experiment_start)
       // Seed the grace-period countdown inside the GO button; 'countdown' SSE
       // events tick it down and 'experiment_start' restores it to GO.
       const grace = parseInt(document.getElementById('grace-period').value) || 0;
@@ -1136,21 +1157,21 @@ function handleEvent(evt) {
       sessionStartTime = Date.now();
       trialStartTime = null;
       itiStartTime = null;
-      sessionEstimateMs = computeSessionEstimate();   // baseline ETA (elapsed is post-grace)
+      if (sessionEstimateMs == null) sessionEstimateMs = computeSessionEstimate();
+      estRemainingMs = sessionEstimateMs;    // Estimated = time left; full now, counts down per trial
       timeoutExtraMs = 0;
       predStim = null; predReward = null; predTrialIdx = null;
+      renderSessionNum();
       document.getElementById('btn-go').textContent = 'GO';  // grace done
       log('Experiment started.');
-      const sid = document.getElementById('subject-id').value;
-      const snum = document.getElementById('session-num').value;
-      document.getElementById('mv-session-id').textContent = `${sid} #${snum}`;
-      document.getElementById('session-start-time').textContent = 'started ' + new Date().toLocaleTimeString();
+      document.getElementById('session-start-time').textContent = _startedAtText();
       break;
     case 'trial_start':
       currentTrialNum = evt.trial + 1;
       trialStartTime = Date.now();
       phaseStartTime = Date.now();   // pre-stim phase begins here
       currentTrialTotalS = trialPhaseDur(trialTable[evt.trial]);
+      nextItiTotalS = (trialTable[evt.trial + 1] || {}).iti_s ?? null;   // ITI before the next trial
       // Refine the prediction now that pre-stim actually begins: onset = now + pre-stim.
       predTrialIdx = evt.trial;
       setPrediction(evt.trial, evt.t + ((trialTable[evt.trial] || {}).prestim_s || 0));
@@ -1159,12 +1180,19 @@ function handleEvent(evt) {
     case 'trial':
       addTrialRow(evt);
       trialStartTime = null;
+      // Estimated time-left countdown: subtract this trial's (ITI + trial-phase) duration.
+      if (estRemainingMs != null) {
+        const _t = trialTable[evt.trial_num];
+        if (_t) estRemainingMs = Math.max(0,
+          estRemainingMs - (((_t.iti_s || 0) + (trialPhaseDur(_t) || 0)) * 1000));
+      }
       predStim = null; predReward = null;   // trial done — clear its predictions
       break;
     case 'iti_start':
       itiStartTime = Date.now();
       phaseStartTime = Date.now();
       currentItiTotalS = (evt.duration != null) ? evt.duration : null;
+      nextTrialTotalS = trialPhaseDur(trialTable[evt.trial]);   // trial that follows this ITI
       // Predict the upcoming trial's stim window/reward: onset = ITI end + pre-stim.
       predTrialIdx = evt.trial;
       setPrediction(evt.trial, evt.t + (evt.duration || 0) + ((trialTable[evt.trial] || {}).prestim_s || 0));
@@ -1587,49 +1615,62 @@ function stopClock() {
   sessionStartTime = null;
   trialStartTime = null;
   itiStartTime = null;
-  sessionEstimateMs = null;
   timeoutExtraMs = 0;
   phaseStartTime = null;
   currentTrialTotalS = null;
   currentItiTotalS = null;
+  estRemainingMs = null;
+  nextTrialTotalS = null;
+  nextItiTotalS = null;
   predStim = null;
   predReward = null;
   predTrialIdx = null;
   document.getElementById('session-clock').textContent = '00:00:00';
-  document.getElementById('trial-clock').textContent = '--:--';
-  document.getElementById('iti-clock').textContent = '--:--';
+  // Estimated keeps showing the deploy-time baseline (sessionEstimateMs) between runs.
+  document.getElementById('est-clock').textContent =
+    (sessionEstimateMs != null) ? formatHMS(sessionEstimateMs) : '00:00:00';
+  document.getElementById('trial-clock').textContent = '--:-- / --:--';
+  document.getElementById('iti-clock').textContent = '--:-- / --:--';
   document.getElementById('trial-num').textContent = '--';
+}
+
+function renderSessionNum() {
+  const el = document.getElementById('mv-session-id');
+  if (el) el.textContent = '#' + (document.getElementById('session-num').value || '1');
+}
+
+// "started at HH:MM:SS on YYYY-MM-DD" — wall clock at the real start (after grace).
+function _startedAtText() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, '0');
+  return `started at ${d.toLocaleTimeString()} on ${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// "elapsed / total" for a phase timer. Active -> "MM:SS / <current total>"; idle -> "--:-- /
+// <upcoming total>" (or "--:-- / --:--" when the upcoming duration isn't known yet).
+function _timerHTML(startTime, curTotalS, nextTotalS, now, dim) {
+  if (startTime) {
+    const tot = curTotalS ? formatMS(curTotalS * 1000) : '--:--';
+    return `${formatMS(now - startTime)}<span style="color:${dim}"> / ${tot}</span>`;
+  }
+  const tot = (nextTotalS != null) ? formatMS(nextTotalS * 1000) : '--:--';
+  return `--:--<span style="color:${dim}"> / ${tot}</span>`;
 }
 
 function updateClocks() {
   const now = Date.now();
-  // Elapsed / estimated total (estimate grows as timeouts accrue).
   const sessEl = document.getElementById('session-clock');
-  if (sessEl) {
-    if (sessionStartTime) {
-      const el = formatHMS(now - sessionStartTime);
-      const est = sessionEstimateMs ? sessionEstimateMs + timeoutExtraMs : null;
-      sessEl.innerHTML = est ? `${el}<span style="color:#888">/${formatHMS(est)}</span>` : el;
-    } else sessEl.textContent = '00:00:00';
+  if (sessEl) sessEl.textContent = sessionStartTime ? formatHMS(now - sessionStartTime) : '00:00:00';
+  // Estimated time LEFT (per-trial countdown); before a run shows the deploy baseline.
+  const estEl = document.getElementById('est-clock');
+  if (estEl) {
+    const ms = (estRemainingMs != null) ? estRemainingMs : sessionEstimateMs;
+    estEl.textContent = (ms != null) ? formatHMS(Math.max(0, ms)) : '00:00:00';
   }
-  // Trial timer: elapsed / planned trial-phase duration.
   const trialEl = document.getElementById('trial-clock');
-  if (trialEl) {
-    if (trialStartTime) {
-      const el = formatMS(now - trialStartTime);
-      trialEl.innerHTML = currentTrialTotalS
-        ? `${el}<span style="color:#888">/${formatMS(currentTrialTotalS * 1000)}</span>` : el;
-    } else trialEl.textContent = '--:--';
-  }
-  // ITI timer: elapsed / planned ITI duration.
+  if (trialEl) trialEl.innerHTML = _timerHTML(trialStartTime, currentTrialTotalS, nextTrialTotalS, now, '#888');
   const itiEl = document.getElementById('iti-clock');
-  if (itiEl) {
-    if (itiStartTime) {
-      const el = formatMS(now - itiStartTime);
-      itiEl.innerHTML = currentItiTotalS
-        ? `${el}<span style="color:#666">/${formatMS(currentItiTotalS * 1000)}</span>` : el;
-    } else itiEl.textContent = '--:--';
-  }
+  if (itiEl) itiEl.innerHTML = _timerHTML(itiStartTime, currentItiTotalS, nextItiTotalS, now, '#666');
   const trialNum = document.getElementById('trial-num');
   if (trialNum) trialNum.textContent = currentTrialNum || '--';
 }

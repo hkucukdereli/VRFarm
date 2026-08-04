@@ -332,6 +332,8 @@
       <div class="video-box" id="panel-camera">
         <div class="box-header">
           <h3><label style="margin:0; display:inline-flex; align-items:center; gap:4px; cursor:pointer;"><input type="checkbox" id="cb-camera" checked> Camera</label></h3>
+          <button id="btn-camera-reset" onclick="resetCamera()" title="Recover a frozen/wedged camera: rebinds the sensor driver on the Pi and re-mounts the feed"
+                  style="font-size:11px; padding:2px 8px; background:#16213e; color:#8fa; border:1px solid #2a3a5e; border-radius:4px; cursor:pointer;">⟳ Reset</button>
         </div>
         <div class="box-content" id="camera-content">
           <span class="placeholder">Camera off</span>
@@ -964,6 +966,12 @@ async function deployExperiment() {
         trialTable = ttData.trials || [];
       } catch(e) { trialTable = []; }
       log('Deploy complete.');
+      // Deploy restarts pi_api on the Pi, which drops the camera. If the preview was live,
+      // re-establish it fresh once the API is back up (a plain re-point would 400).
+      if (cameraLive) {
+        cameraLive = false;
+        setTimeout(() => { if (document.getElementById('cb-camera').checked) _startCamera(); }, 2500);
+      }
       // Show the estimated session time + session number now that the trial table is known.
       sessionEstimateMs = computeSessionEstimate();
       estRemainingMs = null;
@@ -1022,6 +1030,7 @@ async function startSession() {
       setPhase('running');
       startClock();                      // resets the run-timers; set the run state AFTER it
       startSSE();
+      _refreshCameraFeed(2000);          // GO swaps the Pi camera preview->record; reconnect the feed
       estRemainingMs = sessionEstimateMs;                     // countdown starts full
       nextItiTotalS = (trialTable[0] || {}).iti_s ?? null;    // grace: preview the first ITI total
       nextTrialTotalS = null;
@@ -1245,21 +1254,76 @@ function handleEvent(evt) {
 
 let stimLive = false;
 
+let cameraRetry = null;
+function _cameraSrc() { return '/api/camera_feed?ts=' + Date.now(); }
+
+// (Re)mount the MJPEG <img>. The stream ends on any Pi-side camera teardown (Deploy/GO swap,
+// driver reset); on a *clean* end the browser just freezes on the last frame without firing
+// onerror, so we also re-point proactively at those known points (see _refreshCameraFeed).
+function _mountCameraImg() {
+  const el = document.getElementById('camera-content');
+  el.innerHTML = '';
+  const img = document.createElement('img');
+  img.id = 'camera-img';
+  img.alt = 'Camera';
+  img.style.cssText = 'max-width:100%; max-height:480px; filter:grayscale(1)';
+  img.onerror = () => {              // backstop for hard errors (Pi restart / 5xx)
+    if (!cameraLive) return;
+    clearTimeout(cameraRetry);
+    cameraRetry = setTimeout(() => { if (cameraLive) img.src = _cameraSrc(); }, 1500);
+  };
+  img.src = _cameraSrc();
+  el.appendChild(img);
+}
+
+// Re-point the live feed (cache-busted). Call after a Pi-side teardown/reopen so the frozen
+// <img> reconnects to the fresh stream.
+function _refreshCameraFeed(delayMs) {
+  if (!cameraLive) return;
+  clearTimeout(cameraRetry);
+  cameraRetry = setTimeout(() => {
+    if (!cameraLive) return;
+    const img = document.getElementById('camera-img');
+    if (img) img.src = _cameraSrc(); else _mountCameraImg();
+  }, delayMs || 0);
+}
+
 async function _startCamera() {
-  if (cameraLive) return;
+  if (cameraLive) { _refreshCameraFeed(); return; }
   const r = await fetch('/api/camera_start', {method: 'POST'});
   const data = await r.json();
   if (!data.ok) { log('Camera start failed: ' + (data.error || '')); return; }
   cameraLive = true;
-  document.getElementById('camera-content').innerHTML =
-    '<img src="/api/camera_feed" alt="Camera" style="max-width:100%; max-height:480px; filter:grayscale(1)">';
+  _mountCameraImg();
 }
 
 async function _stopCamera() {
   if (!cameraLive) return;
+  clearTimeout(cameraRetry);
   await fetch('/api/camera_stop', {method: 'POST'});
   cameraLive = false;
   document.getElementById('camera-content').innerHTML = '<span class="placeholder">Camera off</span>';
+}
+
+// Driver-level recovery for a wedged sensor (libcamera hung mid-capture): the Pi rebinds the
+// camera's i2c driver, then we bring the preview back up.
+async function resetCamera() {
+  const btn = document.getElementById('btn-camera-reset');
+  if (btn) { btn.disabled = true; btn.textContent = '⟳ …'; }
+  log('Resetting camera driver on the Pi…');
+  try {
+    const r = await fetch('/api/camera_reset', {method: 'POST'});
+    const data = await r.json();
+    if (!data.ok) { log('Camera reset failed: ' + (data.error || '')); return; }
+    log('Camera driver rebound (' + (data.driver || '?') + ' ' + (data.node || '') + ')');
+    // The reset closed the Pi camera; restart the preview and re-mount the feed.
+    cameraLive = false;
+    if (document.getElementById('cb-camera').checked) await _startCamera();
+  } catch (e) {
+    log('Camera reset error: ' + e);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '⟳ Reset'; }
+  }
 }
 
 // ── Stim canvas visualization ──

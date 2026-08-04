@@ -857,6 +857,57 @@ def camera_controls():
             return jsonify({"ok": False, "error": str(e)}), 500
 
 
+def _find_camera_i2c():
+    """Locate the bound CSI sensor's i2c driver + device node, e.g. ('/sys/.../imx477', '10-001a').
+    Rig-agnostic: scans every imx* driver for a bound device (a symlink named bus-addr). Returns
+    (driver_dir, node) or (None, None)."""
+    import glob
+    for drv in sorted(glob.glob("/sys/bus/i2c/drivers/imx*")):
+        for node in sorted(glob.glob(drv + "/*-*")):   # device nodes are symlinks like 10-001a
+            if os.path.islink(node):
+                return drv, os.path.basename(node)
+    return None, None
+
+
+@app.route("/api/camera_reset", methods=["POST"])
+def camera_reset():
+    """Recover a wedged CSI camera by rebinding its i2c sensor driver — the escalation when a soft
+    reinit can't clear a libcamera hang (capture stuck mid-frame). Closes any open Picamera2 first
+    (under _camera_lock), then unbind+bind the sensor node so the next open re-probes a clean
+    sensor. Needs root to write bind/unbind; pi_api runs as vruser with passwordless sudo. Refuses
+    while a real session recording is live so a stray click can't kill an experiment's video."""
+    with _camera_lock:
+        with _devices_lock:
+            dev = _devices.get("camera")
+        if (dev is not None and getattr(dev, "_recording", False)
+                and not getattr(dev, "_is_preview", True)):
+            return jsonify({"ok": False,
+                            "error": "Session recording in progress; not reset"}), 409
+        with _devices_lock:
+            dev = _devices.pop("camera", None)
+        if dev is not None:
+            try:
+                dev.close()   # settles internally so libcamera releases (or tries to) before unbind
+            except Exception:
+                pass
+        drv, node = _find_camera_i2c()
+        if not node:
+            return jsonify({"ok": False, "error": "no bound imx camera i2c node found"}), 500
+        try:
+            subprocess.run(["sudo", "sh", "-c", f"echo {node} > {drv}/unbind"],
+                           check=True, capture_output=True, text=True, timeout=10)
+            time.sleep(0.5)
+            subprocess.run(["sudo", "sh", "-c", f"echo {node} > {drv}/bind"],
+                           check=True, capture_output=True, text=True, timeout=10)
+            time.sleep(1.0)   # let the sensor re-probe before the next Picamera2() open
+        except subprocess.CalledProcessError as e:
+            return jsonify({"ok": False,
+                            "error": (e.stderr or str(e)).strip()}), 500
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": True, "driver": os.path.basename(drv), "node": node})
+
+
 @app.route("/api/monitor_photodiode", methods=["POST"])
 def monitor_photodiode():
     """Start photodiode pulse monitoring (rising edge detection)."""

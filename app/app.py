@@ -1083,6 +1083,27 @@ def camera_feed():
                     mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
+@app.route("/api/camera_reset", methods=["POST"])
+def camera_reset():
+    """Proxy: rebind the leader camera's i2c sensor driver to recover a frozen/wedged camera."""
+    rig = state["rig_config"]
+    if not rig:
+        return jsonify({"ok": False, "error": "No rig loaded"}), 400
+    api_port = rig["network"]["api_port"]
+    ip = None
+    for pi in rig["pis"]:
+        if "camera" in pi.get("devices", []):
+            ip = pi["ip"]
+            break
+    if not ip:
+        return jsonify({"ok": False, "error": "Camera not assigned"}), 400
+    try:
+        r = requests.post(f"http://{ip}:{api_port}/api/camera_reset", timeout=20)
+        return jsonify(r.json()), r.status_code
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/quit", methods=["POST"])
 def quit_app():
     """Shut down the Flask server."""

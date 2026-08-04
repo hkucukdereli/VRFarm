@@ -139,8 +139,6 @@
         <button class="btn btn-blue" id="btn-load-rig" onclick="loadRig()">Load Rig</button>
       </div>
       <div id="pi-status"></div>
-      <label>Grace Period (sec)</label>
-      <input type="number" id="grace-period" value="10" min="0" max="60" step="1">
     </div>
 
     <div class="card" id="card-session">
@@ -166,6 +164,9 @@
       </div>
 
       <div id="experiment-subsections" style="display:none;">
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0 8px;">
+          <div><label>Grace Period (s)</label><input type="number" id="grace-period" value="10" min="0" max="60" step="1" class="task-param"></div>
+        </div>
         <h3 style="font-size:11px; color:#888; margin:10px 0 6px;">STIMULUS</h3>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0 8px;">
           <div><label>Size (deg)</label><input type="number" id="p-size_deg" step="0.5" min="0.5" class="task-param"></div>
@@ -497,7 +498,6 @@ async function loadRig() {
     if (data.error) { log('Error: ' + data.error); return; }
 
     config = {rig: data.rig, task: null};
-    document.getElementById('grace-period').value = data.rig.grace_period_s || 10;
     // Pre-fill the transfer destination with the rig default (only if the user hasn't set one)
     const _destField = document.getElementById('transfer-dest');
     if (_destField && !_destField.value && data.data_dir) {
@@ -620,6 +620,7 @@ function populateTaskFields(t) {
   document.getElementById('p-timeout_iti').checked = tphases.includes('iti');
 
   // Session
+  document.getElementById('grace-period').value = sess.grace_period_s ?? 10;
   document.getElementById('p-block_size').value = sess.block_size ?? 25;
   document.getElementById('p-n_blocks').value = sess.n_blocks ?? '';
   const iti = sess.iti;
@@ -698,6 +699,7 @@ function collectTaskFields() {
           p => document.getElementById('p-timeout_' + p).checked),
     },
     session: {
+      grace_period_s: parseInt(document.getElementById('grace-period').value) || 10,
       n_blocks: parseInt(document.getElementById('p-n_blocks').value) || 6,
       block_size: parseInt(document.getElementById('p-block_size').value) || 25,
       block_sequence: blockSeq,
@@ -784,7 +786,6 @@ function getSession() {
     date: document.getElementById('session-date').value,
     session_num: parseInt(document.getElementById('session-num').value),
     notes: document.getElementById('session-notes').value,
-    grace_period_s: parseInt(document.getElementById('grace-period').value) || 10,
   };
 }
 

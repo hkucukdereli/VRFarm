@@ -26,6 +26,7 @@ reward:
   max_lick_rate: 0
   timeout_phases: [iti]
 session:
+  grace_period_s: 10           # seconds to wait after GO before trials start
   n_blocks: 1
   block_size: 150
   block_sequence:

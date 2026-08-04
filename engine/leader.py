@@ -354,8 +354,9 @@ class Leader:
         self.running = True
         print(f"Running {n_trials} trials (level {reward_cfg.get('level', '?')})...")
 
-        # Pre-session grace period (from rig config)
-        delay = self.rig.get("grace_period_s", 0)
+        # Pre-session grace period (task 'session' section; rig config as legacy fallback)
+        delay = self.task.get("session", {}).get(
+            "grace_period_s", self.rig.get("grace_period_s", 0))
         if delay > 0:
             self._publish({"type": "grace_period", "duration": delay,
                            "t": time.time()})

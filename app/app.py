@@ -255,14 +255,7 @@ def update_session():
     """Update session params (subject, date, level, etc.)."""
     data = request.json
 
-    # Save grace period to rig config (persists across sessions)
-    grace = data.pop("grace_period_s", None)
-    if grace is not None and state["rig_config"]:
-        state["rig_config"]["grace_period_s"] = int(grace)
-        if state.get("rig_path"):
-            with open(state["rig_path"], "w") as f:
-                yaml.dump(state["rig_config"], f, default_flow_style=False)
-
+    # (Grace period moved to the task YAML 'session' section — saved via update_task/save_task.)
     state["session"] = data
     state["session_id"] = make_session_id(
         data["subject_id"], data["date"], int(data["session_num"]))

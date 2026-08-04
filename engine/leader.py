@@ -565,6 +565,7 @@ class Leader:
             rw_close = rw_open + rw_dur
             window_licks = [t for t in self._trial_licks if rw_open <= t < rw_close]
             self._trial_ctx["responded"] = bool(window_licks)               # in-window lick = hit
+            self._trial_ctx["n_window_licks"] = len(window_licks)           # # licks in the window
             self._trial_ctx["first_lick_t"] = window_licks[0] if window_licks else float("nan")
             self._trial_ctx["lick_times"] = self._trial_licks[:]            # full record (all phases)
 
@@ -709,6 +710,7 @@ class Leader:
             "outcome": "hit" if ctx.get("responded") else "miss",
             "reward_type": "operant" if is_operant else "pavlovian",
             "rt_ms": rt_ms,
+            "resp_licks": ctx.get("n_window_licks", 0),   # licks within the response window
             "level": level,
             "adaptive_state": adaptive_state,
             "t": time.time(),

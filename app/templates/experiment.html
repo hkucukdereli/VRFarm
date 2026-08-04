@@ -389,7 +389,7 @@
       <div style="max-height: 200px; overflow-y: auto;">
         <table class="trial-table">
           <thead><tr>
-            <th>#</th><th>Az</th><th>Contrast</th><th>Level</th><th>Adaptive</th><th>Type</th><th>Outcome</th><th>RT (ms)</th>
+            <th>#</th><th>Az</th><th>Contrast</th><th>Level</th><th>Adaptive</th><th>Type</th><th>Outcome</th><th>RT (ms)</th><th title="licks within the response window">Licks</th>
           </tr></thead>
           <tbody id="trial-tbody"></tbody>
         </table>
@@ -1725,7 +1725,8 @@ function addTrialRow(evt) {
     `<td>${lvl}</td><td>${adp}</td>` +
     `<td style="${typeCls}">${evt.reward_type || '--'}</td>` +
     `<td class="${outCls}">${evt.outcome}</td>` +
-    `<td>${rt}</td></tr>`);
+    `<td>${rt}</td>` +
+    `<td>${evt.resp_licks ?? '--'}</td></tr>`);
 }
 
 // ── Phase / buttons ──

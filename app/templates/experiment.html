@@ -939,6 +939,18 @@ function buildPiStatus() {
 // ── Deploy ──
 
 async function deployExperiment() {
+  // Require Subject ID / Date / Session # first — an empty field yields a malformed session_id
+  // and mis-pathed data. Block deploy and point at what's missing.
+  const missing = [];
+  if (!document.getElementById('subject-id').value.trim())   missing.push('Subject ID');
+  if (!document.getElementById('session-date').value.trim()) missing.push('Date');
+  if (!document.getElementById('session-num').value.trim())  missing.push('Session #');
+  if (missing.length) {
+    log('Deploy blocked — fill in the Session card: ' + missing.join(', '));
+    const first = {'Subject ID': 'subject-id', 'Date': 'session-date', 'Session #': 'session-num'}[missing[0]];
+    document.getElementById(first).focus();
+    return;
+  }
   _lockUI();
   const btn = document.getElementById('btn-deploy');
   btn.textContent = 'Deploying...';

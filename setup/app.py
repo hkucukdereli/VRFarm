@@ -1112,8 +1112,10 @@ def _get_deploy_files(role: str) -> list[tuple[str, str]]:
     """Return list of (local_path, remote_path) for deployment."""
     files = [
         # Shared
+        ("shared/__init__.py", "shared/__init__.py"),
         ("shared/config.py", "shared/config.py"),
         ("shared/stim_generator.py", "shared/stim_generator.py"),
+        ("shared/consolidate.py", "shared/consolidate.py"),   # data consolidation at Transfer
         # Devices
         ("devices/__init__.py", "devices/__init__.py"),
         ("devices/base.py", "devices/base.py"),

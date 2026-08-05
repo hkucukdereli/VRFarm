@@ -1,0 +1,16 @@
+data:
+  leader_dir: /home/vruser/data
+  video_dir: /media/vruser/ssd/video
+devices: {}
+name: demo
+network:
+  api_port: 5080
+  camera_port: 5001
+  command_port: 5572
+  display_port: 5575
+  event_port: 5571
+pis:
+  - name: mock-leader
+    ip: 127.0.0.1
+    role: leader
+    devices: []

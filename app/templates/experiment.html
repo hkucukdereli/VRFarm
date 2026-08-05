@@ -1258,13 +1258,15 @@ function startSSE() {
 }
 
 function handleEvent(evt) {
-  // Build time offset from median of first 10 events (robust to outliers)
-  if (rasterLive && evt.t && lickOffset === null) {
+  // Anchor the Pi→browser time offset on the FIRST timestamped event so the rasters (events/sync/
+  // running) go live immediately at Go — not blank until 10 events accrue. Keep refining toward the
+  // median of the first 10 samples (robust to jitter); the sub-frame shift as it converges is
+  // imperceptible. The grace-period 'grace_period'/'countdown' events carry t, so the axis anchors
+  // within the first ~Go; the first-ITI stim box then approaches from the very start of that ITI.
+  if (rasterLive && evt.t && _offsetSamples.length < 10) {
     _offsetSamples.push(Date.now() / 1000 - evt.t);
-    if (_offsetSamples.length >= 10) {
-      const sorted = [..._offsetSamples].sort((a, b) => a - b);
-      lickOffset = sorted[Math.floor(sorted.length / 2)];
-    }
+    const sorted = [..._offsetSamples].sort((a, b) => a - b);
+    lickOffset = sorted[Math.floor(sorted.length / 2)];
   }
 
   switch (evt.type) {

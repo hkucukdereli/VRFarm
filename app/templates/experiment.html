@@ -1045,6 +1045,7 @@ async function deployExperiment() {
   if (!document.getElementById('session-num').value.trim())  missing.push('Session #');
   if (missing.length) {
     log('Deploy blocked — fill in the Session card: ' + missing.join(', '));
+    alert('Cannot deploy — fill in the Session card:\n\n• ' + missing.join('\n• '));
     const first = {'Subject ID': 'subject-id', 'Date': 'session-date', 'Session #': 'session-num'}[missing[0]];
     document.getElementById(first).focus();
     return;

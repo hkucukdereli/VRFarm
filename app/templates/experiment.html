@@ -2117,7 +2117,7 @@ function drawPerformance() {
   // legend + current values across the top
   const lastFinite = a => { for (let i = a.length - 1; i >= 0; i--) if (a[i] != null && isFinite(a[i])) return a[i]; return null; };
   const fmt = v => (v == null ? '--' : v.toFixed(2));
-  const segs = [['HR ' + fmt(lastFinite(hitRateSeries)), C.hr], ['Sliding HR ' + fmt(lastFinite(slideHitSeries)), C.slide]];
+  const segs = [['Cumulative HR ' + fmt(lastFinite(hitRateSeries)), C.hr], ['Sliding HR ' + fmt(lastFinite(slideHitSeries)), C.slide]];
   if (hasFA) segs.push(['FA ' + fmt(lastFinite(faSeries)), C.fa]);
   if (hasDp) segs.push(["d′ " + fmt(lastFinite(dvals)), C.dp]);
   let lx = padL; for (const [txt, col] of segs) { ctx.fillStyle = col; ctx.fillText(txt, lx, 8); lx += ctx.measureText(txt).width + 5; }
@@ -2264,6 +2264,15 @@ function drawRtHist() {
   for (let t = 0; t < respS - 1e-3; t += step) { const x = padL + (t * 1000 / respMs) * plotW; ctx.fillStyle = '#8fa2c4'; ctx.fillText(fmtS(t), x, h - 6); }
   ctx.fillStyle = '#8fa2c4'; ctx.fillText(fmtS(respS) + 's', padL + plotW, h - 6);
   ctx.textAlign = 'left';
+  // median RT — dashed vertical line + label, recomputed on each draw (i.e. every trial)
+  if (rtHits.length) {
+    const s = [...rtHits].sort((a, b) => a - b), m = s.length >> 1;
+    const med = s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+    const mx = Math.min(padL + plotW, padL + (med / respMs) * plotW);
+    ctx.strokeStyle = '#ffca28'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(mx, padT); ctx.lineTo(mx, padT + plotH); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = '#ffca28'; ctx.textAlign = 'right'; ctx.fillText('RT median ' + Math.round(med) + ' ms', padL + plotW, padT + 8); ctx.textAlign = 'left';
+  }
   ctx.fillStyle = '#888'; ctx.fillText(rtHits.length + ' hits', padL + 4, padT + 8);
   if (!rtHits.length) { ctx.fillStyle = '#556'; ctx.fillText('no hit trials yet', padL + 4, padT + plotH / 2); }
 }

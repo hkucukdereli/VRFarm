@@ -16,6 +16,7 @@ import queue
 import socket
 import struct
 import sys
+import tempfile
 import threading
 import time
 from datetime import date, datetime
@@ -46,6 +47,7 @@ state = {
     "task_path": None,
     "session": {},          # subject_id, date, session_num, level, notes
     "session_id": None,
+    "session_dir": None,    # controller-side data folder for this session (created at Go)
     "deployed": False,
 }
 
@@ -61,6 +63,7 @@ _session_end_seen = False
 
 # Trial data for live display
 _trials = []
+_rt_hits_path = None   # temp file (controller) of hit-trial response times (ms), one per line
 
 # ── Logging ──
 
@@ -201,10 +204,25 @@ def api_load_rig():
                 elif dev_name == "photodiode":
                     r = requests.post(f"http://{ip}:{api_port}/api/init_photodiode", json={
                         "gpio": dev_cfg.get("gpio", 24),
+                        "glitch_enabled": dev_cfg.get("glitch_enabled", True),
+                        "glitch_ms": dev_cfg.get("glitch_ms", 0.5),
+                        "debounce_enabled": dev_cfg.get("debounce_enabled", True),
+                        "debounce_ms": dev_cfg.get("debounce_ms", 5),
                     }, timeout=10)
                     if not r.json().get("ok"):
                         err = r.json().get("error",
                               "Photodiode failed — is pigpiod running?")
+                        init_errors.append(err)
+                elif dev_name == "encoder":
+                    r = requests.post(f"http://{ip}:{api_port}/api/init_encoder", json={
+                        "i2c_address": dev_cfg.get("i2c_address", "0x36"),
+                        "i2c_bus": dev_cfg.get("i2c_bus", 1),
+                        "wheel_diameter_cm": dev_cfg.get("wheel_diameter_cm", 15.0),
+                        "sample_hz": dev_cfg.get("sample_hz", 100),
+                    }, timeout=10)
+                    if not r.json().get("ok"):
+                        err = r.json().get("error",
+                              "Encoder failed — check I2C 0x36 / magnet")
                         init_errors.append(err)
             except requests.exceptions.Timeout:
                 init_errors.append(f"{dev_name}: timed out waiting for response")
@@ -252,14 +270,7 @@ def update_session():
     """Update session params (subject, date, level, etc.)."""
     data = request.json
 
-    # Save grace period to rig config (persists across sessions)
-    grace = data.pop("grace_period_s", None)
-    if grace is not None and state["rig_config"]:
-        state["rig_config"]["grace_period_s"] = int(grace)
-        if state.get("rig_path"):
-            with open(state["rig_path"], "w") as f:
-                yaml.dump(state["rig_config"], f, default_flow_style=False)
-
+    # (Grace period moved to the task YAML 'session' section — saved via update_task/save_task.)
     state["session"] = data
     state["session_id"] = make_session_id(
         data["subject_id"], data["date"], int(data["session_num"]))
@@ -368,11 +379,14 @@ def deploy():
                 "engine/leader.py",
                 "shared/stim_generator.py",
                 "shared/config.py",
+                "shared/consolidate.py",
                 "devices/base.py",
                 "devices/lick_sensor.py",
                 "devices/reward.py",
                 "devices/camera.py",
                 "devices/photodiode.py",
+                "devices/encoder.py",
+                "devices/calibration_probe.py",
                 "devices/reward_calibration.py",
                 "pi_api/api.py",
             ],
@@ -624,7 +638,21 @@ def go():
 
     # Per-device "save data" choices from the Actions row (default: save everything). Camera unchecked
     # -> livestream only (no video file); a behavioral device unchecked -> Leader skips its HDF5 datasets.
-    save = (request.get_json(silent=True) or {}).get("save", {})
+    _body = request.get_json(silent=True) or {}
+    save = _body.get("save", {})
+    # Create the session data folder NOW (so the live plots can be saved into it at end/stop,
+    # regardless of whether the data is later transferred). Uses the transfer destination if the
+    # UI field is set, else the controller default — the same layout transfer() writes to.
+    dest_override = str(_body.get("dest_dir", "")).strip()
+    try:
+        dest_root = Path(dest_override).expanduser() if dest_override else _data_dir()
+        sdir = _session_dir(dest_root)
+        sdir.mkdir(parents=True, exist_ok=True)
+        state["session_dir"] = str(sdir)
+        print(f"[go] session dir: {sdir}")
+    except Exception as e:
+        print(f"[go] could not create session dir: {e}")
+        state["session_dir"] = None
     rig_filename = Path(state["rig_path"]).name
     task_filename = Path(state["task_path"]).name
 
@@ -634,6 +662,18 @@ def go():
     _stop_udp_listener()
     _start_udp_listener(rig["network"]["event_port"])
     print("[go] UDP listener started")
+
+    # Reset the live-RT temp file for this session (hit-trial RTs in ms, one per line, appended by
+    # the UDP listener). Lightweight persistence on the controller alongside the browser histogram.
+    global _rt_hits_path
+    _rt_hits_path = os.path.join(tempfile.gettempdir(), f"vrfarm_rt_{state['session_id']}.txt")
+    try:
+        with open(_rt_hits_path, "w") as f:
+            f.write("# response_time_ms (hit trials)\n")
+        print(f"[go] RT temp file: {_rt_hits_path}")
+    except Exception as e:
+        print(f"[go] could not open RT temp file: {e}")
+        _rt_hits_path = None
 
     # Stop any leftover processes, release devices on all Pis
     for pi in rig["pis"]:
@@ -693,7 +733,7 @@ def go():
     # Start leader engine
     print("[go] Starting leader...")
     # Behavioral devices the user chose NOT to save -> tell the Leader to skip their HDF5 datasets.
-    skip_save = [d for d in ("lick_sensor", "reward", "photodiode") if not save.get(d, True)]
+    skip_save = [d for d in ("lick_sensor", "reward", "photodiode", "encoder") if not save.get(d, True)]
     leader_args = [
         "--rig", f"/home/vruser/rig/rigs/{rig_filename}",
         "--task", f"/home/vruser/rig/experiments/{task_filename}",
@@ -884,6 +924,45 @@ def _data_dir() -> Path:
     return Path(env).expanduser() if env else Path.home() / "VRFarm" / "data"
 
 
+def _session_dir(dest_root) -> Path:
+    """Session data folder: <root>/<subject>/<subject>_<date>/<session_id> — the same layout used
+    by transfer(), so plots saved at Go land alongside the data if/when it's transferred."""
+    subject_id = state["session"]["subject_id"]
+    date_str = state["session"]["date"]
+    return Path(dest_root) / subject_id / f"{subject_id}_{date_str}" / state["session_id"]
+
+
+@app.route("/api/save_plots", methods=["POST"])
+def save_plots():
+    """Write the browser's live-plot PNGs into the session folder (created at Go) so the plots
+    persist for later review regardless of whether the data is transferred."""
+    import base64
+    req = request.get_json(silent=True) or {}
+    plots = req.get("plots", {})
+    sess_dir = state.get("session_dir")
+    if not sess_dir:
+        if not state.get("session_id"):
+            return jsonify({"ok": False, "error": "No active session"}), 400
+        sess_dir = str(_session_dir(_data_dir()))   # fallback: default data dir
+    d = Path(sess_dir)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return jsonify({"ok": False, "error": f"Cannot create {d}: {e}"}), 500
+    written = []
+    for name, dataurl in plots.items():
+        if not isinstance(dataurl, str) or "," not in dataurl:
+            continue
+        try:
+            raw = base64.b64decode(dataurl.split(",", 1)[1])
+            safe = "".join(c for c in str(name) if c.isalnum() or c in "-_") or "plot"
+            (d / f"{safe}.png").write_bytes(raw)
+            written.append(f"{safe}.png")
+        except Exception:
+            pass
+    return jsonify({"ok": True, "dir": str(d), "written": written})
+
+
 @app.route("/api/transfer", methods=["POST"])
 def transfer():
     """Download session data from Pis to the controller."""
@@ -896,13 +975,30 @@ def transfer():
     dest_root = Path(dest_override).expanduser() if dest_override else default_data_dir
     session_id = state["session_id"]
     subject_id = state["session"]["subject_id"]
-    date_str = state["session"]["date"]
-    subject_date = f"{subject_id}_{date_str}"
-    dest = dest_root / subject_id / subject_date / session_id
+    dest = _session_dir(dest_root)
     try:
         dest.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         return jsonify({"ok": False, "error": f"Cannot create destination {dest}: {e}"})
+
+    # Build the final self-contained .h5 on the Leader first: merge the sidecars
+    # (metadata.yaml, stimuli.npz, trials.yaml, frame_timestamps.npy) into it and delete them,
+    # so only <session>.h5 + video.h264 remain to pull.
+    steps = []
+    leader = next((p for p in rig["pis"] if p.get("role") == "leader"), rig["pis"][0])
+    try:
+        cj = requests.post(
+            f"http://{leader['ip']}:{api_port}/api/consolidate/{session_id}",
+            json={"video_dir": rig.get("data", {}).get("video_dir", "")}, timeout=120).json()
+        if cj.get("ok") and cj.get("skipped"):
+            steps.append(f"Consolidate: {cj['skipped']}")
+        elif cj.get("ok"):
+            got = ', '.join(k for k, v in cj.get("merged", {}).items() if v) or "none"
+            steps.append(f"Consolidated .h5 (merged {got}; removed {', '.join(cj.get('removed', [])) or 'none'})")
+        else:
+            steps.append(f"⚠️  Consolidate failed: {cj.get('error', '?')}")
+    except Exception as e:
+        steps.append(f"⚠️  Consolidate error (transferring raw files): {e}")
 
     transferred = []
     for pi in rig["pis"]:
@@ -944,7 +1040,7 @@ def transfer():
 
     _app_logger.info(f"TRANSFER session={session_id} files={len(transferred)}")
     state["phase"] = "setup"
-    return jsonify({"ok": True, "files": transferred})
+    return jsonify({"ok": True, "files": steps + transferred})
 
 
 @app.route("/api/state")
@@ -1059,19 +1155,32 @@ def camera_feed():
             break
     if not ip:
         return "No camera", 400
-    def generate():
-        try:
-            r = requests.get(f"http://{ip}:{api_port}/api/camera_stream",
-                             stream=True, timeout=5)
-            for chunk in r.iter_content(chunk_size=4096):
-                yield chunk
-        except (requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout,
-                Exception):
-            return  # stream ended — silently close
-
-    return Response(generate(),
+    # Reconnecting relay: rides through pi_api restarts (Deploy), the preview->record swap (Go), and the
+    # <img>-before-preview race instead of collapsing to a silent 200-blank. See shared/mjpeg_relay.py.
+    from shared.mjpeg_relay import relay
+    return Response(relay(f"http://{ip}:{api_port}/api/camera_stream"),
                     mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.route("/api/camera_reset", methods=["POST"])
+def camera_reset():
+    """Proxy: rebind the leader camera's i2c sensor driver to recover a frozen/wedged camera."""
+    rig = state["rig_config"]
+    if not rig:
+        return jsonify({"ok": False, "error": "No rig loaded"}), 400
+    api_port = rig["network"]["api_port"]
+    ip = None
+    for pi in rig["pis"]:
+        if "camera" in pi.get("devices", []):
+            ip = pi["ip"]
+            break
+    if not ip:
+        return jsonify({"ok": False, "error": "Camera not assigned"}), 400
+    try:
+        r = requests.post(f"http://{ip}:{api_port}/api/camera_reset", timeout=20)
+        return jsonify(r.json()), r.status_code
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/quit", methods=["POST"])
@@ -1137,6 +1246,16 @@ def _send_command(ip: str, port: int, msg: dict):
         _cmd_sock.sendto(payload, (ip, port))
 
 
+def _event_is_go(event: dict) -> bool:
+    """Whether a trial event is a GO trial (should lick), per the task go_rule + stim azimuth.
+    Mirrors the engine (_classify_go) and the UI (_isGo): all->go, right->az>0, else az<0."""
+    rule = (state.get("task_config") or {}).get("stimulus", {}).get("go_rule", "left")
+    if rule == "all":
+        return True
+    az = event.get("stim_az", 0) or 0
+    return az > 0 if rule == "right" else az < 0
+
+
 def _start_udp_listener(event_port: int):
     """Start background thread listening for UDP events from Leader."""
     global _udp_thread, _udp_running
@@ -1159,6 +1278,16 @@ def _start_udp_listener(event_port: int):
                 # Track trials
                 if event.get("type") == "trial":
                     _trials.append(event)
+                    # Append GO-trial hit RTs (ms) to the live-RT temp file (matches the histogram;
+                    # a nogo-trial lick is a false alarm, not a hit).
+                    if _rt_hits_path and event.get("outcome") == "hit" and _event_is_go(event):
+                        rt = event.get("rt_ms")
+                        if isinstance(rt, (int, float)) and not isinstance(rt, bool) and rt == rt:
+                            try:
+                                with open(_rt_hits_path, "a") as f:
+                                    f.write(f"{rt:.1f}\n")
+                            except Exception:
+                                pass
                 elif event.get("type") == "global_timeout":
                     notify(f"⏱️ {rig_name} — GLOBAL TIMEOUT: {event.get('n_dry', '?')} dry "
                            f"trials, aborting at trial {event.get('trial', '?')} "

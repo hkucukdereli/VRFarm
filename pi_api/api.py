@@ -38,6 +38,8 @@ _devices_lock = threading.Lock()
 _camera_lock = threading.Lock()
 _lick_events: list = []
 _photodiode_events: list = []
+_photodiode_raw: list = []   # diagnostic raw transitions {t, level} for the setup-UI scope
+_encoder_events: list = []   # running-wheel {t, speed_cms, distance_cm} for the setup-UI monitor
 _reward_events: list = []
 
 
@@ -150,6 +152,31 @@ def list_files(session_id):
     return jsonify({"files": files})
 
 
+@app.route("/api/consolidate/<session_id>", methods=["POST"])
+def consolidate(session_id):
+    """Leader only. Fold the session's sidecars (metadata.yaml, stimuli.npz, trials.yaml,
+    frame_timestamps.npy) into <session_id>.h5 and delete them, leaving one self-contained
+    .h5 (+ video.h264) to transfer. Idempotent."""
+    data = request.get_json(silent=True) or {}
+    subj, subj_date, _ = _parse_session_id(session_id)
+    session_dir = (DATA_DIR / subj / subj_date / session_id) if subj else (DATA_DIR / session_id)
+    vd = (data.get("video_dir") or "").strip() or "/media/vruser/ssd/video"
+    video_session_dir = (Path(vd) / subj / subj_date / session_id) if subj else (Path(vd) / session_id)
+    try:
+        if str(RIG_DIR) not in sys.path:
+            sys.path.insert(0, str(RIG_DIR))
+        from shared.consolidate import consolidate_session
+        res = consolidate_session(
+            session_dir, video_session_dir if video_session_dir.exists() else None)
+        return jsonify(res)
+    except FileNotFoundError as e:
+        return jsonify({"ok": False, "error": str(e)}), 404
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/start", methods=["POST"])
 def start():
     """Start leader.py or follower.py as a subprocess."""
@@ -254,6 +281,7 @@ def release_devices():
     _lick_events.clear()
     _photodiode_events.clear()
     _reward_events.clear()
+    _encoder_events.clear()
     return jsonify({"ok": True, "released": released})
 
 
@@ -385,6 +413,7 @@ import queue
 _display_cmd_q: queue.Queue = queue.Queue()
 _display_result_q: queue.Queue = queue.Queue()
 _display_thread: threading.Thread | None = None
+_sync_test_stop = threading.Event()   # set to stop the photodiode sync-square flash test
 
 
 def _display_thread_fn():
@@ -456,6 +485,19 @@ def _display_thread_fn():
                     with _devices_lock:
                         _devices.pop("display", None)
                 _display_result_q.put({"ok": True})
+            elif action == "sync_test":
+                if not dev or getattr(dev, "_screen", None) is None:
+                    _display_result_q.put({"ok": False, "error": "Display not initialized"})
+                else:
+                    # Ack BEFORE the (blocking) flash loop so the HTTP start returns immediately;
+                    # the loop then owns this thread until _sync_test_stop is set out-of-band.
+                    _sync_test_stop.clear()
+                    _display_result_q.put({"ok": True, "message": "sync test running"})
+                    try:
+                        dev.run_sync_test(int(cmd.get("every_n", 5)), _sync_test_stop)
+                    except Exception as e:
+                        print("[display] sync_test error:", e, flush=True)
+                    # result already sent; do NOT put again (would desync the result queue)
             else:
                 _display_result_q.put({"ok": False, "error": f"Unknown action: {action}"})
         except Exception as e:
@@ -635,6 +677,64 @@ def lick_data():
     return jsonify({"events": _lick_events})
 
 
+@app.route("/api/init_encoder", methods=["POST"])
+def init_encoder():
+    """Initialize the running-wheel encoder (AS5600 magnetic angle sensor, I2C)."""
+    _ensure_rig_path()
+    from devices.encoder import Encoder
+    data = request.json or {}
+    rig_cfg = {
+        "i2c_address": data.get("i2c_address", "0x36"),
+        "i2c_bus": data.get("i2c_bus", 1),
+        "wheel_diameter_cm": data.get("wheel_diameter_cm", 15.0),
+        "sample_hz": data.get("sample_hz", 100),
+    }
+    try:
+        dev = Encoder()
+        dev.init(rig_config=rig_cfg, task_params={})
+        with _devices_lock:
+            _devices["encoder"] = dev
+        check = dev.check()
+        return jsonify({"ok": True, "message": check.get("message", "OK")})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/monitor_encoder", methods=["POST"])
+def monitor_encoder():
+    """Start running-wheel monitoring (setup-UI live speed view)."""
+    global _encoder_events
+    with _devices_lock:
+        dev = _devices.get("encoder")
+    if not dev:
+        return jsonify({"ok": False, "error": "Encoder not initialized"}), 400
+    _encoder_events = []
+
+    def on_run(evt):
+        _encoder_events.append(evt)
+        if len(_encoder_events) > 3000:
+            _encoder_events.pop(0)
+
+    dev.start_stream(on_run)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/stop_monitor_encoder", methods=["POST"])
+def stop_monitor_encoder():
+    """Stop running-wheel monitoring."""
+    with _devices_lock:
+        dev = _devices.get("encoder")
+    if dev:
+        dev.stop_stream()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/encoder_data")
+def encoder_data():
+    """Return collected running-wheel samples (polled by the setup UI)."""
+    return jsonify({"events": _encoder_events})
+
+
 @app.route("/api/init_camera", methods=["POST"])
 def init_camera():
     """Check if a camera is detected."""
@@ -683,7 +783,13 @@ def init_photodiode():
     gpio = data.get("gpio", 24)
     try:
         dev = Photodiode()
-        dev.init(rig_config={"gpio": gpio}, task_params={})
+        dev.init(rig_config={
+            "gpio": gpio,
+            "glitch_enabled": data.get("glitch_enabled", True),
+            "glitch_ms": data.get("glitch_ms", 0.5),
+            "debounce_enabled": data.get("debounce_enabled", True),
+            "debounce_ms": data.get("debounce_ms", 5),
+        }, task_params={})
         with _devices_lock:
             _devices["photodiode"] = dev
         check = dev.check()
@@ -832,6 +938,57 @@ def camera_controls():
             return jsonify({"ok": False, "error": str(e)}), 500
 
 
+def _find_camera_i2c():
+    """Locate the bound CSI sensor's i2c driver + device node, e.g. ('/sys/.../imx477', '10-001a').
+    Rig-agnostic: scans every imx* driver for a bound device (a symlink named bus-addr). Returns
+    (driver_dir, node) or (None, None)."""
+    import glob
+    for drv in sorted(glob.glob("/sys/bus/i2c/drivers/imx*")):
+        for node in sorted(glob.glob(drv + "/*-*")):   # device nodes are symlinks like 10-001a
+            if os.path.islink(node):
+                return drv, os.path.basename(node)
+    return None, None
+
+
+@app.route("/api/camera_reset", methods=["POST"])
+def camera_reset():
+    """Recover a wedged CSI camera by rebinding its i2c sensor driver — the escalation when a soft
+    reinit can't clear a libcamera hang (capture stuck mid-frame). Closes any open Picamera2 first
+    (under _camera_lock), then unbind+bind the sensor node so the next open re-probes a clean
+    sensor. Needs root to write bind/unbind; pi_api runs as vruser with passwordless sudo. Refuses
+    while a real session recording is live so a stray click can't kill an experiment's video."""
+    with _camera_lock:
+        with _devices_lock:
+            dev = _devices.get("camera")
+        if (dev is not None and getattr(dev, "_recording", False)
+                and not getattr(dev, "_is_preview", True)):
+            return jsonify({"ok": False,
+                            "error": "Session recording in progress; not reset"}), 409
+        with _devices_lock:
+            dev = _devices.pop("camera", None)
+        if dev is not None:
+            try:
+                dev.close()   # settles internally so libcamera releases (or tries to) before unbind
+            except Exception:
+                pass
+        drv, node = _find_camera_i2c()
+        if not node:
+            return jsonify({"ok": False, "error": "no bound imx camera i2c node found"}), 500
+        try:
+            subprocess.run(["sudo", "sh", "-c", f"echo {node} > {drv}/unbind"],
+                           check=True, capture_output=True, text=True, timeout=10)
+            time.sleep(0.5)
+            subprocess.run(["sudo", "sh", "-c", f"echo {node} > {drv}/bind"],
+                           check=True, capture_output=True, text=True, timeout=10)
+            time.sleep(1.0)   # let the sensor re-probe before the next Picamera2() open
+        except subprocess.CalledProcessError as e:
+            return jsonify({"ok": False,
+                            "error": (e.stderr or str(e)).strip()}), 500
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+        return jsonify({"ok": True, "driver": os.path.basename(drv), "node": node})
+
+
 @app.route("/api/monitor_photodiode", methods=["POST"])
 def monitor_photodiode():
     """Start photodiode pulse monitoring (rising edge detection)."""
@@ -848,11 +1005,24 @@ def monitor_photodiode():
     if not dev:
         try:
             dev = Photodiode()
-            dev.init(rig_config={"gpio": gpio}, task_params={})
+            dev.init(rig_config={
+                "gpio": gpio,
+                "glitch_enabled": data.get("glitch_enabled", True),
+                "glitch_ms": data.get("glitch_ms", 0.5),
+                "debounce_enabled": data.get("debounce_enabled", True),
+                "debounce_ms": data.get("debounce_ms", 5),
+            }, task_params={})
             with _devices_lock:
                 _devices["photodiode"] = dev
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
+    else:
+        # Reusing an already-inited device: a prior raw scope may have left the daemon glitch
+        # filter at 0. Re-assert the configured steady filter so the detected monitor is correct.
+        try:
+            dev._pi.set_glitch_filter(dev.gpio, getattr(dev, "_glitch_us", 0))
+        except Exception:
+            pass
 
     _photodiode_events = []
 
@@ -901,6 +1071,90 @@ def probe_off():
 def photodiode_data():
     """Return collected photodiode pulse events (polled by UI)."""
     return jsonify({"events": _photodiode_events})
+
+
+@app.route("/api/photodiode_raw_start", methods=["POST"])
+def photodiode_raw_start():
+    """Start RAW transition capture (both edges, glitch filter OFF) for the setup-UI diagnostic
+    scope. Reuses the initialized photodiode device; lazily inits from the posted config if needed."""
+    global _photodiode_raw
+    _ensure_rig_path()
+    data = request.json or {}
+    with _devices_lock:
+        dev = _devices.get("photodiode")
+    if not dev:
+        from devices.photodiode import Photodiode
+        try:
+            dev = Photodiode()
+            dev.init(rig_config={
+                "gpio": data.get("gpio", 24),
+                "glitch_enabled": data.get("glitch_enabled", True),
+                "glitch_ms": data.get("glitch_ms", 0.5),
+                "debounce_enabled": data.get("debounce_enabled", True),
+                "debounce_ms": data.get("debounce_ms", 5),
+            }, task_params={})
+            with _devices_lock:
+                _devices["photodiode"] = dev
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+    _photodiode_raw = []
+
+    def on_tr(evt):
+        _photodiode_raw.append(evt)
+        if len(_photodiode_raw) > 20000:      # cap: keep the most recent transitions
+            del _photodiode_raw[:len(_photodiode_raw) - 20000]
+
+    try:
+        dev.start_raw_capture(on_tr)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
+@app.route("/api/photodiode_raw_data")
+def photodiode_raw_data():
+    """Return-and-clear raw transitions buffered since the last poll (the scope accumulates them
+    client-side into a rolling window)."""
+    global _photodiode_raw
+    buf = _photodiode_raw
+    _photodiode_raw = []
+    return jsonify({"ok": True, "transitions": buf})
+
+
+@app.route("/api/photodiode_raw_stop", methods=["POST"])
+def photodiode_raw_stop():
+    """Stop raw capture and restore the device's configured glitch filter."""
+    with _devices_lock:
+        dev = _devices.get("photodiode")
+    if dev:
+        try:
+            dev.stop_raw_capture()
+        except Exception:
+            pass
+    return jsonify({"ok": True})
+
+
+@app.route("/api/photodiode_test_start", methods=["POST"])
+def photodiode_test_start():
+    """Flash the red photodiode sync square every N frames on THIS Pi's display (the follower),
+    simulating a session's sync pulses so the photodiode/scope can be exercised from the setup UI.
+    Runs in the display thread; stop via /api/photodiode_test_stop."""
+    data = request.json or {}
+    every_n = int(data.get("every_n", 5))
+    with _devices_lock:
+        dev = _devices.get("display")
+    if not dev or getattr(dev, "_screen", None) is None:
+        return jsonify({"ok": False, "error": "Display not initialized on this Pi"}), 400
+    _sync_test_stop.set()      # stop any prior run and let the display thread return to the queue
+    time.sleep(0.05)
+    return jsonify(_display_command({"action": "sync_test", "every_n": every_n}, timeout=5))
+
+
+@app.route("/api/photodiode_test_stop", methods=["POST"])
+def photodiode_test_stop():
+    """Stop the sync-square flash test (sets the stop Event out-of-band from the command queue)."""
+    _sync_test_stop.set()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/deliver_reward", methods=["POST"])

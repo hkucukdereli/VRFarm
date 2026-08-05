@@ -30,6 +30,7 @@ import devices.reward         # noqa: F401
 import devices.camera         # noqa: F401
 import devices.photodiode     # noqa: F401
 import devices.calibration_probe  # noqa: F401
+import devices.encoder        # noqa: F401 — running-wheel encoder
 
 
 class Leader:
@@ -52,6 +53,8 @@ class Leader:
         self._trial_licks = []
         self._iti_licks = []
         self._trial_ctx = {}
+        self._running_speed = 0.0   # latest running-wheel speed (cm/s); updated by _on_encoder,
+                                    # available to the trial loop for future run-gating (_running_ok)
         # Photodiode stim-sync (online onset correction)
         self._sync_queue = queue.Queue()
         self._sync_enabled = False
@@ -152,7 +155,21 @@ class Leader:
                 self._sync_queue.put_nowait(evt["t"])
             except queue.Full:
                 pass
-        self._publish(evt)
+        # Publish with a `type` key: the device dict carries `event`, but the browser dispatches on
+        # switch(evt.type), so without this the live SYNC raster (case 'sync_pulse') never populates.
+        self._publish({**evt, "type": evt.get("event", "sync_pulse")})
+
+    def _on_encoder(self, evt: dict):
+        """Running-wheel sample: cache the live speed (for future gating) and publish to the Mac."""
+        self._running_speed = float(evt.get("speed_cms", 0.0) or 0.0)
+        self._publish({"type": "running", "t": evt.get("t"),
+                       "speed_cms": evt.get("speed_cms"), "distance_cm": evt.get("distance_cm")})
+
+    def _running_ok(self) -> bool:
+        """Hook for future trial-gating: is the mouse running fast enough to start a trial?
+        Reads session.run_gate_cms (default 0 = disabled → always True). Not yet enforced anywhere."""
+        gate = float(self.task.get("session", {}).get("run_gate_cms", 0) or 0)
+        return self._running_speed >= gate
 
     def _drain_lick_queue(self) -> list[float]:
         """Drain all pending lick timestamps from the queue."""
@@ -296,6 +313,10 @@ class Leader:
         # Start photodiode streaming
         if "photodiode" in self.devices:
             self.devices["photodiode"].start_stream(self._on_sync_pulse)
+
+        # Start running-wheel encoder streaming
+        if "encoder" in self.devices:
+            self.devices["encoder"].start_stream(self._on_encoder)
         self._sync_enabled = (
             "photodiode" in self.devices
             and self.task.get("stimulus", {}).get("photodiode_sync_enabled", False))
@@ -354,8 +375,9 @@ class Leader:
         self.running = True
         print(f"Running {n_trials} trials (level {reward_cfg.get('level', '?')})...")
 
-        # Pre-session grace period (from rig config)
-        delay = self.rig.get("grace_period_s", 0)
+        # Pre-session grace period (task 'session' section; rig config as legacy fallback)
+        delay = self.task.get("session", {}).get(
+            "grace_period_s", self.rig.get("grace_period_s", 0))
         if delay > 0:
             self._publish({"type": "grace_period", "duration": delay,
                            "t": time.time()})
@@ -448,6 +470,9 @@ class Leader:
             # Reset photodiode
             if "photodiode" in self.devices:
                 self.devices["photodiode"].reset_trial()
+            # Mark running-distance baseline for this trial
+            if "encoder" in self.devices:
+                self.devices["encoder"].reset_trial()
             # Drain stale sync pulses from prior trial
             while not self._sync_queue.empty():
                 try:
@@ -555,12 +580,19 @@ class Leader:
             else:
                 self._wait_for_event(0.5)  # brief pause before outcome when no post-stim
 
-            # ── Outcome ──
+            # ── Outcome ── hit/miss and the response latency are measured from licks WITHIN the
+            # response window [response_window_t, +rw_dur]. Pre-stim (anticipatory) and post-stim
+            # licks do NOT count as a response — for pavlovian trials too: the reward may be free,
+            # but the OUTCOME is still whether the mouse licked inside the window.
             outcome_t = time.time()
             self._trial_ctx["outcome_t"] = outcome_t
-            self._trial_ctx["first_lick_t"] = (
-                self._trial_licks[0] if self._trial_licks else float("nan"))
-            self._trial_ctx["lick_times"] = self._trial_licks[:]
+            rw_open = self._trial_ctx.get("response_window_t", true_onset_t)
+            rw_close = rw_open + rw_dur
+            window_licks = [t for t in self._trial_licks if rw_open <= t < rw_close]
+            self._trial_ctx["responded"] = bool(window_licks)               # in-window lick = hit
+            self._trial_ctx["n_window_licks"] = len(window_licks)           # # licks in the window
+            self._trial_ctx["first_lick_t"] = window_licks[0] if window_licks else float("nan")
+            self._trial_ctx["lick_times"] = self._trial_licks[:]            # full record (all phases)
 
             # ── Record trial ──
             self._write_trial(stim)
@@ -571,7 +603,7 @@ class Leader:
             # the UI), so step whenever nominal_level==2.5 — matching the unconditional
             # 2.5 draw at line 403 (previously the `enabled` flag could desync them).
             if nominal_level == 2.5:
-                licked = len(self._trial_licks) > 0
+                licked = bool(self._trial_ctx.get("responded"))   # step on the in-window response
                 if licked:
                     adaptive_state += adaptive_cfg.get("step_up", 0.2)
                 else:
@@ -611,9 +643,20 @@ class Leader:
         """Clean up after session: write session-level device data, close HDF5, save metadata."""
         self.running = False
 
-        # Write session-level device data
+        # Stop device streams so their poll threads aren't still appending to their buffers while we
+        # snapshot the session-level data below (matters for continuous devices like the encoder).
+        for dev in self.devices.values():
+            if hasattr(dev, "stop_stream"):
+                try:
+                    dev.stop_stream()
+                except Exception:
+                    pass
+
+        # Write session-level device data (honor the per-session save gate, like the per-trial paths)
         if self.hdf5_file:
-            for dev in self.devices.values():
+            for name, dev in self.devices.items():
+                if name in self._skip_save:
+                    continue
                 for ds_name, arr in dev.hdf5_session_data().items():
                     self.hdf5_file.create_dataset(ds_name, data=arr)
             self.hdf5_file.close()
@@ -690,21 +733,20 @@ class Leader:
         adaptive_on = (ctx.get("nominal_level") == 2.5)
         adaptive_state = ctx.get("adaptive_state", 0.0) if adaptive_on else 1.0
 
-        # Reaction time: first lick within response window, relative to rw_t
-        rt_ms = None
-        for lt in self._trial_licks:
-            if lt >= rw_t:
-                rt_ms = round((lt - rw_t) * 1000, 1)
-                break
+        # Reaction time: the first in-window lick (first_lick_t, set at outcome), relative to
+        # the response-window opening. NaN (no in-window response) -> no RT.
+        fl = ctx.get("first_lick_t", float("nan"))
+        rt_ms = round((fl - rw_t) * 1000, 1) if fl == fl else None   # fl != fl only when NaN
 
         self._publish({
             "type": "trial",
             "trial_num": self.trial_num,
             "stim_az": float(stim.get("stim_az_deg", 0)),
             "contrast": float(stim.get("contrast", 0)),
-            "outcome": "hit" if self._trial_licks else "miss",
+            "outcome": "hit" if ctx.get("responded") else "miss",
             "reward_type": "operant" if is_operant else "pavlovian",
             "rt_ms": rt_ms,
+            "resp_licks": ctx.get("n_window_licks", 0),   # licks within the response window
             "level": level,
             "adaptive_state": adaptive_state,
             "t": time.time(),
@@ -804,7 +846,7 @@ class Leader:
         f["stim_az_deg"][i] = float(stim.get("stim_az_deg", 0))
         f["contrast"][i] = float(stim.get("contrast", 0))            # raw metric value
         f["corr_contrast"][i] = float(stim.get("corr_contrast", 0))  # rendered fraction
-        f["trial_outcome"][i] = "hit" if self._trial_licks else "miss"
+        f["trial_outcome"][i] = "hit" if self._trial_ctx.get("responded") else "miss"
         f["level_effective"][i] = self._trial_ctx.get("level", 0)
         # Same gate as the published event (line 643): P(L3) for adaptive 2.5, else 1 —
         # so HDF5, the trial event, and the live table all report the same number.

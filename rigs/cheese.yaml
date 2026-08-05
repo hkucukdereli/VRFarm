@@ -25,13 +25,24 @@ devices:
     - 1920
     - 1080
     type: display
+  encoder:
+    enabled: true
+    i2c_address: '0x36'
+    i2c_bus: 1
+    sample_hz: 100
+    type: encoder
+    wheel_diameter_cm: 15.0
   lick_sensor:
     electrode: 4
     enabled: true
     i2c_address: '0x5A'
     type: lick_sensor
   photodiode:
+    debounce_enabled: true
+    debounce_ms: 5
     enabled: true
+    glitch_enabled: true
+    glitch_ms: 0.5
     gpio: 24
     pulse_every_n_frames: 5
     sync_corner: top-left
@@ -67,6 +78,7 @@ pis:
   - photodiode
   - camera
   - calibration_probe
+  - encoder
   ip: 192.168.10.101
   name: cheddar
   role: leader

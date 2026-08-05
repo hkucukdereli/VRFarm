@@ -30,6 +30,7 @@ reward:
 
 # ── Trial structure ──
 session:
+  grace_period_s: 10           # seconds to wait after GO before trials start
   n_blocks: 6
   block_size: 25
   block_sequence: [80]      # azimuth per block, cycled

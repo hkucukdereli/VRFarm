@@ -455,18 +455,11 @@ def camera_feed():
     if not ip:
         return "No camera", 400
 
-    def generate():
-        try:
-            r = requests.get(f"http://{ip}:{api_port}/api/camera_stream",
-                             stream=True, timeout=5)
-            for chunk in r.iter_content(chunk_size=4096):
-                yield chunk
-        except (requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout,
-                Exception):
-            return  # stream ended — silently close
-
-    return Response(generate(),
+    # Reconnecting relay: don't collapse a transient Pi hiccup (preview not started yet, Reinit,
+    # pi_api restart) into a silent 200-blank the setup <img> can't recover from. See
+    # shared/mjpeg_relay.py.
+    from shared.mjpeg_relay import relay
+    return Response(relay(f"http://{ip}:{api_port}/api/camera_stream"),
                     mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
@@ -547,8 +540,24 @@ def api_init_devices():
         if ip:
             ok, msg = _init("photodiode", ip, "/api/init_photodiode", {
                 "gpio": devices["photodiode"].get("gpio", 24),
+                "glitch_enabled": devices["photodiode"].get("glitch_enabled", True),
+                "glitch_ms": devices["photodiode"].get("glitch_ms", 0.5),
+                "debounce_enabled": devices["photodiode"].get("debounce_enabled", True),
+                "debounce_ms": devices["photodiode"].get("debounce_ms", 5),
             }, "Photodiode")
             results["photodiode"] = {"ok": ok, "message": msg}
+
+    # Running-wheel encoder: AS5600 magnetic angle sensor (I2C)
+    if "encoder" in devices and devices["encoder"].get("enabled"):
+        ip = dev_to_ip.get("encoder")
+        if ip:
+            ok, msg = _init("encoder", ip, "/api/init_encoder", {
+                "i2c_address": devices["encoder"].get("i2c_address", "0x36"),
+                "i2c_bus": devices["encoder"].get("i2c_bus", 1),
+                "wheel_diameter_cm": devices["encoder"].get("wheel_diameter_cm", 15.0),
+                "sample_hz": devices["encoder"].get("sample_hz", 100),
+            }, "Encoder")
+            results["encoder"] = {"ok": ok, "message": msg}
 
     # Calibration probe: pigpiod + GPIO latch
     if "calibration_probe" in devices and devices["calibration_probe"].get("enabled"):
@@ -1076,7 +1085,7 @@ def api_device_schemas():
     from devices.base import DEVICE_REGISTRY
     import devices.lick_sensor, devices.reward, devices.camera  # noqa
     import devices.photodiode, devices.display  # noqa
-    import devices.calibration_probe  # noqa
+    import devices.calibration_probe, devices.encoder  # noqa
 
     schemas = {}
     for name, cls in DEVICE_REGISTRY.items():
@@ -1108,8 +1117,10 @@ def _get_deploy_files(role: str) -> list[tuple[str, str]]:
     """Return list of (local_path, remote_path) for deployment."""
     files = [
         # Shared
+        ("shared/__init__.py", "shared/__init__.py"),
         ("shared/config.py", "shared/config.py"),
         ("shared/stim_generator.py", "shared/stim_generator.py"),
+        ("shared/consolidate.py", "shared/consolidate.py"),   # data consolidation at Transfer
         # Devices
         ("devices/__init__.py", "devices/__init__.py"),
         ("devices/base.py", "devices/base.py"),
@@ -1120,6 +1131,7 @@ def _get_deploy_files(role: str) -> list[tuple[str, str]]:
         ("devices/photodiode.py", "devices/photodiode.py"),
         ("devices/display.py", "devices/display.py"),
         ("devices/calibration_probe.py", "devices/calibration_probe.py"),
+        ("devices/encoder.py", "devices/encoder.py"),
         # Pi API
         ("pi_api/api.py", "pi_api/api.py"),
     ]

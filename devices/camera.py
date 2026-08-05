@@ -80,6 +80,10 @@ class Camera(Device):
         # before close() so we never close the camera mid-capture (a libcamera corruption path).
         self._stream_idle = threading.Event()
         self._stream_idle.set()
+        # Held ONLY around a single capture_array() call. _release_camera acquires it before
+        # close() so the sensor is never torn down while a capture is executing — the finer guard
+        # that plugs the residual race left by the _stream_idle timeout (the mid-capture wedge).
+        self._capture_lock = threading.Lock()
         self._cam = None
         self._frame_log = []
         self._frame_idx = 0
@@ -281,19 +285,30 @@ class Camera(Device):
         self._recording = False   # stops _on_frame logging
         self._stream_idle.wait(timeout=1.0)   # bounded; pre-set when no stream is running
         if self._cam is not None:
+            # Acquire the capture lock so we never close() while capture_array() is executing
+            # (the libcamera-corruption / next-open-hang path). Bounded: if a capture is truly
+            # wedged inside capture_array() the lock never frees, so force-close after the timeout
+            # (a driver reset is then the only clean recovery — see /api/camera_reset).
+            got = self._capture_lock.acquire(timeout=2.0)
+            if not got:
+                print("[camera] _release_camera: capture_lock timeout; force-closing", flush=True)
             try:
-                if self._encoding:
-                    self._cam.stop_recording()
-                else:
-                    self._cam.stop()
-            except Exception:
-                pass
-            try:
-                self._cam.close()
-            except Exception:
-                pass
-            self._cam = None
-            time.sleep(0.3)   # let libcamera release the sensor before any reopen
+                try:
+                    if self._encoding:
+                        self._cam.stop_recording()
+                    else:
+                        self._cam.stop()
+                except Exception:
+                    pass
+                try:
+                    self._cam.close()
+                except Exception:
+                    pass
+                self._cam = None
+                time.sleep(0.3)   # let libcamera release the sensor before any reopen
+            finally:
+                if got:
+                    self._capture_lock.release()
         self._encoding = False
 
     def stop_recording(self) -> dict:
@@ -334,7 +349,12 @@ class Camera(Device):
             while self._live and self._cam is not None:
                 t0 = time.time()
                 try:
-                    arr = self._cam.capture_array(source)
+                    # Capture under the lock so _release_camera can't close() mid-capture.
+                    # Re-check state inside — teardown may have flipped _live/_cam while we waited.
+                    with self._capture_lock:
+                        if not self._live or self._cam is None:
+                            break
+                        arr = self._cam.capture_array(source)
                     if source == "lores" and lores_size is not None:
                         lw, lh = lores_size
                         img = Image.fromarray(arr[:lh, :lw], mode="L")   # Y plane = free grayscale

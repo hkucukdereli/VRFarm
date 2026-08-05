@@ -513,8 +513,8 @@ let _goRespHist = [];     // responded (bool) per GO trial, for the sliding wind
 let _goN = 0, _goHit = 0, _nogoN = 0, _nogoFA = 0;   // go/nogo tallies
 const SLIDE_N = 10;       // sliding hit-rate window (last 10 go trials)
 // Lick raster + PSTH (pooled licks relative to stim onset):
-const PSTH_PRE = 0.5, PSTH_POST = 3.0, PSTH_BIN = 0.05;   // seconds (window −0.5 → +3 s)
-let psthBins = [], psthNStim = 0, psthRaster = [], _psthFrame = 0;   // psthRaster: per-trial rel-lick times
+const PSTH_PRE = 5.0, PSTH_POST = 10.0, PSTH_BIN = 0.05;   // lick raster + PSTH share x ∈ [−5,+10] s
+let psthBins = [], psthNStim = 0, psthRaster = [], _psthFrame = 0;   // psthRaster: {trial, rel:[dt]} per completed trial
 
 // The PSTH/lick-raster are coupled to LIVE lick DATA: they run whenever a lick device exists and the
 // live stream is on. They are independent of the events-raster "Licks" checkbox (cb-lick) — that box
@@ -2056,39 +2056,34 @@ function addTrialRow(evt) {
 // Performance plot: cumulative + sliding hit rate (left axis 0..1), d' (right axis, go/nogo only),
 // cumulative reward count (own scale, shown in the legend). x = trial 1..N.
 function drawPerformance() {
-  const canvas = document.getElementById('hitrate-canvas');
-  if (!canvas) return;
+  const canvas = document.getElementById('hitrate-canvas'); if (!canvas) return;
   const ctx = canvas.getContext('2d');
-  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
-    canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight;
-  }
+  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) { canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight; }
   const w = canvas.width, h = canvas.height;
   ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
-  const padL = 20, padR = 20, padT = 16, padB = 13;
+  const padL = 24, padR = 22, padT = 16, padB = 16;
   const plotW = w - padL - padR, plotH = h - padT - padB;
   if (plotW <= 6 || plotH <= 6) return;
-  ctx.font = '8px monospace';
-  const C = { hr: '#26a69a', slide: '#ffb74d', fa: '#ef5350', dp: '#ce93d8', rew: '#64b5f6' };
-  const yHR = v => padT + (1 - v) * plotH;   // left axis 0..1
-
-  for (const yv of [0, 0.5, 1]) {            // left gridlines/labels
+  ctx.font = '8px monospace'; ctx.textAlign = 'left';
+  const C = { hr: '#26a69a', slide: '#ffb74d', fa: '#ef5350', dp: '#ce93d8' };
+  const yHR = v => padT + (1 - v) * plotH;               // y fixed 0..1
+  // gridlines: dashed at .25/.5/.75, solid at 0 and 1
+  for (const yv of [0, 0.25, 0.5, 0.75, 1.0]) {
     const y = yHR(yv);
-    ctx.strokeStyle = '#16213e'; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y); ctx.stroke();
-    ctx.fillStyle = '#5a6b8c'; ctx.fillText(yv.toFixed(1), 1, y + 3);
+    ctx.strokeStyle = (yv === 0 || yv === 1) ? '#2a3550' : '#1c2740';
+    ctx.lineWidth = 1; ctx.setLineDash(yv === 0 || yv === 1 ? [] : [3, 3]);
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle = '#5a6b8c'; ctx.textAlign = 'right'; ctx.fillText(yv.toFixed(2).replace(/0$/, '').replace(/\.$/, ''), padL - 2, y + 3); ctx.textAlign = 'left';
   }
-  ctx.strokeStyle = '#333'; ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, padT + plotH); ctx.stroke();
-
+  ctx.strokeStyle = '#556'; ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, padT + plotH); ctx.stroke();
   const n = hitRateSeries.length;
   if (!n) { ctx.fillStyle = '#556'; ctx.fillText('no trials yet', padL + 4, padT + plotH / 2); return; }
-  const totalN = (typeof trialTable !== 'undefined' && trialTable && trialTable.length) ? trialTable.length : n;
-  const xMax = Math.max(totalN, n, 2);
+  const xMax = Math.max(n, 2);                            // x grows with the trials completed so far
   const xOf = i => padL + (i / (xMax - 1)) * plotW;
-
-  const line = (series, color, yfn) => {   // draws a series; breaks at nulls; dots lone points
+  const line = (series, color, yfn) => {                 // draws a series; breaks at nulls; dots lone points
     ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 1.5;
     ctx.beginPath(); let started = false, segLen = 0, lastX = 0, lastY = 0;
-    const dotIfLone = () => { if (segLen === 1) { ctx.fillRect(lastX - 1, lastY - 1, 2.5, 2.5); } };
+    const dotIfLone = () => { if (segLen === 1) ctx.fillRect(lastX - 1, lastY - 1, 2.5, 2.5); };
     for (let i = 0; i < series.length; i++) {
       const v = series[i];
       if (v == null || !isFinite(v)) { dotIfLone(); started = false; segLen = 0; continue; }
@@ -2096,58 +2091,56 @@ function drawPerformance() {
       if (!started) { ctx.moveTo(lastX, lastY); started = true; segLen = 1; }
       else { ctx.lineTo(lastX, lastY); segLen++; }
     }
-    ctx.stroke();
-    dotIfLone();   // a trailing single-point segment (e.g. d' just became non-null)
+    ctx.stroke(); dotIfLone();
   };
-
   line(hitRateSeries, C.hr, yHR);
   line(slideHitSeries, C.slide, yHR);
   const faVals = faSeries.filter(v => v != null && isFinite(v));
-  const hasFA = faVals.length > 0;                     // false-alarm line only if nogo trials exist
+  const hasFA = faVals.length > 0;                       // false-alarm line only if nogo trials exist
   if (hasFA) line(faSeries, C.fa, yHR);
-
   // d' (right axis) — only when the task has both go & nogo trials
   const dvals = dprimeSeries.filter(v => v != null && isFinite(v));
   const hasDp = dvals.length > 0;
   if (hasDp) {
-    let dMin = Math.min(0, Math.floor(Math.min(...dvals)));
-    let dMax = Math.max(2, Math.ceil(Math.max(...dvals)));
+    let dMin = Math.min(0, Math.floor(Math.min(...dvals))), dMax = Math.max(2, Math.ceil(Math.max(...dvals)));
     if (dMax === dMin) dMax += 1;
     const yDP = v => padT + (1 - (v - dMin) / (dMax - dMin)) * plotH;
     line(dprimeSeries, C.dp, yDP);
-    ctx.fillStyle = C.dp;
-    ctx.fillText("d'" + dMax, padL + plotW + 1, padT + 6);
-    ctx.fillText(String(dMin), padL + plotW + 1, padT + plotH);
+    ctx.fillStyle = C.dp; ctx.textAlign = 'left'; ctx.fillText("d'" + dMax, padL + plotW + 1, padT + 6); ctx.fillText(String(dMin), padL + plotW + 1, padT + plotH);
   }
-
-  ctx.fillStyle = '#5a6b8c';
-  ctx.fillText('1', padL - 1, h - 3);
-  ctx.fillText(String(xMax), padL + plotW - 10, h - 3);
-
+  // x ticks (trial numbers)
+  ctx.fillStyle = '#5a6b8c'; ctx.textAlign = 'center';
+  const xStep = Math.max(1, Math.ceil(xMax / 5));
+  for (let t = 1; t <= xMax; t += xStep) ctx.fillText(String(t), xOf(t - 1), h - 4);
+  ctx.fillText(String(xMax), xOf(xMax - 1), h - 4);
+  ctx.textAlign = 'left';
   // legend + current values across the top
   const lastFinite = a => { for (let i = a.length - 1; i >= 0; i--) if (a[i] != null && isFinite(a[i])) return a[i]; return null; };
   const fmt = v => (v == null ? '--' : v.toFixed(2));
-  const segs = [['HR ' + fmt(lastFinite(hitRateSeries)), C.hr],
-                ['Sliding HR ' + fmt(lastFinite(slideHitSeries)), C.slide]];
+  const segs = [['HR ' + fmt(lastFinite(hitRateSeries)), C.hr], ['Sliding HR ' + fmt(lastFinite(slideHitSeries)), C.slide]];
   if (hasFA) segs.push(['FA ' + fmt(lastFinite(faSeries)), C.fa]);
   if (hasDp) segs.push(["d′ " + fmt(lastFinite(dvals)), C.dp]);
-  let lx = padL;
-  for (const [txt, col] of segs) { ctx.fillStyle = col; ctx.fillText(txt, lx, 8); lx += ctx.measureText(txt).width + 5; }
+  let lx = padL; for (const [txt, col] of segs) { ctx.fillStyle = col; ctx.fillText(txt, lx, 8); lx += ctx.measureText(txt).width + 5; }
 }
 
-// Pool licks relative to each stim onset into the PSTH bins (recomputed per trial, not per frame).
-// Uses the live stim/lick event streams (needs the raster Live).
+// Shared onset-aligned x for the lick raster + PSTH (identical padL/padR so the two stay aligned).
+const _AX_PADL = 26, _AX_PADR = 8;
+function _xOnset(t, padL, plotW) { return padL + ((t + PSTH_PRE) / (PSTH_PRE + PSTH_POST)) * plotW; }
+
+// Pool licks around each stim onset. Builds psthBins (pooled histogram) and psthRaster (one
+// {trial, rel:[dt,...]} per completed trial, so the raster can place each trial at its absolute row on
+// a y-axis scaled to the full planned trial count). Recomputed per trial (+ throttled in the rAF
+// loop), not per frame. Needs the raster Live.
 function computePSTH() {
   if (!_liveLicksOn()) { psthBins = []; psthNStim = 0; psthRaster = []; return; }  // off: no live licks
   const span = PSTH_PRE + PSTH_POST;
   const nBins = Math.max(1, Math.round(span / PSTH_BIN));
   const bins = new Array(nBins).fill(0);
-  const rows = [];                                // per-trial relative lick times (for the raster)
+  const rows = [];                                // {trial, rel} per completed trial (for the raster)
   let ns = 0;
-  const stims = stimEvents.slice(-50);            // pool over the last ~50 trials (bounds cost)
-  const earliest = stims.length ? stims[0].t_on - PSTH_PRE : 0;
-  const licks = lickEvents.filter(lk => lk.t >= earliest);   // only licks in the pooled span
-  for (const s of stims) {
+  const first = stimEvents.length ? stimEvents[0].t_on - PSTH_PRE : 0;
+  const licks = lickEvents.filter(lk => lk.t >= first);   // prune licks before the first pooled window
+  for (const s of stimEvents) {
     if (s.t_on == null) continue;
     ns++;
     const rel = [];
@@ -2158,136 +2151,121 @@ function computePSTH() {
         rel.push(dt);
       }
     }
-    rows.push(rel);
+    rows.push({ trial: s.trial, rel });
   }
   psthBins = bins; psthNStim = ns; psthRaster = rows;
 }
 
-// Lick PSTH histogram aligned to stim onset (t=0), window [-PSTH_PRE, +PSTH_POST].
+// Lick PSTH aligned to stim onset (t=0). Shares the raster x-axis [−PSTH_PRE, +PSTH_POST]; y auto-ranges.
+// Draws the same amber response-window box + dashed onset line as the raster above it.
 function drawLickPSTH() {
-  const canvas = document.getElementById('psth-canvas');
-  if (!canvas) return;
+  const canvas = document.getElementById('psth-canvas'); if (!canvas) return;
   const ctx = canvas.getContext('2d');
-  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
-    canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight;
-  }
+  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) { canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight; }
   const w = canvas.width, h = canvas.height;
   ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
-  const padL = 20, padR = 6, padT = 8, padB = 14;
+  const padL = _AX_PADL, padR = _AX_PADR, padT = 8, padB = 15;
   const plotW = w - padL - padR, plotH = h - padT - padB;
   if (plotW <= 6 || plotH <= 6) return;
-  ctx.font = '8px monospace';
-  const span = PSTH_PRE + PSTH_POST;
-  const nBins = psthBins.length || Math.max(1, Math.round(span / PSTH_BIN));
-  const xOf = t => padL + ((t + PSTH_PRE) / span) * plotW;
-  ctx.strokeStyle = '#333'; ctx.beginPath(); ctx.moveTo(padL, padT + plotH); ctx.lineTo(padL + plotW, padT + plotH); ctx.stroke();
+  ctx.font = '8px monospace'; ctx.textAlign = 'left';
+  const span = PSTH_PRE + PSTH_POST, nBins = psthBins.length || Math.max(1, Math.round(span / PSTH_BIN));
+  const xOf = t => _xOnset(t, padL, plotW);
+  // response-window box (stimulus context) behind the bars
+  const rd = _respDelayS(), rw = _responseWindowS();
+  ctx.fillStyle = 'rgba(255,193,7,0.16)'; ctx.fillRect(xOf(rd), padT, Math.max(0, xOf(rd + rw) - xOf(rd)), plotH);
+  let maxC = 1; for (const c of psthBins) if (c > maxC) maxC = c;
+  const bw = plotW / nBins; ctx.fillStyle = '#66bb6a';
+  for (let i = 0; i < nBins; i++) { const bh = (psthBins[i] / maxC) * plotH; if (bh > 0) ctx.fillRect(padL + i * bw, padT + plotH - bh, Math.max(1, bw), bh); }
+  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1; ctx.setLineDash([2, 2]);
+  ctx.beginPath(); ctx.moveTo(xOf(0), padT); ctx.lineTo(xOf(0), padT + plotH); ctx.stroke(); ctx.setLineDash([]);
+  ctx.strokeStyle = '#556'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, padT + plotH); ctx.lineTo(padL + plotW, padT + plotH); ctx.stroke();
+  ctx.fillStyle = '#8fa2c4'; ctx.textAlign = 'right';
+  ctx.fillText(String(maxC), padL - 3, padT + 7); ctx.fillText('0', padL - 3, padT + plotH);
+  ctx.textAlign = 'center';
+  for (const t of [-5, 0, 5, 10]) { const x = xOf(t); ctx.strokeStyle = '#1c2740'; ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + plotH); ctx.stroke(); ctx.fillStyle = '#8fa2c4'; ctx.fillText((t > 0 ? '+' + t : String(t)) + 's', x, h - 4); }
+  ctx.textAlign = 'left';
   if (!_hasLickDevice()) { ctx.fillStyle = '#556'; ctx.fillText('no lick device', padL + 4, padT + plotH / 2); return; }
   if (!_liveLicksOn()) { ctx.fillStyle = '#556'; ctx.fillText('lick detection off', padL + 4, padT + plotH / 2); return; }
-  if (!psthNStim || !psthBins.length) {
-    ctx.fillStyle = '#556'; ctx.fillText('waiting for stim + licks…', padL + 4, padT + plotH / 2); return;
-  }
-  let maxC = 1; for (const c of psthBins) if (c > maxC) maxC = c;
-  const bw = plotW / nBins;
-  ctx.fillStyle = '#66bb6a';
-  for (let i = 0; i < nBins; i++) {
-    const bh = (psthBins[i] / maxC) * plotH;
-    if (bh > 0) ctx.fillRect(padL + i * bw, padT + plotH - bh, Math.max(1, bw - 0.5), bh);
-  }
-  const x0 = xOf(0);   // stim onset
-  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1; ctx.setLineDash([2, 2]);
-  ctx.beginPath(); ctx.moveTo(x0, padT); ctx.lineTo(x0, padT + plotH); ctx.stroke(); ctx.setLineDash([]);
-  ctx.fillStyle = '#5a6b8c';
-  ctx.fillText(String(maxC), 1, padT + 7);
-  ctx.fillText((-PSTH_PRE).toFixed(1), padL - 2, h - 3);
-  ctx.fillText('0', x0 - 2, h - 3);
-  ctx.fillText('+' + PSTH_POST.toFixed(1), padL + plotW - 14, h - 3);
+  if (!psthNStim || !psthBins.length) { ctx.fillStyle = '#556'; ctx.fillText('waiting for stim + licks…', padL + 4, padT + plotH / 2); }
 }
 
-// Lick raster aligned to stim onset: one row per pooled trial (oldest bottom → newest top), green
-// ticks per lick, amber response-window band, dashed onset line. Shares the PSTH x-axis (below it).
+// Full-session lick raster aligned to stim onset. y-axis = the planned trial count (trialTable.length),
+// so each completed trial's licks land at its absolute row and the plot fills top→down as the session
+// runs; ticks every 25 trials. Shares the PSTH x-axis [−PSTH_PRE, +PSTH_POST] (onset=0, − left, + right).
 function drawLickRaster() {
-  const canvas = document.getElementById('lickraster-canvas');
-  if (!canvas) return;
+  const canvas = document.getElementById('lickraster-canvas'); if (!canvas) return;
   const ctx = canvas.getContext('2d');
-  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
-    canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight;
-  }
+  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) { canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight; }
   const w = canvas.width, h = canvas.height;
   ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
-  const padL = 20, padR = 6, padT = 4, padB = 3;      // padL/padR match drawLickPSTH so they align
+  const padL = _AX_PADL, padR = _AX_PADR, padT = 6, padB = 11;
   const plotW = w - padL - padR, plotH = h - padT - padB;
   if (plotW <= 6 || plotH <= 6) return;
-  ctx.font = '8px monospace';
-  const span = PSTH_PRE + PSTH_POST;
-  const xOf = t => padL + ((t + PSTH_PRE) / span) * plotW;
-  if (!_hasLickDevice()) { ctx.fillStyle = '#556'; ctx.fillText('no lick device', padL + 4, padT + plotH / 2); return; }
-  if (!_liveLicksOn()) { ctx.fillStyle = '#556'; ctx.fillText('lick detection off', padL + 4, padT + plotH / 2); return; }
-  // response-window band [resp_delay, resp_delay + response_window]
+  ctx.font = '8px monospace'; ctx.textAlign = 'left';
+  const xOf = t => _xOnset(t, padL, plotW);
+  const N = (trialTable && trialTable.length) ? trialTable.length : Math.max(1, psthNStim);
+  const yOf = tr => padT + (tr / N) * plotH;          // trial 0 at top, N at bottom
+  // response-window box + dashed onset line (full height)
   const rd = _respDelayS(), rw = _responseWindowS();
-  ctx.fillStyle = 'rgba(255,193,7,0.18)';
-  ctx.fillRect(xOf(rd), padT, Math.max(0, xOf(rd + rw) - xOf(rd)), plotH);
-  // stim onset line at t=0
+  ctx.fillStyle = 'rgba(255,193,7,0.16)'; ctx.fillRect(xOf(rd), padT, Math.max(0, xOf(rd + rw) - xOf(rd)), plotH);
   ctx.strokeStyle = '#888'; ctx.lineWidth = 1; ctx.setLineDash([2, 2]);
   ctx.beginPath(); ctx.moveTo(xOf(0), padT); ctx.lineTo(xOf(0), padT + plotH); ctx.stroke(); ctx.setLineDash([]);
-  const rows = psthRaster;
-  if (!rows.length) { ctx.fillStyle = '#556'; ctx.fillText('waiting for stim + licks…', padL + 4, padT + plotH / 2); return; }
-  const nRows = rows.length, rowH = plotH / nRows, tick = Math.min(4, Math.max(1.5, rowH * 0.8));
+  for (const t of [-5, 0, 5, 10]) { const x = xOf(t); ctx.strokeStyle = '#141d33'; ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + plotH); ctx.stroke(); }
+  // y-axis + trial ticks every 25
+  ctx.strokeStyle = '#556'; ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, padT + plotH); ctx.stroke();
+  ctx.fillStyle = '#8fa2c4'; ctx.textAlign = 'right';
+  for (let tr = 0; tr <= N; tr += 25) { const y = yOf(tr); ctx.fillText(String(tr), padL - 3, y + 3); ctx.strokeStyle = '#1c2740'; ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y); ctx.stroke(); }
+  if (N % 25) ctx.fillText(String(N), padL - 3, padT + plotH + 3);   // mark the total if not on a 25
+  ctx.textAlign = 'center'; ctx.fillStyle = '#5a6b8c';
+  for (const t of [-5, 0, 5, 10]) ctx.fillText((t > 0 ? '+' + t : String(t)) + 's', xOf(t), h - 2);
+  ctx.textAlign = 'left';
+  if (!_hasLickDevice()) { ctx.fillStyle = '#556'; ctx.fillText('no lick device', padL + 4, padT + plotH / 2); return; }
+  if (!_liveLicksOn()) { ctx.fillStyle = '#556'; ctx.fillText('lick detection off', padL + 4, padT + plotH / 2); return; }
+  // per-trial lick ticks at the trial's absolute row
+  const rowH = plotH / N, tick = Math.min(4, Math.max(1.2, rowH * 0.9));
   ctx.strokeStyle = '#4caf50'; ctx.lineWidth = 1;
-  for (let i = 0; i < nRows; i++) {
-    const yc = padT + plotH - (i + 0.5) * rowH;       // oldest at bottom, newest at top
-    for (const dt of rows[i]) {
-      const x = xOf(dt);
-      ctx.beginPath(); ctx.moveTo(x, yc - tick / 2); ctx.lineTo(x, yc + tick / 2); ctx.stroke();
-    }
+  for (const r of psthRaster) {
+    const yc = yOf(r.trial + 0.5);
+    for (const dt of r.rel) { const x = xOf(dt); ctx.beginPath(); ctx.moveTo(x, yc - tick / 2); ctx.lineTo(x, yc + tick / 2); ctx.stroke(); }
   }
-  ctx.fillStyle = '#5a6b8c'; ctx.fillText(nRows + ' tr', 1, padT + 7);
 }
 
-// Live-plots RT histogram — hit trials only, 100 ms bins, redrawn each trial (+ in the raster rAF
-// loop for resize). Lightweight canvas, mirrors the raster style.
+// Live-plots RT histogram — GO-hit trials only, 100 ms bins. x-axis fixed 0..response_window (bins and
+// scale don't shift as data arrives); y auto-ranges with the counts. Redrawn each trial + in the raster
+// rAF loop (resize).
 function drawRtHist() {
-  const canvas = document.getElementById('rt-hist-canvas');
-  if (!canvas) return;
+  const canvas = document.getElementById('rt-hist-canvas'); if (!canvas) return;
   const ctx = canvas.getContext('2d');
-  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
-    canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight;
-  }
+  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) { canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight; }
   const w = canvas.width, h = canvas.height;
   ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
-  const padL = 30, padR = 8, padT = 14, padB = 20;
+  const padL = 28, padR = 8, padT = 16, padB = 18;
   const plotW = w - padL - padR, plotH = h - padT - padB;
   if (plotW <= 4 || plotH <= 4) return;
-  if (!rtHits.length) {
-    ctx.fillStyle = '#556'; ctx.font = '11px monospace';
-    ctx.fillText('no hit trials yet', padL, padT + plotH / 2);
-    return;
-  }
-  let maxRt = 0;
-  for (const rt of rtHits) if (rt > maxRt) maxRt = rt;
-  const nBins = Math.max(1, Math.ceil((maxRt + 1) / RT_BIN_MS));
+  ctx.font = '9px monospace'; ctx.textAlign = 'left';
+  const respS = _responseWindowS(), respMs = Math.max(RT_BIN_MS, respS * 1000);
+  const nBins = Math.max(1, Math.ceil(respMs / RT_BIN_MS));
   const bins = new Array(nBins).fill(0);
-  for (const rt of rtHits) bins[Math.min(nBins - 1, Math.floor(rt / RT_BIN_MS))]++;
-  let maxCount = 1;
-  for (const c of bins) if (c > maxCount) maxCount = c;
+  for (const rt of rtHits) { let b = Math.floor(rt / RT_BIN_MS); if (b < 0) b = 0; if (b >= nBins) b = nBins - 1; bins[b]++; }
+  let maxCount = 1; for (const c of bins) if (c > maxCount) maxCount = c;
   const bw = plotW / nBins;
   ctx.fillStyle = '#26a69a';
-  for (let i = 0; i < nBins; i++) {
-    const bh = (bins[i] / maxCount) * plotH;
-    if (bh > 0) ctx.fillRect(padL + i * bw + 1, padT + plotH - bh, Math.max(1, bw - 2), bh);
-  }
-  ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, padT + plotH);
-  ctx.lineTo(padL + plotW, padT + plotH); ctx.stroke();
-  ctx.fillStyle = '#666'; ctx.font = '9px monospace';
-  ctx.fillText(String(maxCount), 4, padT + 7);
-  ctx.fillText('0', 4, padT + plotH);
-  const xStep = Math.max(1, Math.ceil(nBins / 8));
-  for (let i = 0; i <= nBins; i += xStep) {
-    ctx.fillText((i * RT_BIN_MS / 1000).toFixed(1), padL + i * bw - 6, h - 6);
-  }
-  ctx.fillText('s', padL + plotW - 2, h - 6);
-  ctx.fillStyle = '#888';
-  ctx.fillText(`${rtHits.length} hits`, padL + 4, padT + 7);
+  for (let i = 0; i < nBins; i++) { const bh = (bins[i] / maxCount) * plotH; if (bh > 0) ctx.fillRect(padL + i * bw + 1, padT + plotH - bh, Math.max(1, bw - 2), bh); }
+  ctx.strokeStyle = '#556'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, padT + plotH); ctx.lineTo(padL + plotW, padT + plotH); ctx.stroke();
+  // y ticks 0..maxCount
+  ctx.fillStyle = '#8fa2c4'; ctx.textAlign = 'right';
+  const yT = Math.min(4, maxCount);
+  for (let k = 0; k <= yT; k++) { const v = Math.round(maxCount * k / yT); const y = padT + plotH - (v / maxCount) * plotH; ctx.fillText(String(v), padL - 3, y + 3); ctx.strokeStyle = '#141d33'; ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y); ctx.stroke(); }
+  // x ticks (seconds); right edge = response-window value
+  ctx.textAlign = 'center'; const step = respS <= 1 ? 0.25 : 0.5;
+  const fmtS = v => v.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+  for (let t = 0; t < respS - 1e-3; t += step) { const x = padL + (t * 1000 / respMs) * plotW; ctx.fillStyle = '#8fa2c4'; ctx.fillText(fmtS(t), x, h - 6); }
+  ctx.fillStyle = '#8fa2c4'; ctx.fillText(fmtS(respS) + 's', padL + plotW, h - 6);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#888'; ctx.fillText(rtHits.length + ' hits', padL + 4, padT + 8);
+  if (!rtHits.length) { ctx.fillStyle = '#556'; ctx.fillText('no hit trials yet', padL + 4, padT + plotH / 2); }
 }
 
 // ── Phase / buttons ──

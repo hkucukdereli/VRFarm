@@ -512,14 +512,16 @@ const SLIDE_N = 10;       // sliding hit-rate window (last 10 go trials)
 const PSTH_PRE = 0.5, PSTH_POST = 3.0, PSTH_BIN = 0.05;   // seconds (window −0.5 → +3 s)
 let psthBins = [], psthNStim = 0, psthRaster = [], _psthFrame = 0;   // psthRaster: per-trial rel-lick times
 
-// The PSTH is coupled to LIVE lick detection: it only runs when a lick device exists AND the live
-// stream is on AND the Licks trace is enabled — otherwise it's turned off (no stale data).
+// The PSTH/lick-raster are coupled to LIVE lick DATA: they run whenever a lick device exists and the
+// live stream is on. They are independent of the events-raster "Licks" checkbox (cb-lick) — that box
+// only toggles whether lick ticks SHOW in the events raster; the data is always received/buffered, so
+// the Live-plots lick raster still plots with cb-lick unchecked.
 function _hasLickDevice() {
   const dev = config && config.rig && config.rig.devices && config.rig.devices.lick_sensor;
   return !!dev && dev.enabled !== false;
 }
 function _liveLicksOn() {
-  return _hasLickDevice() && rasterLive && !!document.getElementById('cb-lick')?.checked;
+  return _hasLickDevice() && rasterLive;
 }
 
 // Inverse normal CDF (Acklam) — for d' = z(hit rate) - z(false-alarm rate).

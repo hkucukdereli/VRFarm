@@ -1292,6 +1292,78 @@ let rewardClockOffset = null;
 let rewardPollInterval = null;
 let rewardAnimFrame = null;
 
+let encoderEvents = [];
+let encoderPollInterval = null;
+let encoderAnimFrame = null;
+
+async function startEncoderMonitor() {
+  const pi = getPiForDevice('encoder');
+  if (!pi) { log('Encoder not assigned to a Pi'); return; }
+  const result = await proxyPi(pi.ip, '/api/monitor_encoder');
+  if (result.ok) {
+    deviceState.encoder = deviceState.encoder || {};
+    deviceState.encoder.monitoring = true;
+    encoderEvents = [];
+    renderDeviceList();
+    encoderPollInterval = setInterval(() => pollEncoderData(pi.ip), 200);
+    startEncoderAnimation();
+    log('Encoder monitoring started (spin the wheel).');
+  } else { log('Failed: ' + (result.error || '')); }
+}
+
+async function stopEncoderMonitor() {
+  const pi = getPiForDevice('encoder');
+  if (pi) await proxyPi(pi.ip, '/api/stop_monitor_encoder');
+  deviceState.encoder = deviceState.encoder || {};
+  deviceState.encoder.monitoring = false;
+  if (encoderPollInterval) { clearInterval(encoderPollInterval); encoderPollInterval = null; }
+  stopEncoderAnimation();
+  renderDeviceList();
+  log('Encoder monitoring stopped.');
+}
+
+async function pollEncoderData(ip) {
+  const result = await proxyPi(ip, '/api/encoder_data', {}, 'GET');
+  encoderEvents = (result && result.events) || [];
+  if (encoderEvents.length) {
+    const last = encoderEvents[encoderEvents.length - 1];
+    const s = document.getElementById('enc-speed'); if (s) s.textContent = (last.speed_cms || 0).toFixed(1);
+    const d = document.getElementById('enc-dist'); if (d) d.textContent = (last.distance_cm || 0).toFixed(1);
+  }
+}
+
+function startEncoderAnimation() {
+  function frame() { drawEncoderSpeed(); encoderAnimFrame = requestAnimationFrame(frame); }
+  encoderAnimFrame = requestAnimationFrame(frame);
+}
+function stopEncoderAnimation() {
+  if (encoderAnimFrame) { cancelAnimationFrame(encoderAnimFrame); encoderAnimFrame = null; }
+}
+
+function drawEncoderSpeed() {
+  const canvas = document.getElementById('encoder-canvas');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
+  const plotH = h - 12, windowS = 15;
+  if (!encoderEvents.length) { ctx.fillStyle = '#556'; ctx.font = '11px monospace'; ctx.fillText('waiting for wheel motion…', 8, h / 2); return; }
+  const now = encoderEvents[encoderEvents.length - 1].t;
+  const win = encoderEvents.filter(e => now - e.t <= windowS);
+  let maxV = 1; for (const e of win) { const v = Math.abs(e.speed_cms || 0); if (v > maxV) maxV = v; }
+  ctx.fillStyle = '#444'; ctx.font = '9px monospace';
+  for (let s = 0; s <= windowS; s += 5) { const x = ((windowS - s) / windowS) * w; ctx.fillText('-' + s + 's', x + 1, h - 2); }
+  ctx.fillStyle = '#666'; ctx.fillText(maxV.toFixed(0) + ' cm/s', 2, 9);
+  ctx.strokeStyle = '#26c6da'; ctx.lineWidth = 1.5; ctx.beginPath();
+  let started = false;
+  for (const e of win) {
+    const x = ((windowS - (now - e.t)) / windowS) * w;
+    const y = plotH - (Math.abs(e.speed_cms || 0) / maxV) * (plotH - 4);
+    if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
 async function pollLickData(ip) {
   const result = await proxyPi(ip, '/api/lick_data', {}, 'GET');
   lickEvents = result.events || [];
@@ -1867,6 +1939,7 @@ function renderDeviceCard(name, dev, pisReady) {
     else if (name === 'photodiode') controlsHtml = renderPhotodiodeControls(dev);
     else if (name === 'reward') controlsHtml = renderRewardControls(dev);
     else if (name === 'calibration_probe') controlsHtml = renderProbeControls(dev);
+    else if (name === 'encoder') controlsHtml = renderEncoderControls(dev);
   }
 
   // Reinit lives in the header row (next to title/status) for camera + display.
@@ -2169,6 +2242,38 @@ function renderLickControls(dev) {
       ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">Last lick: <span id="last-lick-time">--</span></span>` : ''}
     </div>
     ${monitoring ? `<canvas id="lick-canvas" class="lick-canvas" width="400" height="60"></canvas>` : ''}`;
+}
+
+function renderEncoderControls(dev) {
+  const addr = dev.i2c_address || '0x36';
+  const wheel = dev.wheel_diameter_cm ?? 15;
+  const rate = dev.sample_hz ?? 100;
+  const ds = deviceState.encoder || {};
+  const monitoring = ds.monitoring;
+  return `
+    <div class="device-controls">
+      <div class="device-field">
+        <label>I2C</label>
+        <input type="text" value="${addr}" style="width:55px"
+               onchange="rig.devices.encoder.i2c_address = this.value">
+      </div>
+      <div class="device-field">
+        <label>Wheel &oslash; (cm)</label>
+        <input type="number" value="${wheel}" min="1" step="0.1" style="width:55px"
+               onchange="rig.devices.encoder.wheel_diameter_cm = parseFloat(this.value) || 15">
+      </div>
+      <div class="device-field">
+        <label>Sample (Hz)</label>
+        <input type="number" value="${rate}" min="10" max="500" step="10" style="width:50px"
+               onchange="rig.devices.encoder.sample_hz = parseInt(this.value) || 100">
+      </div>
+      ${monitoring
+        ? `<button class="btn btn-red btn-sm" onclick="stopEncoderMonitor()">Stop</button>`
+        : `<button class="btn btn-blue btn-sm" onclick="startEncoderMonitor()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
+      ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">Speed <span id="enc-speed">--</span> cm/s | Dist <span id="enc-dist">--</span> cm</span>` : ''}
+    </div>
+    ${monitoring ? `<canvas id="encoder-canvas" class="lick-canvas" width="440" height="80"></canvas>` : ''}
+    <div style="font-size:10px; color:#666; margin-top:2px">AS5600 magnetic angle sensor (I2C ${addr}) &mdash; spin the wheel; distance uses wheel &oslash;.</div>`;
 }
 
 function renderPhotodiodeControls(dev) {

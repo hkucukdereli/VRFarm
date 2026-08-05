@@ -39,6 +39,7 @@ _camera_lock = threading.Lock()
 _lick_events: list = []
 _photodiode_events: list = []
 _photodiode_raw: list = []   # diagnostic raw transitions {t, level} for the setup-UI scope
+_encoder_events: list = []   # running-wheel {t, speed_cms, distance_cm} for the setup-UI monitor
 _reward_events: list = []
 
 
@@ -280,6 +281,7 @@ def release_devices():
     _lick_events.clear()
     _photodiode_events.clear()
     _reward_events.clear()
+    _encoder_events.clear()
     return jsonify({"ok": True, "released": released})
 
 
@@ -673,6 +675,64 @@ def stop_monitor_lick():
 def lick_data():
     """Return collected lick events (polled by UI)."""
     return jsonify({"events": _lick_events})
+
+
+@app.route("/api/init_encoder", methods=["POST"])
+def init_encoder():
+    """Initialize the running-wheel encoder (AS5600 magnetic angle sensor, I2C)."""
+    _ensure_rig_path()
+    from devices.encoder import Encoder
+    data = request.json or {}
+    rig_cfg = {
+        "i2c_address": data.get("i2c_address", "0x36"),
+        "i2c_bus": data.get("i2c_bus", 1),
+        "wheel_diameter_cm": data.get("wheel_diameter_cm", 15.0),
+        "sample_hz": data.get("sample_hz", 100),
+    }
+    try:
+        dev = Encoder()
+        dev.init(rig_config=rig_cfg, task_params={})
+        with _devices_lock:
+            _devices["encoder"] = dev
+        check = dev.check()
+        return jsonify({"ok": True, "message": check.get("message", "OK")})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/monitor_encoder", methods=["POST"])
+def monitor_encoder():
+    """Start running-wheel monitoring (setup-UI live speed view)."""
+    global _encoder_events
+    with _devices_lock:
+        dev = _devices.get("encoder")
+    if not dev:
+        return jsonify({"ok": False, "error": "Encoder not initialized"}), 400
+    _encoder_events = []
+
+    def on_run(evt):
+        _encoder_events.append(evt)
+        if len(_encoder_events) > 3000:
+            _encoder_events.pop(0)
+
+    dev.start_stream(on_run)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/stop_monitor_encoder", methods=["POST"])
+def stop_monitor_encoder():
+    """Stop running-wheel monitoring."""
+    with _devices_lock:
+        dev = _devices.get("encoder")
+    if dev:
+        dev.stop_stream()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/encoder_data")
+def encoder_data():
+    """Return collected running-wheel samples (polled by the setup UI)."""
+    return jsonify({"events": _encoder_events})
 
 
 @app.route("/api/init_camera", methods=["POST"])

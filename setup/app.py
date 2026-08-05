@@ -554,6 +554,18 @@ def api_init_devices():
             }, "Photodiode")
             results["photodiode"] = {"ok": ok, "message": msg}
 
+    # Running-wheel encoder: AS5600 magnetic angle sensor (I2C)
+    if "encoder" in devices and devices["encoder"].get("enabled"):
+        ip = dev_to_ip.get("encoder")
+        if ip:
+            ok, msg = _init("encoder", ip, "/api/init_encoder", {
+                "i2c_address": devices["encoder"].get("i2c_address", "0x36"),
+                "i2c_bus": devices["encoder"].get("i2c_bus", 1),
+                "wheel_diameter_cm": devices["encoder"].get("wheel_diameter_cm", 15.0),
+                "sample_hz": devices["encoder"].get("sample_hz", 100),
+            }, "Encoder")
+            results["encoder"] = {"ok": ok, "message": msg}
+
     # Calibration probe: pigpiod + GPIO latch
     if "calibration_probe" in devices and devices["calibration_probe"].get("enabled"):
         ip = dev_to_ip.get("calibration_probe")
@@ -1080,7 +1092,7 @@ def api_device_schemas():
     from devices.base import DEVICE_REGISTRY
     import devices.lick_sensor, devices.reward, devices.camera  # noqa
     import devices.photodiode, devices.display  # noqa
-    import devices.calibration_probe  # noqa
+    import devices.calibration_probe, devices.encoder  # noqa
 
     schemas = {}
     for name, cls in DEVICE_REGISTRY.items():
@@ -1126,6 +1138,7 @@ def _get_deploy_files(role: str) -> list[tuple[str, str]]:
         ("devices/photodiode.py", "devices/photodiode.py"),
         ("devices/display.py", "devices/display.py"),
         ("devices/calibration_probe.py", "devices/calibration_probe.py"),
+        ("devices/encoder.py", "devices/encoder.py"),
         # Pi API
         ("pi_api/api.py", "pi_api/api.py"),
     ]

@@ -418,6 +418,19 @@
       <canvas class="raster-canvas" id="canvas-raster-sync" style="height:40px;"></canvas>
     </div>
 
+    <div class="raster-panel" id="panel-raster-run">
+      <div class="raster-header">
+        <div style="display:flex; align-items:center; gap:10px;">
+          <h3 style="margin:0; font-size:11px; letter-spacing:0.5px; color:#aaa;">RUNNING</h3>
+          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#26c6da;">
+            <input type="checkbox" id="cb-run" checked> Speed (cm/s)
+          </label>
+        </div>
+        <span class="info" id="raster-info-run"></span>
+      </div>
+      <canvas class="raster-canvas" id="canvas-raster-run" style="height:44px;"></canvas>
+    </div>
+
     <!-- Trial table -->
     <div class="card" style="margin-top: 10px">
       <h3>Trials</h3>
@@ -469,6 +482,7 @@ let _offsetSamples = [];  // collect first N offsets, use median
 let photodiodeEvents = [];
 let rewardEvents = [];
 let timeoutEvents = [];  // over-lick phase restarts (iti/prestim/poststim) — purple markers
+let runEvents = [];      // running-wheel {t, speed_cms, distance_cm} for the RUNNING trace panel
 let rasterLive = false, rasterAnimFrame = null;
 
 // Stim events from SSE
@@ -859,7 +873,7 @@ function renderSaveDevices() {
   if (!host) return;
   const devs = (config && config.rig && config.rig.devices) || {};
   const DATA_DEVICES = [['camera', 'Camera'], ['lick_sensor', 'Lick'],
-                        ['reward', 'Reward'], ['photodiode', 'Photodiode']];
+                        ['reward', 'Reward'], ['photodiode', 'Photodiode'], ['encoder', 'Run']];
   host.innerHTML = DATA_DEVICES
     .filter(([name]) => devs[name] && devs[name].enabled)
     .map(([name, label]) =>
@@ -889,6 +903,9 @@ function updateDevicePanels() {
   const pdOn = !!(devs['photodiode'] && devs['photodiode'].enabled);
   const syncRow = document.getElementById('photodiode-sync-row');
   if (syncRow) syncRow.style.display = pdOn ? 'flex' : 'none';
+  // Running-speed panel only when the rig has an encoder
+  const runPanel = document.getElementById('panel-raster-run');
+  if (runPanel) runPanel.style.display = (devs['encoder'] && devs['encoder'].enabled) ? '' : 'none';
   refreshContrastMetric();
 }
 
@@ -1321,6 +1338,12 @@ function handleEvent(evt) {
     case 'sync_pulse':
       if (rasterLive) { photodiodeEvents.push({t: evt.t}); updateRasterInfo(); }
       break;
+    case 'running':
+      if (rasterLive) {
+        runEvents.push({t: evt.t, speed_cms: evt.speed_cms, distance_cm: evt.distance_cm});
+        if (runEvents.length > 600) runEvents.shift();   // ~40s at 15 Hz; bounds the per-frame draw
+      }
+      break;
     case 'countdown':
       // Grace-period tick — show whole seconds remaining inside the GO button.
       document.getElementById('btn-go').textContent =
@@ -1617,6 +1640,48 @@ function drawUnifiedRaster() {
       // future: sync in/out traces
     ],
   });
+  drawSpeed('canvas-raster-run');
+}
+
+// Running-wheel speed as a continuous line on the shared raster time axis (past region), so it
+// lines up with licks/stim/rewards. Toggled by #cb-run; y auto-scales to the window's max speed.
+function drawSpeed(canvasId) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
+    canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight;
+  }
+  const w = canvas.width, h = canvas.height, plotH = h - 12;
+  ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
+  if (lickOffset === null) return;
+  const now = Date.now() / 1000 - lickOffset;
+  const xForAge = age => ((RASTER_PAST - age) / RASTER_WINDOW) * w;
+  const x0 = xForAge(0);
+  ctx.fillStyle = 'rgba(255,255,255,0.03)'; ctx.fillRect(x0, 0, w - x0, plotH);   // future shade
+  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;                                     // "now" play-head
+  ctx.beginPath(); ctx.moveTo(x0, 0); ctx.lineTo(x0, plotH); ctx.stroke();
+  ctx.fillStyle = '#444'; ctx.font = '9px monospace';
+  for (let tau = -RASTER_PAST; tau <= RASTER_FUTURE; tau += 5) {
+    const x = xForAge(-tau);
+    ctx.fillText(tau === 0 ? '0' : (tau > 0 ? '+' + tau : '' + tau) + 's', x + 1, h - 2);
+  }
+  if (!document.getElementById('cb-run')?.checked || !runEvents.length) return;
+  const win = runEvents.filter(e => { const age = now - e.t; return age >= 0 && age <= RASTER_PAST; });
+  if (!win.length) return;
+  let maxV = 1; for (const e of win) { const v = Math.abs(e.speed_cms || 0); if (v > maxV) maxV = v; }
+  ctx.strokeStyle = '#26c6da'; ctx.lineWidth = 1.5; ctx.beginPath();
+  let started = false;
+  for (const e of win) {
+    const x = xForAge(now - e.t);
+    const y = plotH - (Math.abs(e.speed_cms || 0) / maxV) * (plotH - 3);
+    if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  const last = runEvents[runEvents.length - 1];
+  ctx.fillStyle = '#26c6da'; ctx.font = '9px monospace';
+  ctx.fillText((last.speed_cms || 0).toFixed(1) + ' cm/s · ' + (last.distance_cm || 0).toFixed(0) +
+               ' cm (max ' + maxV.toFixed(0) + ')', 2, 9);
 }
 
 // Draw one raster into `canvasId`. opts: {stimCb, respWinCb, showPredicted, traces:[{cb,events,color}]}.

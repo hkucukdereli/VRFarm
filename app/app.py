@@ -210,6 +210,17 @@ def api_load_rig():
                         err = r.json().get("error",
                               "Photodiode failed — is pigpiod running?")
                         init_errors.append(err)
+                elif dev_name == "encoder":
+                    r = requests.post(f"http://{ip}:{api_port}/api/init_encoder", json={
+                        "i2c_address": dev_cfg.get("i2c_address", "0x36"),
+                        "i2c_bus": dev_cfg.get("i2c_bus", 1),
+                        "wheel_diameter_cm": dev_cfg.get("wheel_diameter_cm", 15.0),
+                        "sample_hz": dev_cfg.get("sample_hz", 100),
+                    }, timeout=10)
+                    if not r.json().get("ok"):
+                        err = r.json().get("error",
+                              "Encoder failed — check I2C 0x36 / magnet")
+                        init_errors.append(err)
             except requests.exceptions.Timeout:
                 init_errors.append(f"{dev_name}: timed out waiting for response")
             except requests.exceptions.ConnectionError:
@@ -716,7 +727,7 @@ def go():
     # Start leader engine
     print("[go] Starting leader...")
     # Behavioral devices the user chose NOT to save -> tell the Leader to skip their HDF5 datasets.
-    skip_save = [d for d in ("lick_sensor", "reward", "photodiode") if not save.get(d, True)]
+    skip_save = [d for d in ("lick_sensor", "reward", "photodiode", "encoder") if not save.get(d, True)]
     leader_args = [
         "--rig", f"/home/vruser/rig/rigs/{rig_filename}",
         "--task", f"/home/vruser/rig/experiments/{task_filename}",

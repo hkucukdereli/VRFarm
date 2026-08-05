@@ -30,6 +30,7 @@ import devices.reward         # noqa: F401
 import devices.camera         # noqa: F401
 import devices.photodiode     # noqa: F401
 import devices.calibration_probe  # noqa: F401
+import devices.encoder        # noqa: F401 — running-wheel encoder
 
 
 class Leader:
@@ -52,6 +53,8 @@ class Leader:
         self._trial_licks = []
         self._iti_licks = []
         self._trial_ctx = {}
+        self._running_speed = 0.0   # latest running-wheel speed (cm/s); updated by _on_encoder,
+                                    # available to the trial loop for future run-gating (_running_ok)
         # Photodiode stim-sync (online onset correction)
         self._sync_queue = queue.Queue()
         self._sync_enabled = False
@@ -153,6 +156,18 @@ class Leader:
             except queue.Full:
                 pass
         self._publish(evt)
+
+    def _on_encoder(self, evt: dict):
+        """Running-wheel sample: cache the live speed (for future gating) and publish to the Mac."""
+        self._running_speed = float(evt.get("speed_cms", 0.0) or 0.0)
+        self._publish({"type": "running", "t": evt.get("t"),
+                       "speed_cms": evt.get("speed_cms"), "distance_cm": evt.get("distance_cm")})
+
+    def _running_ok(self) -> bool:
+        """Hook for future trial-gating: is the mouse running fast enough to start a trial?
+        Reads session.run_gate_cms (default 0 = disabled → always True). Not yet enforced anywhere."""
+        gate = float(self.task.get("session", {}).get("run_gate_cms", 0) or 0)
+        return self._running_speed >= gate
 
     def _drain_lick_queue(self) -> list[float]:
         """Drain all pending lick timestamps from the queue."""
@@ -296,6 +311,10 @@ class Leader:
         # Start photodiode streaming
         if "photodiode" in self.devices:
             self.devices["photodiode"].start_stream(self._on_sync_pulse)
+
+        # Start running-wheel encoder streaming
+        if "encoder" in self.devices:
+            self.devices["encoder"].start_stream(self._on_encoder)
         self._sync_enabled = (
             "photodiode" in self.devices
             and self.task.get("stimulus", {}).get("photodiode_sync_enabled", False))
@@ -449,6 +468,9 @@ class Leader:
             # Reset photodiode
             if "photodiode" in self.devices:
                 self.devices["photodiode"].reset_trial()
+            # Mark running-distance baseline for this trial
+            if "encoder" in self.devices:
+                self.devices["encoder"].reset_trial()
             # Drain stale sync pulses from prior trial
             while not self._sync_queue.empty():
                 try:
@@ -619,9 +641,20 @@ class Leader:
         """Clean up after session: write session-level device data, close HDF5, save metadata."""
         self.running = False
 
-        # Write session-level device data
+        # Stop device streams so their poll threads aren't still appending to their buffers while we
+        # snapshot the session-level data below (matters for continuous devices like the encoder).
+        for dev in self.devices.values():
+            if hasattr(dev, "stop_stream"):
+                try:
+                    dev.stop_stream()
+                except Exception:
+                    pass
+
+        # Write session-level device data (honor the per-session save gate, like the per-trial paths)
         if self.hdf5_file:
-            for dev in self.devices.values():
+            for name, dev in self.devices.items():
+                if name in self._skip_save:
+                    continue
                 for ds_name, arr in dev.hdf5_session_data().items():
                     self.hdf5_file.create_dataset(ds_name, data=arr)
             self.hdf5_file.close()

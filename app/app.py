@@ -1142,18 +1142,10 @@ def camera_feed():
             break
     if not ip:
         return "No camera", 400
-    def generate():
-        try:
-            r = requests.get(f"http://{ip}:{api_port}/api/camera_stream",
-                             stream=True, timeout=5)
-            for chunk in r.iter_content(chunk_size=4096):
-                yield chunk
-        except (requests.exceptions.ConnectionError,
-                requests.exceptions.Timeout,
-                Exception):
-            return  # stream ended — silently close
-
-    return Response(generate(),
+    # Reconnecting relay: rides through pi_api restarts (Deploy), the preview->record swap (Go), and the
+    # <img>-before-preview race instead of collapsing to a silent 200-blank. See shared/mjpeg_relay.py.
+    from shared.mjpeg_relay import relay
+    return Response(relay(f"http://{ip}:{api_port}/api/camera_stream"),
                     mimetype="multipart/x-mixed-replace; boundary=frame")
 
 

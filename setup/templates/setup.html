@@ -757,6 +757,15 @@ async function stopCameraStream() {
   log('Camera stream stopped.');
 }
 
+// Self-heal the preview on a hard <img> error (proxy/Pi down, non-200): re-point at a fresh,
+// cache-busted feed after a short delay. The reconnecting proxy (shared/mjpeg_relay.py) rides through
+// transient gaps without erroring; this covers the hard failures the setup UI otherwise couldn't recover.
+let _cameraImgRetry = null;
+function cameraImgError(img) {
+  clearTimeout(_cameraImgRetry);
+  _cameraImgRetry = setTimeout(() => { img.src = '/api/camera_feed?ts=' + Date.now(); }, 1500);
+}
+
 async function testCheckers() {
   const pi = getPiForDevice('display');
   if (!pi) { log('Display not assigned to a Pi'); return; }
@@ -1982,7 +1991,7 @@ function renderCameraControls(dev) {
   const pi = getPiForDevice('camera');
   // Proxied through the setup app (same-origin) rather than hitting the Pi directly, so the
   // preview works from any browser that can reach this app — the Pi hop runs server-side.
-  const streamUrl = pi ? '/api/camera_feed' : '';
+  const streamUrl = pi ? ('/api/camera_feed?ts=' + Date.now()) : '';   // cache-bust so each Live re-requests a fresh stream
 
   return `
     <div class="device-controls">
@@ -2045,7 +2054,7 @@ function renderCameraControls(dev) {
     <!-- Row 4: live-stream window (OFFLINE until Live is pressed) -->
     <div class="stream-container">
       ${streaming
-        ? `<img src="${streamUrl}" alt="Camera stream" style="filter:grayscale(1)">`
+        ? `<img src="${streamUrl}" alt="Camera stream" style="filter:grayscale(1)" onerror="cameraImgError(this)">`
         : `<div class="stream-offline">OFFLINE</div>`}
     </div>`;
 }

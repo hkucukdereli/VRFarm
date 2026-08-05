@@ -56,12 +56,16 @@
   .video-box { background: #0a0a1a; border-radius: 8px; overflow: hidden; position: relative; min-height: 320px; }
   .video-box.half { min-height: 160px; }
   .video-box.half .box-content { min-height: 130px; }
-  /* Live plots must be exactly as tall as the camera+stimulus stack, never taller: drop the
-     .video-box min-height floor and let the plot subtree shrink so the LEFT column drives the
-     grid row height (align-items:stretch then matches this column to it). */
+  /* Live plots must be exactly as tall as the camera+stimulus stack, never taller. The plot canvases
+     carry an intrinsic height that the grid's auto-sizing uses to size this column, which inflated it
+     past the camera+stim stack (min-height:0 alone can't stop it — it permits shrinking but doesn't
+     reduce the intrinsic size the track sizing reads). Fix: take the plot grid OUT OF FLOW
+     (position:absolute), so it contributes 0 to the panel's intrinsic height — the LEFT column then
+     drives the grid row and align-items:stretch matches this panel to it (verified diff=0, viewport-
+     independent, via headless render). */
   #panel-liveplots { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-  #panel-liveplots .box-content { flex: 1; min-height: 0; padding: 4px; }
-  .plot-quad { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; width: 100%; height: 100%; min-height: 0; }
+  #panel-liveplots .box-content { flex: 1; min-height: 0; padding: 0; position: relative; }
+  .plot-quad { position: absolute; inset: 4px; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; min-height: 0; }
   .plot-col { display: grid; gap: 4px; min-width: 0; min-height: 0; }
   .plot-col.left { grid-template-rows: 1fr 1fr; }        /* RT hist + Performance */
   .plot-col.right { grid-template-rows: 4fr 1fr; }       /* lick raster (4) : PSTH (1) */
@@ -1110,7 +1114,7 @@ async function startSession() {
   const btn = document.getElementById('btn-go');
   btn.textContent = 'Starting...';
   log('Starting session...');
-  lickEvents = []; photodiodeEvents = []; rewardEvents = []; stimEvents = []; timeoutEvents = []; rtHits = []; hitRateSeries = []; slideHitSeries = []; faSeries = []; dprimeSeries = []; _goRespHist = []; _goN = _goHit = _nogoN = _nogoFA = 0; psthBins = []; psthNStim = 0; psthRaster = [];
+  lickEvents = []; photodiodeEvents = []; rewardEvents = []; stimEvents = []; timeoutEvents = []; runEvents = []; rtHits = []; hitRateSeries = []; slideHitSeries = []; faSeries = []; dprimeSeries = []; _goRespHist = []; _goN = _goHit = _nogoN = _nogoFA = 0; psthBins = []; psthNStim = 0; psthRaster = [];
   lickOffset = null;
   currentTrialNum = 0;
   sessionStartTime = null;
@@ -1600,7 +1604,7 @@ function toggleLive() {
 async function startLive() {
   // Clear only the RASTER + PSTH arrays (they show recent data). The cumulative performance/RT/
   // reward series are trial-driven and must SURVIVE a Live restart — reset them only per session.
-  lickEvents = []; rewardEvents = []; photodiodeEvents = []; stimEvents = []; timeoutEvents = []; psthBins = []; psthNStim = 0;
+  lickEvents = []; rewardEvents = []; photodiodeEvents = []; stimEvents = []; timeoutEvents = []; runEvents = []; psthBins = []; psthNStim = 0;
   lickOffset = null;
   _offsetSamples = [];
   // Flush server-side event queue so we only see new events

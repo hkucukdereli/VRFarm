@@ -155,7 +155,9 @@ class Leader:
                 self._sync_queue.put_nowait(evt["t"])
             except queue.Full:
                 pass
-        self._publish(evt)
+        # Publish with a `type` key: the device dict carries `event`, but the browser dispatches on
+        # switch(evt.type), so without this the live SYNC raster (case 'sync_pulse') never populates.
+        self._publish({**evt, "type": evt.get("event", "sync_pulse")})
 
     def _on_encoder(self, evt: dict):
         """Running-wheel sample: cache the live speed (for future gating) and publish to the Mac."""

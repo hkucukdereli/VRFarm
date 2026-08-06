@@ -237,3 +237,6 @@ CLAUDE.local.md
 
 # TO DELETE LATER: sample kicad project
 BonsaiBreakout
+
+# PCB breakout for RPi5
+hardware/

@@ -1841,7 +1841,8 @@ function renderPiList() {
   el.innerHTML = rig.pis.map((pi, idx) => {
     const ps = piState[pi.ip] || {};
     const dotClass = ps.checked ? (ps.ok ? 'dot-green' : 'dot-red') : 'dot-gray';
-    const offline = ps.checked && !ps.ok;   // confirmed offline (red dot) -> disable all but Check
+    const offline = ps.checked && !ps.ok;   // API down (red dot) -> disable API-dependent buttons
+    const noSsh = ps.checked && !ps.ssh;     // SSH down -> can't even Install (Install provisions over SSH)
     return `
     <div class="pi-card">
       <div class="pi-header">
@@ -1857,7 +1858,7 @@ function renderPiList() {
       </div>
       <div class="btn-row">
         <button class="btn btn-blue btn-sm" onclick="checkPi('${pi.ip}')">Check</button>
-        <button class="btn btn-orange btn-sm" onclick="installPi(${idx})" ${offline ? 'disabled' : ''}>Install</button>
+        <button class="btn btn-orange btn-sm" onclick="installPi(${idx})" ${noSsh ? 'disabled' : ''}>Install</button>
         <button class="btn btn-green btn-sm" onclick="deployPi(${idx})" ${offline ? 'disabled' : ''}>Deploy</button>
         <button class="btn btn-yellow btn-sm" onclick="restartPiApi(${idx})" ${offline ? 'disabled' : ''}>Restart API</button>
         <button class="btn btn-red btn-sm" onclick="rebootPi(${idx})" ${offline ? 'disabled' : ''}>Reboot</button>

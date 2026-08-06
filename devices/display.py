@@ -347,6 +347,16 @@ class Display(Device):
         self._screen.fill((0, 0, 0))
         pygame.display.flip()
 
+    def set_sync_layout(self, corner=None, size_px=None):
+        """Live-update the sync-square corner/size (from the setup-UI Test) and drop the cached
+        rect so _sync_patch_rect / _sync_test_rect recompute for the new placement — lets the
+        dropdown move the square without a full Save + re-deploy. None leaves a field unchanged."""
+        if corner is not None:
+            self.sync_corner = str(corner)
+        if size_px is not None:
+            self.sync_size_px = int(size_px or 0)
+        self._sync_rect = None   # invalidate the cached patch rect
+
     def _sync_test_rect(self):
         """Rect for the TEST flash: the real warp-derived sync-square rect when a warp is loaded,
         else a corner square of sync_size_px (or a 120px default) at sync_corner — so the test

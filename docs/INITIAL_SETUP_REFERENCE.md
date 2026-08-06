@@ -5,7 +5,7 @@
 **Current rig:** cheese (cheddar = Leader, mozzarella = Follower)
 
 This is the first-time **rig bring-up** reference: hardware, network/IPs, OS, conda
-envs, package installs, pigpiod, projector startup, systemd service, SSH keys, gotchas.
+Pi bring-up, envs, package installs, GPIO (lgpio), projector startup, systemd service, SSH keys, gotchas.
 For the **controller** machine (the Mac/Linux box running the UIs) the authoritative doc
 is `docs/CONTROLLER_SETUP.md`; the Mac section here is a short version of it.
 
@@ -43,7 +43,7 @@ pip install flask requests scipy matplotlib numpy h5py pyyaml
 ```
 
 `paramiko` and `pyzmq` are no longer needed (replaced by REST API + UDP). `picamera2`
-and `pigpio` live on the Pis, not here.
+and `lgpio` live on the Pis, not here.
 
 ### Project folder
 
@@ -82,6 +82,73 @@ warp push, reboot, calibrate). Every new controller must add **its own** key to 
 
 ---
 
+## New Pi first boot (headless bring-up)
+
+Getting a fresh Pi onto the rig — the steps we used replacing the Leader with a Pi 5 (still named
+`cheddar`, still at `192.168.10.101`). A fresh Raspberry Pi OS / Debian image usually boots with
+**SSH off** and only on WiFi (or a stray address), **not** on the experiment switch, so these steps
+get it reachable and onto the switch. Skip any that are already done.
+
+### 1. Enable SSH (fresh image)
+
+Needs console access the first time (monitor+keyboard), or preset it in Raspberry Pi Imager:
+```bash
+# on the Pi:
+sudo systemctl enable --now ssh          # SSH on now + at boot
+# equivalently: sudo raspi-config -> Interface Options -> SSH -> Yes
+```
+Headless alternative: reflash with the Imager and, under ⚙ *Edit Settings*, set the hostname, enable
+SSH with the controller's public key, the `vruser` account, and WiFi — then it boots ready.
+
+### 2. WiFi — for internet + NTP (NetworkManager)
+
+```bash
+nmcli radio wifi on
+nmcli device wifi list                                    # find the SSID
+sudo nmcli device wifi connect "<SSID>" password "<PW>"   # OPEN network: omit `password ...` entirely
+ping -c1 8.8.8.8 && getent hosts deb.debian.org && echo "internet OK"
+```
+Caveat: the institute `public` WiFi is a captive-portal/firewalled net — it **associates but has no
+egress**. NTP may still pass; for package installs with no egress, route apt/pip/conda through an HTTP
+proxy on the controller (the Pi reaches it over the switch at `192.168.10.1`).
+
+### 3. Static IP on the switch (eth0)
+
+Give the wired interface the fleet address; no gateway/DNS on eth0 — WiFi stays the internet path:
+```bash
+sudo nmcli connection modify "Wired connection 1" \
+  ipv4.method manual ipv4.addresses 192.168.10.101/24 \
+  ipv4.gateway "" ipv4.dns "" ipv4.never-default yes
+sudo nmcli connection up "Wired connection 1"
+ip -br addr show eth0                        # expect 192.168.10.101/24  (mozzarella = .102)
+```
+Do this from a monitor or over WiFi — changing `eth0` drops an `eth0` SSH session.
+
+### 4. Passwordless SSH from the controller
+
+```bash
+# on the controller (fystyk):
+ls ~/.ssh/id_*.pub || ssh-keygen -t ed25519     # make a key if you have none
+ssh-copy-id vruser@192.168.10.101               # enter the Pi password once
+ssh vruser@192.168.10.101 hostname              # prints the hostname, no password
+```
+**Reused IP → `REMOTE HOST IDENTIFICATION HAS CHANGED`?** A rebuilt/replaced Pi at the same IP has a
+new host key. Clear the stale entry and retry (safe when it's your own Pi):
+```bash
+ssh-keygen -R 192.168.10.101
+ssh-copy-id vruser@192.168.10.101
+```
+
+### Pi 5 notes
+- Boots from **NVMe SSD** — no more tiny-SD-card churn; video can live on the NVMe.
+- **GPIO is lgpio, not pigpio** (Pi 5's RP1 GPIO — `pigpio`/`pigpiod` don't work). No daemon; see the
+  GPIO section below. Header controller is `gpiochip0` on current OS (`gpiodetect` to confirm; set
+  `gpiochip: 4` on the device in `rigs/cheese.yaml` only on very early Pi 5 images).
+- The setup UI **Install** needs **miniforge already present** (`~/miniforge3`); it creates the `rig`
+  env but doesn't install conda itself.
+
+---
+
 ## Cheddar (Leader Pi) Setup
 
 Everything below is what the setup UI **Install** does automatically; do it by hand only
@@ -107,8 +174,8 @@ rig's device list):
 ```bash
 pip install flask pyyaml numpy h5py       # base + leader (h5py)
 pip install smbus2                          # lick_sensor
-pip install pigpio scipy                    # reward
-pip install pigpio                          # photodiode
+pip install lgpio scipy                     # reward
+pip install lgpio                           # photodiode + calibration probe
 pip install pillow simplejpeg piexif av     # camera (plus h5py)
 ```
 
@@ -123,48 +190,20 @@ sudo apt-get install -y python3-libcamera python3-picamera2
 # compiled .so bindings have the wrong ABI and import fails.
 ```
 
-### pigpiod (reward / photodiode)
+### GPIO — lgpio (reward / photodiode / calibration probe)
 
-The setup UI Install runs `sudo apt install pigpio-tools` and enables the `pigpiod`
-service. On **trixie the packaged `pigpio` may be unavailable**, in which case build the
-daemon from source:
-
-```bash
-cd ~
-git clone https://github.com/joan2937/pigpio.git
-cd pigpio && make && sudo make install       # the Python step fails (distutils gone) — harmless
-sudo ldconfig
-```
-
-The Python client is `pip install pigpio` (already installed for reward/photodiode above).
-Verify:
+GPIO uses **lgpio**, which works on Pi 5 (RP1) and Pi 4 (BCM). There is **no daemon** and nothing to
+enable on boot — it talks to `/dev/gpiochip*` directly (this replaced `pigpio`/`pigpiod`, which do
+**not** work on the Pi 5). The setup UI Install just `pip install lgpio` for these devices. Verify:
 
 ```bash
-sudo pigpiod
-python3 -c "import pigpio; pi = pigpio.pi(); print('connected:', pi.connected); pi.stop()"
+python3 -c "import lgpio; h=lgpio.gpiochip_open(0); print('gpiochip0 ok', h); lgpio.gpiochip_close(h)"
+gpiodetect        # the 40-pin header controller should be 'pinctrl-rp1' (Pi 5) or 'pinctrl-bcm...' (Pi 4)
 ```
 
-### Auto-start pigpiod on boot
-
-Install enables the service. If you built from source, install the unit yourself
-(daemon lives at `/usr/local/bin/pigpiod`; the apt build uses `/usr/bin/pigpiod`):
-
-```bash
-sudo tee /etc/systemd/system/pigpiod.service > /dev/null << 'EOF'
-[Unit]
-Description=pigpio daemon
-After=network.target
-
-[Service]
-ExecStart=/usr/local/bin/pigpiod -l
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-sudo systemctl enable pigpiod
-sudo systemctl start pigpiod
-```
+The device code opens `gpiochip0` by default (correct for Pi 5 on current OS and for Pi 4). Only very
+early Pi 5 images exposed the header as `gpiochip4` — if a GPIO claim fails, set `gpiochip: 4` on the
+device in `rigs/cheese.yaml`.
 
 ### SSD mount for video
 
@@ -288,7 +327,7 @@ python setup/app.py    # opens localhost:4999
 2. **Connect** — checks SSH + REST API on each Pi (`/api/status`)
 3. **Install** (first time, via SSH): ensures the `rig` conda env matched to system
    Python, installs the device-specific apt/pip packages, symlinks the camera bindings,
-   uploads the code, installs + enables the `vrfarm` systemd service, enables pigpiod.
+   uploads the code, installs + enables the `vrfarm` systemd service (lgpio needs no daemon).
 4. **Deploy** (via REST API): re-uploads the code files and restarts `pi_api` so the new
    code runs; the follower also gets `start_projector.sh`, the calibration tools, and
    `~/dlp/` via scp.
@@ -385,10 +424,9 @@ sudo nmcli con up eth-static
 | pyyaml | yes | yes | yes |
 | pygame | — | — | yes |
 | smbus2 | — | yes (lick) | — |
-| pigpio (client) | — | yes (reward/photodiode) | — |
+| lgpio | — | yes (reward/photodiode/probe) | — |
 | pillow, simplejpeg, piexif, av | — | yes (camera) | — |
 | python3-picamera2 + python3-libcamera (apt, symlinked) | — | yes (camera) | — |
-| pigpiod daemon (apt pigpio-tools, or source) | — | yes (reward/photodiode) | — |
 | chrony (apt) | — | yes | yes |
 | xserver-xorg / libgl (apt) | — | — | yes |
 
@@ -403,7 +441,7 @@ No longer needed: `paramiko`, `pyzmq`, `psychopy`, `pyglet`, `psychtoolbox`, `li
 |---|---|
 | SSH connect fails | `ssh-copy-id vruser@<ip>` (and `ssh` once to seed known_hosts) |
 | REST API not responding | `sudo systemctl restart vrfarm` on Pi |
-| pigpiod not found | `sudo pigpiod`, or `sudo systemctl start pigpiod` |
+| GPIO device won't init / claim fails | check wiring; confirm the header is `gpiochip0` (`gpiodetect`); set `gpiochip: 4` in the rig only on early Pi 5 images |
 | `import picamera2` fails | rig env Python must equal system Python (3.13); recreate env, re-run Install |
 | pygame display fails | check `DISPLAY=:0`; run `~/rig/start_projector.sh` (or Init Devices) |
 | Projector black / no image | run `~/rig/start_projector.sh` (GPIO ALT2 + GPIO25 high + DLPC3436 init) |

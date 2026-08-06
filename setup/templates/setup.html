@@ -1598,7 +1598,11 @@ async function startPhotodiodeTest() {
   if (!dpi) { log('Display not assigned to a Pi'); return; }
   const pd = rig.devices.photodiode || {};
   const everyN = pd.pulse_every_n_frames || 5;
-  const r = await proxyPi(dpi.ip, '/api/photodiode_test_start', {every_n: everyN});
+  const r = await proxyPi(dpi.ip, '/api/photodiode_test_start', {
+    every_n: everyN,
+    sync_corner: pd.sync_corner || 'top-left',   // carry the dropdown so Test reflects it live
+    sync_size_px: pd.sync_size_px || 0,
+  });
   if (r && r.ok) {
     deviceState.photodiode = deviceState.photodiode || {};
     deviceState.photodiode.testing = true;

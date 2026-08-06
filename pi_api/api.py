@@ -492,6 +492,8 @@ def _display_thread_fn():
                     # Ack BEFORE the (blocking) flash loop so the HTTP start returns immediately;
                     # the loop then owns this thread until _sync_test_stop is set out-of-band.
                     _sync_test_stop.clear()
+                    if hasattr(dev, "set_sync_layout"):   # move the square to the current corner/size live
+                        dev.set_sync_layout(cmd.get("sync_corner"), cmd.get("sync_size_px"))
                     _display_result_q.put({"ok": True, "message": "sync test running"})
                     try:
                         dev.run_sync_test(int(cmd.get("every_n", 5)), _sync_test_stop)
@@ -753,22 +755,21 @@ def init_camera():
 
 @app.route("/api/init_reward", methods=["POST"])
 def init_reward():
-    """Initialize reward: check pigpiod and GPIO pins."""
+    """Initialize reward: claim/verify GPIO pins via lgpio."""
     data = request.json or {}
     pins = data.get("pins", {"main": {"gpio": 18}})
     try:
-        import pigpio
-        pi = pigpio.pi()
-        if not pi.connected:
-            return jsonify({"ok": False, "error": "pigpiod not running"}), 500
-        results = []
-        for name, pin_cfg in pins.items():
-            gpio = pin_cfg.get("gpio", 18)
-            pi.set_mode(gpio, pigpio.OUTPUT)
-            pi.write(gpio, 0)
-            level = pi.read(gpio)
-            results.append(f"{name}(GPIO{gpio})=OK")
-        pi.stop()
+        import lgpio
+        chip = lgpio.gpiochip_open(0)   # 40-pin header = gpiochip0 on Pi 5 (current OS) and Pi 4
+        try:
+            results = []
+            for name, pin_cfg in pins.items():
+                gpio = pin_cfg.get("gpio", 18)
+                lgpio.gpio_claim_output(chip, gpio, 0)   # claim output, drive low
+                lgpio.gpio_read(chip, gpio)
+                results.append(f"{name}(GPIO{gpio})=OK")
+        finally:
+            lgpio.gpiochip_close(chip)   # release the handle even if a claim raised
         return jsonify({"ok": True, "message": ", ".join(results)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -1147,7 +1148,11 @@ def photodiode_test_start():
         return jsonify({"ok": False, "error": "Display not initialized on this Pi"}), 400
     _sync_test_stop.set()      # stop any prior run and let the display thread return to the queue
     time.sleep(0.05)
-    return jsonify(_display_command({"action": "sync_test", "every_n": every_n}, timeout=5))
+    cmd = {"action": "sync_test", "every_n": every_n}
+    for k in ("sync_corner", "sync_size_px"):   # apply the current dropdown live, no re-deploy needed
+        if k in data:
+            cmd[k] = data[k]
+    return jsonify(_display_command(cmd, timeout=5))
 
 
 @app.route("/api/photodiode_test_stop", methods=["POST"])
@@ -1164,13 +1169,11 @@ def deliver_reward():
     duration_ms = data.get("duration_ms", 10)
     gpio = data.get("gpio", 18)
     try:
-        import pigpio
+        import lgpio
         import time
         import threading
-        pi = pigpio.pi()
-        if not pi.connected:
-            return jsonify({"ok": False, "error": "pigpiod not running"}), 500
-        pi.set_mode(gpio, pigpio.OUTPUT)
+        chip = lgpio.gpiochip_open(0)   # 40-pin header = gpiochip0 on Pi 5 (current OS) and Pi 4
+        lgpio.gpio_claim_output(chip, gpio, 0)
 
         t_fire = time.time()
         _reward_events.append({"event": "reward", "t": t_fire, "duration_ms": duration_ms})
@@ -1178,10 +1181,19 @@ def deliver_reward():
             _reward_events.pop(0)
 
         def pulse():
-            pi.write(gpio, 1)
-            time.sleep(duration_ms / 1000.0)
-            pi.write(gpio, 0)
-            pi.stop()
+            try:
+                lgpio.gpio_write(chip, gpio, 1)
+                time.sleep(duration_ms / 1000.0)
+            finally:
+                # always close the valve + release the gpiochip, even if a write/sleep raised
+                try:
+                    lgpio.gpio_write(chip, gpio, 0)
+                except Exception:
+                    pass
+                try:
+                    lgpio.gpiochip_close(chip)
+                except Exception:
+                    pass
 
         threading.Thread(target=pulse, daemon=True).start()
         return jsonify({"ok": True, "duration_ms": duration_ms, "gpio": gpio})

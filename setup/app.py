@@ -130,7 +130,6 @@ def api_install_pi():
     ssh_prefix = f"{user}@{ip}"
     conda_activate = ("source ~/miniforge3/etc/profile.d/conda.sh && "
                       "conda activate rig && ")
-    needs_pigpio = any(d in devices for d in ["reward", "photodiode"])
     needs_camera = "camera" in devices
 
     try:
@@ -152,10 +151,8 @@ def api_install_pi():
              timeout=400)
         steps.append("Ensured conda 'rig' env (matched to system python)")
 
-        # 2. System packages (apt)
+        # 2. System packages (apt) — camera bindings only; GPIO uses lgpio (pip), no daemon needed.
         apt_packages = []
-        if needs_pigpio:
-            apt_packages.append("pigpio-tools")  # pigpiod daemon
         if needs_camera:
             apt_packages.extend(["python3-libcamera", "python3-picamera2"])
         if apt_packages:
@@ -205,9 +202,9 @@ def api_install_pi():
         packages = {"flask", "pyyaml", "numpy"}
         device_packages = {
             "lick_sensor": ["smbus2"],
-            "reward": ["pigpio", "scipy"],
+            "reward": ["lgpio", "scipy"],
             "camera": ["h5py", "pillow", "simplejpeg", "piexif", "av"],
-            "photodiode": ["pigpio"],
+            "photodiode": ["lgpio"],
             "display": ["pygame"],
         }
         for dev in devices:
@@ -239,13 +236,7 @@ def api_install_pi():
              timeout=20)
         steps.append("Installed systemd service")
 
-        # 7. Enable pigpiod on boot
-        if needs_pigpio:
-            _ssh(ssh_prefix,
-                 "sudo systemctl enable pigpiod && "
-                 "sudo systemctl start pigpiod")
-            steps.append("Enabled pigpiod")
-
+        # (lgpio needs no daemon — it talks to /dev/gpiochip directly, so there's no pigpiod to enable.)
         return jsonify({"ok": True, "steps": steps})
 
     except Exception as e:
@@ -517,7 +508,7 @@ def api_init_devices():
             }, "Lick sensor")
             results["lick_sensor"] = {"ok": ok, "message": msg}
 
-    # Reward: pigpiod + GPIO check
+    # Reward: GPIO check (lgpio)
     if "reward" in devices and devices["reward"].get("enabled"):
         ip = dev_to_ip.get("reward")
         if ip:
@@ -534,7 +525,7 @@ def api_init_devices():
                             "Camera")
             results["camera"] = {"ok": ok, "message": msg}
 
-    # Photodiode: pigpiod + GPIO check
+    # Photodiode: GPIO check (lgpio)
     if "photodiode" in devices and devices["photodiode"].get("enabled"):
         ip = dev_to_ip.get("photodiode")
         if ip:
@@ -559,7 +550,7 @@ def api_init_devices():
             }, "Encoder")
             results["encoder"] = {"ok": ok, "message": msg}
 
-    # Calibration probe: pigpiod + GPIO latch
+    # Calibration probe: GPIO latch (lgpio)
     if "calibration_probe" in devices and devices["calibration_probe"].get("enabled"):
         ip = dev_to_ip.get("calibration_probe")
         if ip:

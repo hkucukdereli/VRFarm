@@ -192,7 +192,7 @@ def api_load_rig():
                     }, timeout=10)
                     if not r.json().get("ok"):
                         err = r.json().get("error",
-                              "Reward valve failed — is pigpiod running?")
+                              "Reward valve failed — check GPIO pins/wiring")
                         init_errors.append(err)
                 elif dev_name == "camera":
                     r = requests.post(f"http://{ip}:{api_port}/api/init_camera",
@@ -211,7 +211,7 @@ def api_load_rig():
                     }, timeout=10)
                     if not r.json().get("ok"):
                         err = r.json().get("error",
-                              "Photodiode failed — is pigpiod running?")
+                              "Photodiode failed — check the GPIO pin/wiring")
                         init_errors.append(err)
                 elif dev_name == "encoder":
                     r = requests.post(f"http://{ip}:{api_port}/api/init_encoder", json={

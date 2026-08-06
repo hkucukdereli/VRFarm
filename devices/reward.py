@@ -1,7 +1,7 @@
 """
 devices/reward.py
 
-Solenoid reward valve. GPIO output via pigpio.
+Solenoid reward valve. GPIO output via lgpio — works on Pi 5 (RP1) and Pi 4 (BCM), no daemon.
 Supports multiple pins (e.g., main reward, secondary).
 Calibration maps pulse duration (ms) to volume (uL).
 """
@@ -15,7 +15,7 @@ from .base import Device, DeviceInfo, IOType, register_device
 
 @register_device
 class Reward(Device):
-    info = DeviceInfo("reward", "Reward Valve", IOType.GPIO_OUT, ["pigpio"])
+    info = DeviceInfo("reward", "Reward Valve", IOType.GPIO_OUT, ["lgpio"])
 
     @classmethod
     def task_params_schema(cls):
@@ -30,7 +30,8 @@ class Reward(Device):
     PULSE_GAP_MS = 150.0
 
     def init(self, rig_config: dict, task_params: dict):
-        import pigpio
+        import lgpio
+        self._lgpio = lgpio
         self.amount_ul = task_params.get("amount_ul", 4.0)
         # "volume": one pulse, duration interpolated from the calibration for amount_ul.
         # "count": amount_count repeats of the BASE pulse (first calibration row, as
@@ -45,17 +46,21 @@ class Reward(Device):
         # end an in-flight train with the valve shut instead of leaving it energized.
         self._valve_lock = threading.Lock()
         self._stopping = False
-        self._pi = pigpio.pi()
-        if not self._pi.connected:
-            raise RuntimeError("pigpiod not running — sudo pigpiod")
+        # lgpio handle to the header gpiochip. Pi 5 on current Raspberry Pi OS / Debian trixie exposes
+        # the 40-pin header as gpiochip0 (same as the Pi 4); only very early Pi 5 images used gpiochip4
+        # — set rig 'gpiochip' to override if a claim fails.
+        self._chipnum = int(rig_config.get("gpiochip", 0))
+        try:
+            self._chip = lgpio.gpiochip_open(self._chipnum)
+        except Exception as e:
+            raise RuntimeError(f"lgpio: cannot open gpiochip{self._chipnum} ({e})")
 
-        # Init pins
+        # Init pins as outputs, driven low.
         self._pins = {}  # name -> gpio
         pins_raw = rig_config.get("pins", {})
         for name, pin_cfg in pins_raw.items():
             gpio = pin_cfg["gpio"]
-            self._pi.set_mode(gpio, pigpio.OUTPUT)
-            self._pi.write(gpio, 0)
+            lgpio.gpio_claim_output(self._chip, gpio, 0)   # claim output, initial level low
             self._pins[name] = gpio
 
         # Calibration (loaded separately via load_calibration)
@@ -134,10 +139,10 @@ class Reward(Device):
         try:
             if self._stopping:
                 return
-            self._pi.write(gpio, 1)
+            self._lgpio.gpio_write(self._chip, gpio, 1)
             time.sleep(duration_ms / 1000.0)
         finally:
-            self._pi.write(gpio, 0)   # always leave the valve closed
+            self._lgpio.gpio_write(self._chip, gpio, 0)   # always leave the valve closed
             self._valve_lock.release()
 
     def _pulse_train_thread(self, gpio: int, duration_ms: float, n: int):
@@ -152,21 +157,19 @@ class Reward(Device):
                     time.sleep(self.pulse_gap_ms / 1000.0)
                     if self._stopping:
                         break
-                self._pi.write(gpio, 1)
+                self._lgpio.gpio_write(self._chip, gpio, 1)
                 time.sleep(duration_ms / 1000.0)
-                self._pi.write(gpio, 0)
+                self._lgpio.gpio_write(self._chip, gpio, 0)
         finally:
-            self._pi.write(gpio, 0)   # always leave the valve closed
+            self._lgpio.gpio_write(self._chip, gpio, 0)   # always leave the valve closed
             self._valve_lock.release()
 
     def check(self) -> dict:
-        if not self._pi.connected:
-            return {"ok": False, "message": "pigpiod not connected"}
-        for name, gpio in self._pins.items():
-            try:
-                self._pi.read(gpio)
-            except Exception as e:
-                return {"ok": False, "message": f"GPIO{gpio} read failed: {e}"}
+        try:
+            for name, gpio in self._pins.items():
+                self._lgpio.gpio_read(self._chip, gpio)
+        except Exception as e:
+            return {"ok": False, "message": f"GPIO read failed: {e}"}
         return {"ok": True, "message": f"pins: {list(self._pins.keys())}"}
 
     def hdf5_datasets(self) -> dict:
@@ -187,13 +190,19 @@ class Reward(Device):
 
     def close(self):
         # Signal any in-flight pulse/train to stop, then wait briefly for it to finish so
-        # we never disconnect pigpio mid-pulse and leave the valve energized.
+        # we never close the gpiochip mid-pulse and leave the valve energized.
         self._stopping = True
         got = self._valve_lock.acquire(timeout=1.0)
         try:
             for gpio in self._pins.values():
-                self._pi.write(gpio, 0)
-            self._pi.stop()
+                try:
+                    self._lgpio.gpio_write(self._chip, gpio, 0)
+                except Exception:
+                    pass
+            try:
+                self._lgpio.gpiochip_close(self._chip)
+            except Exception:
+                pass
         finally:
             if got:
                 self._valve_lock.release()

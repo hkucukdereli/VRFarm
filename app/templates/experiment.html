@@ -212,7 +212,7 @@
 
         <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">REWARD</h3>
         <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:0 8px;">
-          <div><label>Level</label><select id="p-level" class="task-param" onchange="onLevelChange()" title="Level 2.5 is the adaptive mode — it forces Adaptive on."><option value="1">1</option><option value="2">2</option><option value="2.5">2.5</option><option value="3">3</option></select></div>
+          <div><label>Level</label><select id="p-level" class="task-param" onchange="onLevelChange()" title="Reward rule (GO trials only): L1 = free reward at response-window start; L2 = operant + Pavlovian rescue at Pav delay; L3 = pure operant (no rescue); L2.5 = adaptive, draws L2/L3 per trial (forces Adaptive on)."><option value="1">1</option><option value="2">2</option><option value="2.5">2.5</option><option value="3">3</option></select></div>
           <div><label>Amount</label><select id="p-amount_mode" class="task-param" onchange="updateAmountLabel()" title="Volume: pulse duration from the reward calibration. Count: N repeats of the base pulse (first calibration row in the setup UI)."><option value="volume">Volume</option><option value="count">Count</option></select></div>
           <div><label id="amount-value-label">Volume (uL)</label><input type="number" id="p-amount_value" step="0.5" min="0" class="task-param"></div>
           <div><label id="gap-label">Gap (ms)</label><input type="number" id="p-pulse_gap_ms" step="10" min="0" class="task-param" title="Off-time between pulses in Count mode, so the valve fully closes between pulses. Only used in Count mode."></div>
@@ -220,7 +220,7 @@
         <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:0 8px; margin-top:4px;">
           <div><label>Resp delay (s)</label><input type="text" inputmode="decimal" id="p-resp_delay_s" class="task-param" title="Time to delay the response-window start, measured from stim onset (accepts 0.6 or 0,6)"></div>
           <div><label>Resp win (s)</label><input type="number" id="p-response_window" step="0.1" min="0" class="task-param" title="Response window duration, after the Resp delay"></div>
-          <div><label>Pav delay (s)</label><input type="number" id="p-pav_delay_s" step="0.1" min="0" class="task-param" title="On conditional (operant) trials only: time from response-window start to wait for a lick before switching to a Pavlovian (free) reward. 0 = disabled (pure operant, no rescue)."></div>
+          <div><label>Pav delay (s)</label><input type="number" id="p-pav_delay_s" step="0.1" min="0" class="task-param" title="L2 only: seconds from response-window start to wait for a lick before delivering a free Pavlovian rescue reward. 0 = no rescue (pure operant). L3 ignores this."></div>
         </div>
 
         <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">TIMEOUT</h3>
@@ -1289,7 +1289,8 @@ function handleEvent(evt) {
         // Real stim replaces the predicted window; re-anchor the pavlovian-reward prediction
         // to the true onset (evt.t).
         predStim = null;
-        predReward = _isPavlovian(evt.trial) ? {t: evt.t + _respDelayS()} : null;
+        const _roff = _predRewardOffset(evt.trial);
+        predReward = _roff != null ? {t: evt.t + _roff} : null;
       } else {
         // Stim off from leader — don't override t_off: leader fires this after
         // resp_delay_s but the Follower renders for the full duration_s.
@@ -1991,21 +1992,27 @@ function _isGo(az) {
   if (rule === 'right') return az > 0;
   return az < 0;
 }
-// Does trial i deliver a SCHEDULED (pavlovian) reward we can predict? L1 always; L2 on go trials.
-// L2.5 (adaptive: level drawn per trial) and L3 (conditional/lick-gated) are not predictable.
-function _isPavlovian(i) {
-  const t = trialTable[i]; if (!t) return false;
+function _pavDelayS() {
+  const rew = (config.task && config.task.reward) || {};
+  return rew.pav_delay_s ?? 0;
+}
+// Offset (s) from stim onset at which a SCHEDULED (free/rescue) reward is predictable, else null.
+// L1 (GO): free reward at window start = resp_delay. L2 (GO, pav>0): Pavlovian rescue at window
+// start + pav_delay. L3 / L2.5 / no-go / L2 with pav=0: operant only (or per-trial draw) → not predictable.
+function _predRewardOffset(i) {
+  const t = trialTable[i]; if (!t || !_isGo(t.az)) return null;
   const lvl = parseFloat(((config.task && config.task.reward) || {}).level) || 1;
-  if (lvl === 1) return true;
-  if (lvl === 2) return _isGo(t.az);
-  return false;
+  if (lvl === 1) return _respDelayS();
+  if (lvl === 2) return _pavDelayS() > 0 ? _respDelayS() + _pavDelayS() : null;
+  return null;
 }
 // Predict trial i's stim window + (if pavlovian) reward, given its stim onset (leader clock, s).
 function setPrediction(i, stimOnset) {
   const t = trialTable[i];
   if (!t) { predStim = null; predReward = null; return; }
   predStim = {t_on: stimOnset, t_off: stimOnset + (t.duration_s || 0), ..._respWindow(stimOnset)};
-  predReward = _isPavlovian(i) ? {t: stimOnset + _respDelayS()} : null;
+  const _roff = _predRewardOffset(i);
+  predReward = _roff != null ? {t: stimOnset + _roff} : null;
 }
 
 // ── Trial table ──

@@ -261,22 +261,26 @@ A task YAML has four sections. Values below are the current defaults from
 
 | Param | Default | Meaning |
 |---|---|---|
-| `level` | 1 | **1** = free, **2** = free on go trials, **2.5** = adaptive (per-trial draw between L2 and L3), **3** = operant (lick-gated). |
+| `level` | 1 | Reward rule, **GO trials only** (no-go is never rewarded): **1** = free reward at response-window start; **2** = operant + Pavlovian rescue at `pav_delay_s`; **3** = pure operant (lick-gated, no rescue); **2.5** = adaptive (per-trial draw between L2 and L3). |
 | `amount_mode` | `volume` | `volume` = one pulse, duration interpolated from the reward calibration for `amount_ul`. `count` = `amount_count` repeats of the **base pulse** (first calibration row). |
 | `amount_ul` | 4.0 | Reward volume (µL) in `volume` mode. |
 | `amount_count` | 1 | `count` mode: number of base pulses per reward. |
 | `pulse_gap_ms` | 150 | `count` mode: off-time (ms) between pulses so the valve fully closes. |
 | `resp_delay_s` | 0.6 | Delay after (true, photodiode-corrected) stim onset before the response window opens. **(Renamed from `reward_delay_s`; UI label "Resp delay (s)". The Leader still reads the old key as a fallback.)** |
 | `response_window` | 1.4 | Response-window duration, after the response delay (may extend past stim off). |
-| `pav_delay_s` | 0 | **Operant (L3) trials only:** seconds from response-window start to wait for a lick before delivering a free "Pavlovian rescue" reward. **0 = off** (pure operant). |
+| `pav_delay_s` | 0.5 | **L2 only:** seconds from response-window start to wait for a lick before delivering a free "Pavlovian rescue" reward. **0 = off** (L2 becomes pure operant). L3 ignores this. |
 | `timeout_rule` | `rate` / `none` | `none` = no enforcement; `rate` = restart the period if the lick rate in the last 1 s reaches `max_lick_rate`; `count` = restart if licks this period exceed `max_lick_rate × duration`. |
 | `max_lick_rate` | 0.3 | Lick-rate threshold (Hz) for the timeout rule. |
 | `timeout_phases` | `[iti]` | Which phases the timeout rule enforces: any of `prestim`, `poststim`, `iti`. |
 
-**Reward delivery by level** (`engine/leader.py`): L1 rewards on the first lick during the
-response-delay phase, else automatically at window entry; L2 auto-rewards go trials at
-window entry; L3 rewards only on a lick in the response window (with optional `pav_delay_s`
-rescue); L2.5 draws L2-vs-L3 per trial with probability = the adaptive state.
+**Reward delivery by level** (`engine/leader.py`, GO trials only — no-go is never rewarded; all
+timing is relative to the response-window start): **L1** delivers a free (Pavlovian) reward at
+window entry. **L2** is operant — the first in-window lick rewards and ends the window early; if no
+lick by `pav_delay_s`, a free "Pavlovian rescue" reward fires and the window runs out. **L3** is
+pure operant — the first lick anywhere in the window rewards, no rescue. **L2.5** draws L2-vs-L3
+per trial with probability = the adaptive state (P(L3) rises with in-window responses). In every
+case a **hit** = any lick in the response window, and **reaction time** = first in-window lick
+minus the window start.
 
 ### `session:` — trial structure
 

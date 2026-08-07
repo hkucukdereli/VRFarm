@@ -21,7 +21,7 @@ reward:
   level: 2
   resp_delay_s: 0.6
   response_window: 1.4
-  pav_delay_s: 0
+  pav_delay_s: 0.5
   timeout_rule: count
   max_lick_rate: 0.45
   timeout_phases: [iti]

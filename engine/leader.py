@@ -253,12 +253,10 @@ class Leader:
 
     # ── Wait-for-event helper ──
 
-    def _wait_for_event(self, duration: float,
-                        level_1_lick_reward: bool = False,
-                        level_3_lick_reward: bool = False) -> bool:
-        """Wait for `duration` seconds, polling licks and UDP.
-        Optionally delivers reward on first qualifying lick.
-        Returns True if a qualifying event occurred.
+    def _wait_for_event(self, duration: float, lick_reward: bool = False) -> bool:
+        """Wait for `duration` seconds, polling licks and UDP. If `lick_reward` is set, the first
+        lick (when the trial is not already rewarded) delivers the reward and returns early — this
+        is the operant path (L2/L3 go trials). Returns True if that operant reward fired.
         """
         t0 = time.time()
         while self.running and (time.time() - t0) < duration:
@@ -268,10 +266,7 @@ class Leader:
                 self._trial_licks.append(lick_t)
                 self._trial_ctx["lick_count"] = len(self._trial_licks)
 
-                if level_1_lick_reward and not self._trial_ctx.get("rewarded", False):
-                    self._action_deliver_reward()
-                    return True
-                if level_3_lick_reward and not self._trial_ctx.get("rewarded", False):
+                if lick_reward and not self._trial_ctx.get("rewarded", False):
                     self._action_deliver_reward()
                     return True
 
@@ -519,38 +514,41 @@ class Leader:
             self._trial_ctx["true_onset_t"] = true_onset_t
             self._trial_ctx["display_latency_s"] = true_onset_t - stim_onset_t
 
-            # Response-delay phase (default 0.6s) — anchored to TRUE onset so the
-            # response window opens resp_delay_s after the mouse actually sees the stim.
-            # L1: reward on first lick during this phase
-            self._wait_for_event(
-                max(0.0, reward_delay - (time.time() - true_onset_t)),
-                level_1_lick_reward=(effective_level == 1))
+            # Response-delay phase (default 0.6s) — anchored to TRUE onset so the response window
+            # opens resp_delay_s after the mouse actually sees the stim. No reward here: every
+            # reward is delivered relative to the response-window start (below).
+            self._wait_for_event(max(0.0, reward_delay - (time.time() - true_onset_t)))
 
             # ── Response window ──
             rw_start_t = time.time()
             self._trial_ctx["response_window_t"] = rw_start_t
+            is_go = self._trial_ctx["is_go"]
 
-            # Auto-reward at response window entry (L1 if not rewarded, L2 go trials)
-            if not self._trial_ctx["rewarded"]:
-                if effective_level == 1 or (effective_level == 2 and self._trial_ctx["is_go"]):
-                    self._action_deliver_reward()
-
-            # Conditional (operant) trial: reward is contingent on a lick in the window.
-            is_conditional = (effective_level == 3 and self._trial_ctx["is_go"])
-            if is_conditional and pav_delay > 0:
-                # Pavlovian rescue: wait up to pav_delay (from window start) for a lick,
-                # rewarding operantly on a lick. If no lick by then, deliver the reward
-                # anyway (free), then run out the rest of the window collecting licks.
-                pav = min(pav_delay, rw_dur)
-                self._wait_for_event(pav, level_3_lick_reward=True)
-                if not self._trial_ctx["rewarded"]:
-                    self._action_deliver_reward()
-                    self._trial_ctx["pavlovian_rescue"] = True
-                    self._wait_for_event(max(0.0, rw_dur - pav))
-                # else: operant lick reward already ended the window early (as before)
+            # Reward rule by level — GO trials only (no-go is never rewarded); all timing is
+            # relative to the response-window start:
+            #   L1 — free (Pavlovian) reward at window entry.
+            #   L2 — operant: first in-window lick rewards (ends the window early). If no lick by
+            #        pav_delay_s, a free "Pavlovian rescue" reward fires, then the window runs out.
+            #   L3 — pure operant: first lick anywhere in the window rewards; no rescue (pav ignored).
+            #   L2.5 draws L2 vs L3 per trial (resolved into effective_level above).
+            if effective_level == 1:
+                if is_go and not self._trial_ctx["rewarded"]:
+                    self._action_deliver_reward()               # free reward at window entry
+                self._wait_for_event(rw_dur)                    # collect licks, no further reward
             else:
-                # L3: reward on first lick during response window (no rescue / pav disabled)
-                self._wait_for_event(rw_dur, level_3_lick_reward=is_conditional)
+                operant = (effective_level in (2, 3)) and is_go
+                if effective_level == 2 and operant and pav_delay > 0:
+                    # L2: operant with a Pavlovian rescue at pav_delay.
+                    pav = min(pav_delay, rw_dur)
+                    self._wait_for_event(pav, lick_reward=True)
+                    if not self._trial_ctx["rewarded"]:
+                        self._action_deliver_reward()           # free rescue
+                        self._trial_ctx["pavlovian_rescue"] = True
+                        self._wait_for_event(max(0.0, rw_dur - pav))
+                    # else: the operant lick already ended the window early
+                else:
+                    # Pure operant (L3, or L2 with pav disabled): a lick anywhere rewards.
+                    self._wait_for_event(rw_dur, lick_reward=operant)
 
             # ── Stim OFF event — no waiting; Follower runs for visual_dur independently ──
             stim_off_t = true_onset_t + visual_dur

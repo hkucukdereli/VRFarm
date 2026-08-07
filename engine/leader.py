@@ -873,6 +873,33 @@ class Leader:
             dev.close()
         self._event_sock.close()
         self._cmd_sock.close()
+        # Consolidate into one self-contained .h5 now that every sidecar is finalized (the camera's
+        # frame_timestamps.npy is flushed above in dev.close()) — instead of deferring it to transfer.
+        self._consolidate_at_exit()
+
+    def _consolidate_at_exit(self):
+        """Fold this session's sidecars into the single <session_id>.h5 as the final exit step, so the
+        archive is self-contained the moment the session ends (stop OR finish). Runs after dev.close(),
+        so metadata.yaml / stimuli.npz / frame_timestamps.npy all exist. Idempotent + best-effort: it
+        never raises out of shutdown, and transfer still calls consolidate as a no-op safety net."""
+        try:
+            d = self.rig.get("data", {})
+            leader_dir = d.get("leader_dir")
+            if not leader_dir:
+                return
+            subj = self.session["subject_id"]
+            subj_date = f"{subj}_{self.session['date']}"
+            session_dir = Path(leader_dir) / subj / subj_date / self.session_id
+            vd = d.get("video_dir") or leader_dir
+            video_dir = Path(vd) / subj / subj_date / self.session_id
+            from shared.consolidate import consolidate_session
+            res = consolidate_session(session_dir, video_dir if video_dir.exists() else None)
+            print(f"[consolidate] session end: {res}", flush=True)
+        except FileNotFoundError:
+            pass   # no .h5 written (save skipped / no data) — nothing to consolidate
+        except Exception as e:
+            print(f"[consolidate] session-end consolidation failed ({e}); transfer will retry",
+                  flush=True)
 
 
 # ── CLI entry point ──

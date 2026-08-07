@@ -65,6 +65,9 @@ devices:
     type: reward
 grace_period_s: 10
 name: cheese
+slack:
+  enabled: false
+  webhook_url: ''
 network:
   api_port: 5080
   camera_port: 5001

@@ -1139,7 +1139,7 @@ async function startSession() {
   try {
     const r = await fetch('/api/go', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({save, dest_dir: (document.getElementById('transfer-dest').value || '').trim()})
+      body: JSON.stringify({save, dest_dir: (document.getElementById('transfer-dest').value || '').trim(), estimate_ms: sessionEstimateMs})
     });
     const data = await r.json();
     (data.steps || []).forEach(s => log('  ' + s));

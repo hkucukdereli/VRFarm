@@ -127,6 +127,16 @@
         <button class="btn btn-green" onclick="createRig()">New Rig</button>
         <button class="btn btn-blue" onclick="saveRig()">Save Rig</button>
       </div>
+      <div style="margin-top:8px; border-top:1px solid #333; padding-top:6px">
+        <div style="display:flex; align-items:center; gap:6px">
+          <label style="display:flex; align-items:center; gap:4px; font-size:12px; margin:0; white-space:nowrap">
+            <input type="checkbox" id="slack-enabled" onchange="onSlackChange()"> Slack
+          </label>
+          <input type="text" id="slack-webhook" placeholder="https://hooks.slack.com/services/..."
+                 style="flex:1; min-width:0; font-size:11px" oninput="onSlackChange()">
+        </div>
+        <div style="font-size:10px; color:#666; margin-top:2px">Saved in the rig (Save Rig); the experiment UI activates it on Load Rig.</div>
+      </div>
     </div>
 
     <div class="card">
@@ -1835,7 +1845,24 @@ function removeCalRow() {
 function renderAll() {
   renderPiList();
   renderDeviceList();
+  renderSlackSettings();
   if (uiBusy) _applyLockState();   // a re-render during a lock must not re-enable controls
+}
+
+// Slack notification toggle + webhook, stored on the rig (rig.slack) and saved by saveRig.
+function renderSlackSettings() {
+  if (!rig) return;
+  rig.slack = rig.slack || {enabled: false, webhook_url: ''};
+  const cb = document.getElementById('slack-enabled');
+  const wh = document.getElementById('slack-webhook');
+  if (cb) cb.checked = !!rig.slack.enabled;
+  if (wh) wh.value = rig.slack.webhook_url || '';
+}
+function onSlackChange() {
+  if (!rig) return;
+  rig.slack = rig.slack || {};
+  rig.slack.enabled = document.getElementById('slack-enabled').checked;
+  rig.slack.webhook_url = document.getElementById('slack-webhook').value.trim();
 }
 
 function renderPiList() {

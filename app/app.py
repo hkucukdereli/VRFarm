@@ -33,7 +33,7 @@ from shared.config import (load_rig, load_task, save_task,
                            get_leader_pi, get_follower_pis,
                            make_session_id, register_session,
                            get_subject_history, next_session_num)
-from shared.notify import notify
+from shared.notify import notify, configure as _notify_configure
 
 app = Flask(__name__)
 
@@ -114,6 +114,27 @@ def index():
                            tasks=[t.stem for t in tasks])
 
 
+def _apply_slack_config(rig_config):
+    """Activate/deactivate Slack from the rig's `slack:` block (enabled + webhook_url), so the
+    webhook lives in the rig config instead of a manual `export VRFARM_SLACK_WEBHOOK=...`. Sets the
+    env var (the 'export') AND notify's runtime override — the override is what actually takes effect,
+    since notify.py reads the env var at import time (before any rig is loaded). Disabled/blank = off."""
+    slack = (rig_config or {}).get("slack", {}) or {}
+    enabled = bool(slack.get("enabled"))
+    url = (slack.get("webhook_url") or "").strip()
+    if not enabled:
+        _notify_configure("")            # explicitly off
+        _app_logger.info("Slack notifications off")
+    elif url:
+        os.environ["VRFARM_SLACK_WEBHOOK"] = url
+        _notify_configure(url)           # webhook from the rig config
+        _app_logger.info("Slack notifications ON (rig webhook)")
+    else:
+        _notify_configure(None)          # enabled but no rig URL → use VRFARM_SLACK_WEBHOOK env var
+        env_on = bool(os.environ.get("VRFARM_SLACK_WEBHOOK", "").strip())
+        _app_logger.info(f"Slack notifications {'ON (env webhook)' if env_on else 'off (no webhook set)'}")
+
+
 @app.route("/api/load_rig", methods=["POST"])
 def api_load_rig():
     """Load rig config and connect to Pis.
@@ -130,6 +151,7 @@ def api_load_rig():
 
     state["rig_config"] = load_rig(rig_path)
     state["rig_path"] = str(rig_path)
+    _apply_slack_config(state["rig_config"])
     state["deployed"] = False
     state["phase"] = "setup"
     state["trial_table"] = []
@@ -832,8 +854,14 @@ def go():
     global _session_end_seen
     _session_end_seen = False
     _app_logger.info(f"GO session={state['session_id']}")
+    _now = time.time()
+    _when = f" at {time.strftime('%H:%M', time.localtime(_now))}"
+    _est_ms = _body.get("estimate_ms")
+    if isinstance(_est_ms, (int, float)) and not isinstance(_est_ms, bool) and _est_ms > 0:
+        _end = time.strftime('%H:%M', time.localtime(_now + _est_ms / 1000))
+        _when += f" and estimated to end at {_end} (in {_fmt_hm(_est_ms)})"
     notify(f"▶️ {rig['name']} — session started: "
-           f"{state['session'].get('subject_id', '?')} ({state['session_id']})")
+           f"{state['session'].get('subject_id', '?')} ({state['session_id']}){_when}")
     return jsonify({"ok": True, "steps": steps})
 
 
@@ -1256,6 +1284,39 @@ def _event_is_go(event: dict) -> bool:
     return az > 0 if rule == "right" else az < 0
 
 
+def _fmt_hm(ms) -> str:
+    """'1 hour, 15 minutes' from a duration in ms (for the session-start ETA)."""
+    total_min = int(round((ms or 0) / 60000))
+    h, m = divmod(total_min, 60)
+    return f"{h} hour{'' if h == 1 else 's'}, {m} minute{'' if m == 1 else 's'}"
+
+
+def _session_metrics(trials):
+    """(hit_rate, median_rt_ms) from trial events, matching the live plots: Cumulative HR =
+    go hits / go trials; median RT = median of go-hit RTs (ms). Either is None when undefined."""
+    go = [t for t in trials if _event_is_go(t)]
+    hits = [t for t in go if t.get("outcome") == "hit"]
+    hit_rate = (len(hits) / len(go)) if go else None
+    rts = sorted(t["rt_ms"] for t in hits
+                 if isinstance(t.get("rt_ms"), (int, float)) and not isinstance(t.get("rt_ms"), bool)
+                 and t["rt_ms"] == t["rt_ms"])
+    if rts:
+        n = len(rts)
+        med = rts[n // 2] if n % 2 else (rts[n // 2 - 1] + rts[n // 2]) / 2
+    else:
+        med = None
+    return hit_rate, med
+
+
+def _metrics_suffix(trials) -> str:
+    """', median RT=N ms and hit rate=0.xx' — appended to the end / global-timeout messages.
+    Formatted to match the on-screen values (RT rounded to ms, HR as a 2-decimal ratio)."""
+    hr, med = _session_metrics(trials)
+    med_str = f"{round(med)} ms" if med is not None else "n/a"
+    hr_str = f"{hr:.2f}" if hr is not None else "n/a"
+    return f", median RT={med_str} and hit rate={hr_str}"
+
+
 def _start_udp_listener(event_port: int):
     """Start background thread listening for UDP events from Leader."""
     global _udp_thread, _udp_running
@@ -1291,11 +1352,12 @@ def _start_udp_listener(event_port: int):
                 elif event.get("type") == "global_timeout":
                     notify(f"⏱️ {rig_name} — GLOBAL TIMEOUT: {event.get('n_dry', '?')} dry "
                            f"trials, aborting at trial {event.get('trial', '?')} "
-                           f"({state['session_id']})")
+                           f"({state['session_id']}){_metrics_suffix(_trials)}")
                 elif event.get("type") == "session_end":
                     _session_end_seen = True
                     notify(f"✅ {rig_name} — session ended: {event.get('n_completed', '?')}"
-                           f"/{event.get('n_planned', '?')} trials ({state['session_id']})")
+                           f"/{event.get('n_planned', '?')} trials ({state['session_id']})"
+                           f"{_metrics_suffix(_trials)}")
                 # Push to SSE queue
                 try:
                     _event_queue.put_nowait(event)

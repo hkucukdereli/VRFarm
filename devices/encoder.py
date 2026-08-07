@@ -50,6 +50,7 @@ class Encoder(Device):
         self._buf_t = array('d')
         self._buf_dist = array('f')
         self._buf_speed = array('f')
+        self._buf_counts = array('q')   # cumulative signed counts (raw ground truth; rotations = counts/4096)
 
     def _read_raw_angle(self) -> int:
         data = self.bus.read_i2c_block_data(self.addr, _REG_RAW_ANGLE, 2)
@@ -89,6 +90,7 @@ class Encoder(Device):
         self._buf_t = array('d')
         self._buf_dist = array('f')
         self._buf_speed = array('f')
+        self._buf_counts = array('q')
 
         def poll():
             period = 1.0 / max(1, self.sample_hz)
@@ -116,6 +118,7 @@ class Encoder(Device):
                     self._buf_t.append(now)
                     self._buf_dist.append(dist_cm)
                     self._buf_speed.append(self._speed_ema)
+                    self._buf_counts.append(self._cum_counts)
                     if now - last_pub >= self._pub_period:
                         last_pub = now
                         callback({"event": "running", "t": now,
@@ -150,13 +153,18 @@ class Encoder(Device):
         return {"trial_run_distance_cm": float(self._last_dist_cm - self._trial_dist0)}
 
     def hdf5_session_data(self) -> dict:
-        """Full running trace (whole session): timestamps, cumulative distance (cm), speed (cm/s)."""
+        """Full running trace (whole session): timestamps, cumulative distance (cm), speed (cm/s),
+        and raw cumulative encoder counts. running_counts is the ground truth (4096 counts/rev) —
+        rotations = counts/4096, distance = rotations*circ, speed = d(distance)/dt — so speed and
+        distance can be recomputed offline (even with a corrected wheel diameter)."""
         import numpy as np
-        n = min(len(self._buf_t), len(self._buf_dist), len(self._buf_speed))   # keep the 3 aligned
+        n = min(len(self._buf_t), len(self._buf_dist),
+                len(self._buf_speed), len(self._buf_counts))   # keep all channels aligned
         return {
             "running_t": np.asarray(self._buf_t[:n], dtype=np.float64),
             "running_distance_cm": np.asarray(self._buf_dist[:n], dtype=np.float32),
             "running_speed_cms": np.asarray(self._buf_speed[:n], dtype=np.float32),
+            "running_counts": np.asarray(self._buf_counts[:n], dtype=np.int64),   # cumulative; rotations = /4096
         }
 
     def close(self):

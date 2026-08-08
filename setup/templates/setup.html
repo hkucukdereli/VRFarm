@@ -1610,8 +1610,9 @@ async function startPhotodiodeTest() {
   const everyN = pd.pulse_every_n_frames || 5;
   const r = await proxyPi(dpi.ip, '/api/photodiode_test_start', {
     every_n: everyN,
-    sync_corner: pd.sync_corner || 'top-left',   // carry the dropdown so Test reflects it live
+    sync_corner: pd.sync_corner || 'top-left',   // carry the controls so Test reflects them live
     sync_size_px: pd.sync_size_px || 0,
+    sync_brightness: pd.sync_brightness ?? 1,
   });
   if (r && r.ok) {
     deviceState.photodiode = deviceState.photodiode || {};
@@ -2325,6 +2326,7 @@ function renderPhotodiodeControls(dev) {
   // (symmetric left/right, so one cap serves all four corners).
   const sizeCap = (geoData && geoData.calibration && geoData.calibration.frame_x) || 400;
   const sizePx = dev.sync_size_px || 0;   // 0 = auto (full dead-band width)
+  const brightness = dev.sync_brightness ?? 1;   // red LED level 0..1
   const glitchOn = dev.glitch_enabled ?? true;
   const glitchMs = dev.glitch_ms ?? 0.5;
   const holdOn = dev.debounce_enabled ?? true;
@@ -2356,6 +2358,12 @@ function renderPhotodiodeControls(dev) {
         <input type="number" value="${sizePx}" min="0" max="${sizeCap}" step="1" style="width:55px"
                title="0 = auto (full dead-band width). Max ${sizeCap}px = frame_x from geo calibration — the leftover width outside the visible area (symmetric left/right)."
                onchange="this.value = Math.max(0, Math.min(${sizeCap}, parseInt(this.value) || 0)); rig.devices.photodiode.sync_size_px = parseInt(this.value); renderDeviceList()">
+      </div>
+      <div class="device-field">
+        <label>Sync brightness</label>
+        <input type="number" value="${brightness}" min="0" max="1" step="0.05" style="width:55px"
+               title="Red LED level in the sync square, 0..1 (0 = off/black, 1 = full red). Location, size, and brightness are all read from here into the display."
+               onchange="this.value = Math.max(0, Math.min(1, parseFloat(this.value) || 0)); rig.devices.photodiode.sync_brightness = parseFloat(this.value); renderDeviceList()">
       </div>
       <div class="device-field">
         <label>Steady filter</label>
@@ -2391,7 +2399,7 @@ function renderPhotodiodeControls(dev) {
         <span style="color:#666">tune live; Save persists · re-Init applies the steady filter to hardware</span>
       </div>` : ''}
     <div style="font-size:10px; color:#666; margin-top:2px">Filters: steady ${glitchOn ? glitchMs + ' ms' : 'off'} · hold-off ${holdOn ? holdMs + ' ms' : 'off'} <span style="color:#555">(re-Init to apply a change)</span></div>
-    <div style="font-size:10px; color:#666; margin-top:2px">Rising edge detection on GPIO${gpio} — pure-red sync square at ${corner}, ${sizePx ? sizePx + 'px' : 'auto (' + sizeCap + 'px = dead-band width)'}</div>`;
+    <div style="font-size:10px; color:#666; margin-top:2px">Rising edge detection on GPIO${gpio} — red sync square at ${corner}, ${sizePx ? sizePx + 'px' : 'auto (' + sizeCap + 'px = dead-band width)'}, brightness ${brightness}</div>`;
 }
 
 function renderRewardControls(dev) {

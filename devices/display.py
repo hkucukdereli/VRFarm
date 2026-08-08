@@ -48,6 +48,7 @@ class Display(Device):
         # injected into this display config by engine/follower.py / setup's init_display payload.
         self.sync_corner = str(rig_config.get("sync_corner", "top-left"))
         self.sync_size_px = int(rig_config.get("sync_size_px", 0) or 0)   # 0 = auto (full dead band)
+        self.sync_brightness = max(0.0, min(1.0, float(rig_config.get("sync_brightness", 1.0))))  # red LED level 0..1
 
     def start_display(self):
         """Initialize pygame and open fullscreen window.
@@ -336,7 +337,7 @@ class Display(Device):
         while not stop_event.is_set():
             self._screen.fill((0, 0, 0))
             if frame % every_n == 0:
-                self._screen.fill((255, 0, 0), rect)   # red sync square (off-screen dead band)
+                self._screen.fill(self._sync_rgb(), rect)   # red sync square (off-screen dead band)
             pygame.display.flip()
             try:
                 pygame.event.pump()                    # keep the fullscreen window responsive
@@ -347,14 +348,22 @@ class Display(Device):
         self._screen.fill((0, 0, 0))
         pygame.display.flip()
 
-    def set_sync_layout(self, corner=None, size_px=None):
-        """Live-update the sync-square corner/size (from the setup-UI Test) and drop the cached
-        rect so _sync_patch_rect / _sync_test_rect recompute for the new placement — lets the
-        dropdown move the square without a full Save + re-deploy. None leaves a field unchanged."""
+    def _sync_rgb(self):
+        """Sync-patch colour: (R, 0, 0) with R scaled by sync_brightness (0..1). Green/blue stay 0
+        so the pulse is pure red and never enters the mouse's visual field; brightness 0 = off (black)."""
+        r = max(0, min(255, int(round(max(0.0, min(1.0, self.sync_brightness)) * 255))))
+        return (r, 0, 0)
+
+    def set_sync_layout(self, corner=None, size_px=None, brightness=None):
+        """Live-update the sync-square corner/size/brightness (from the setup-UI Test) and drop the
+        cached rect so _sync_patch_rect / _sync_test_rect recompute for the new placement — lets the
+        controls change the square without a full Save + re-deploy. None leaves a field unchanged."""
         if corner is not None:
             self.sync_corner = str(corner)
         if size_px is not None:
             self.sync_size_px = int(size_px or 0)
+        if brightness is not None:
+            self.sync_brightness = max(0.0, min(1.0, float(brightness)))
         self._sync_rect = None   # invalidate the cached patch rect
 
     def _sync_test_rect(self):
@@ -386,7 +395,7 @@ class Display(Device):
             return
         rect = self._sync_patch_rect()
         if rect is not None:
-            self._screen.fill((255, 0, 0), pygame.Rect(*rect))
+            self._screen.fill(self._sync_rgb(), pygame.Rect(*rect))
 
     def _sync_patch_rect(self):
         """Cached (x, y, w, h) of the sync square in the configured corner. The size is

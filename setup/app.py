@@ -1103,11 +1103,11 @@ def api_device_schemas():
 
 def _display_init_cfg(devices: dict) -> dict:
     """Display init payload: the display block plus the photodiode card's sync-square
-    prefs (corner/size) — the square is drawn by the display renderer, but authored in
+    prefs (corner/size/brightness) — the square is drawn by the display renderer, but authored in
     the photodiode card. Mirrors engine/follower.py's injection at session start."""
     pd = devices.get("photodiode", {}) or {}
     cfg = dict(devices.get("display", {}) or {})
-    for k in ("sync_corner", "sync_size_px"):
+    for k in ("sync_corner", "sync_size_px", "sync_brightness"):
         if k in pd:
             cfg[k] = pd[k]
     return cfg

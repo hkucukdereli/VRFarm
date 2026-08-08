@@ -63,11 +63,11 @@ class Follower:
             cls = DEVICE_REGISTRY[dev_type]
             dev = cls()
             if dev_name == "display":
-                # The photodiode card's sync-square prefs (corner/size) are drawn by the
+                # The photodiode card's sync-square prefs (corner/size/brightness) are drawn by the
                 # display — ride them into the display config (see devices/display.py).
                 pd = self.rig["devices"].get("photodiode", {}) or {}
                 dev_config = {**dev_config,
-                              **{k: pd[k] for k in ("sync_corner", "sync_size_px") if k in pd}}
+                              **{k: pd[k] for k in ("sync_corner", "sync_size_px", "sync_brightness") if k in pd}}
             dev.init(rig_config=dev_config, task_params={})
             self.devices[dev_name] = dev
             print(f"  {dev.info.label}: OK")

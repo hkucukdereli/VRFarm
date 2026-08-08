@@ -47,6 +47,7 @@ devices:
     pulse_every_n_frames: 5
     sync_corner: top-left
     sync_size_px: 0
+    sync_brightness: 1.0
     type: photodiode
   reward:
     calibration:

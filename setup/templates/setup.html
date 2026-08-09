@@ -1673,6 +1673,10 @@ function stopPhotodiodeAnimation() {
   if (photodiodeAnimFrame) { cancelAnimationFrame(photodiodeAnimFrame); photodiodeAnimFrame = null; }
 }
 
+// DEPRECATED (unused): browser model of the OLD on-Pi steady/hold-off filters, kept only for the
+// stashed devices/photodiode_filtered.py. The active Teensy photodiode delivers one clean pulse per
+// sync (filtering runs on the Teensy), so drawPhotodiodeScope below no longer calls this — every raw
+// rising edge IS a detected onset. Restore the call from git if you revert to the filtered device.
 // Re-apply steady (glitch) + hold-off to raw transitions IN THE BROWSER, mirroring the device:
 //  - STEADY: a rising edge is confirmed only if the level holds high >= steadyMs (else it's a
 //    glitch); pigpio reports it delayed by steadyMs, so we mark it at t_rise + steadyMs.
@@ -1706,9 +1710,10 @@ function _computeDetectedEdges(trs, steadyMs, holdMs) {
   return { confirmed, accepted };
 }
 
-// Triggered digital scope: the latest raw rising edge is t=0; ms timebase so the 1–2ms pulse
-// shape is visible. Draws the digital step waveform + raw rising edges (faint) + browser-computed
-// detected edges (bold) + hold-off lockout shading. Steady/hold-off read live from rig.
+// Triggered digital scope: the latest raw rising edge is t=0; ms timebase so the ~1–2ms pulse shape
+// is visible. The Teensy delivers ONE clean rising edge per sync pulse (steady/hold-off filtering runs
+// on the Teensy), so there is no on-Pi filtering to model — every raw rising edge IS a detected onset,
+// drawn as a single series. No steady/hold-off is read or reported here.
 function drawPhotodiodeScope() {
   const canvas = document.getElementById('photodiode-canvas');
   if (!canvas) return;
@@ -1716,11 +1721,7 @@ function drawPhotodiodeScope() {
   const w = canvas.width, h = canvas.height;
   ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
 
-  const pd = rig.devices.photodiode || {};
-  const steadyMs = (pd.glitch_enabled ?? true) ? (parseFloat(pd.glitch_ms ?? 0.5) || 0) : 0;
-  const holdMs   = (pd.debounce_enabled ?? true) ? (parseFloat(pd.debounce_ms ?? 5) || 0) : 0;
-
-  const preMs = 2, postMs = Math.min(40, Math.max(12, holdMs + 8));
+  const preMs = 2, postMs = 14;
   const totalS = (preMs + postMs) / 1000;
 
   if (photodiodeTrigger === null) {
@@ -1741,21 +1742,6 @@ function drawPhotodiodeScope() {
   const trs = photodiodeRaw.filter(e => e.t >= winStart && e.t <= winEnd);
   if (!haveBefore && trs.length) lvl = trs[0].level === 1 ? 0 : 1;
 
-  // pad the left by holdMs so an accepted edge just before the window still casts its lockout in.
-  const padS = holdMs / 1000 + 0.05;
-  const { accepted } = _computeDetectedEdges(
-    photodiodeRaw.filter(e => e.t >= winStart - padS && e.t <= winEnd + 0.05), steadyMs, holdMs);
-  const drawn = accepted.filter(t => t >= winStart && t <= winEnd);   // edges actually shown
-
-  // hold-off lockout shading
-  if (holdMs > 0) {
-    ctx.fillStyle = 'rgba(255,193,7,0.10)';
-    for (const t of accepted) {
-      const x1 = Math.max(0, xOf(t)), x2 = Math.min(w, xOf(t + holdMs / 1000));
-      if (x2 > x1) ctx.fillRect(x1, 0, x2 - x1, h - 12);
-    }
-  }
-
   // digital step waveform
   ctx.strokeStyle = '#4fc3f7'; ctx.lineWidth = 1.5; ctx.beginPath();
   let py = lvl ? yHigh : yLow; ctx.moveTo(0, py);
@@ -1768,16 +1754,12 @@ function drawPhotodiodeScope() {
   ctx.strokeStyle = '#555'; ctx.setLineDash([3, 3]); ctx.beginPath();
   ctx.moveTo(xOf(t0), 0); ctx.lineTo(xOf(t0), h - 12); ctx.stroke(); ctx.setLineDash([]);
 
-  // raw rising edges (faint)
-  ctx.strokeStyle = '#ff8a65'; ctx.lineWidth = 1;
-  for (const e of trs) {
-    if (e.level !== 1) continue; const x = xOf(e.t);
-    ctx.beginPath(); ctx.moveTo(x, yHigh - 5); ctx.lineTo(x, yLow + 5); ctx.stroke();
-  }
-  // accepted (detected) edges — bold green
+  // rising edges = detected pulse onsets (no filtering — clean Teensy signal)
+  let nEdges = 0;
   ctx.strokeStyle = '#66bb6a'; ctx.lineWidth = 2;
-  for (const t of drawn) {
-    const x = xOf(t);
+  for (const e of trs) {
+    if (e.level !== 1) continue;
+    const x = xOf(e.t); nEdges++;
     ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h - 12); ctx.stroke();
   }
 
@@ -1789,10 +1771,8 @@ function drawPhotodiodeScope() {
   }
   // legend
   ctx.font = '9px monospace';
-  ctx.fillStyle = '#4fc3f7'; ctx.fillText('raw', 4, 10);
-  ctx.fillStyle = '#66bb6a'; ctx.fillText('detected', 34, 10);
-  ctx.fillStyle = '#888';
-  ctx.fillText(`steady ${steadyMs} · hold-off ${holdMs} ms · ${drawn.length} kept`, 100, 10);
+  ctx.fillStyle = '#66bb6a';
+  ctx.fillText(`rising edges (Teensy — pre-filtered) · ${nEdges} in view`, 4, 10);
 }
 
 function updateRewardMs() {

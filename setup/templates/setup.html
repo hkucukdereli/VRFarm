@@ -2327,10 +2327,6 @@ function renderPhotodiodeControls(dev) {
   const sizeCap = (geoData && geoData.calibration && geoData.calibration.frame_x) || 400;
   const sizePx = dev.sync_size_px || 0;   // 0 = auto (full dead-band width)
   const brightness = dev.sync_brightness ?? 1;   // red LED level 0..1
-  const glitchOn = dev.glitch_enabled ?? true;
-  const glitchMs = dev.glitch_ms ?? 0.5;
-  const holdOn = dev.debounce_enabled ?? true;
-  const holdMs = dev.debounce_ms ?? 5;
   const ds = deviceState.photodiode || {};
   const monitoring = ds.monitoring;
 
@@ -2365,22 +2361,10 @@ function renderPhotodiodeControls(dev) {
                title="Red LED level in the sync square, 0..1 (0 = off/black, 1 = full red). Location, size, and brightness are all read from here into the display."
                onchange="this.value = Math.max(0, Math.min(1, parseFloat(this.value) || 0)); rig.devices.photodiode.sync_brightness = parseFloat(this.value); renderDeviceList()">
       </div>
-      <div class="device-field">
-        <label>Steady filter</label>
-        <input type="checkbox" ${glitchOn ? 'checked' : ''}
-               title="pigpio glitch filter: report an edge only after the level holds this long, dropping anything narrower. NOTE: also delays every reported edge by this amount. Uncheck or 0 = off."
-               onchange="rig.devices.photodiode.glitch_enabled = this.checked; renderDeviceList()">
-        <input type="number" value="${glitchMs}" min="0" max="50" step="0.1" style="width:50px"
-               onchange="rig.devices.photodiode.glitch_ms = parseFloat(this.value) || 0; renderDeviceList()"><span style="font-size:10px;color:#888">ms</span>
-      </div>
-      <div class="device-field">
-        <label>Hold-off</label>
-        <input type="checkbox" ${holdOn ? 'checked' : ''}
-               title="Debounce: after a rising edge is accepted, ignore further edges for this long (kills the spike→plateau double-trigger and ringing). No timing delay on the accepted edge. Uncheck or 0 = off."
-               onchange="rig.devices.photodiode.debounce_enabled = this.checked; renderDeviceList()">
-        <input type="number" value="${holdMs}" min="0" max="1000" step="0.5" style="width:50px"
-               onchange="rig.devices.photodiode.debounce_ms = parseFloat(this.value) || 0; renderDeviceList()"><span style="font-size:10px;color:#888">ms</span>
-      </div>
+      <!-- DEPRECATED photodiode filter controls (Steady filter + Hold-off): filtering now runs on the
+           Teensy (teensy/photodiode_sync.ino), so these are removed from the card. The self-filtering
+           device is stashed at devices/photodiode_filtered.py. To revert, restore this block + the
+           glitchOn/glitchMs/holdOn/holdMs consts + the live sliders below from git history. -->
       ${monitoring
         ? `<button class="btn btn-red btn-sm" onclick="stopPhotodiodeMonitor()">Stop</button>`
         : `<button class="btn btn-blue btn-sm" onclick="startPhotodiodeMonitor()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
@@ -2389,17 +2373,8 @@ function renderPhotodiodeControls(dev) {
         : `<button class="btn btn-sm" onclick="startPhotodiodeTest()" ${ds.initialized !== true ? 'disabled' : ''} title="Flash the red sync square every N frames on the display (simulates the stimulus sync pulse) and open the scope">Test</button>`}
       ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">Edges: <span id="pulse-count">0</span> | Last: <span id="last-pulse-time">--</span></span>` : ''}
     </div>
-    ${monitoring ? `<canvas id="photodiode-canvas" class="lick-canvas" width="460" height="120" style="width:460px;height:120px;max-width:100%"></canvas>
-      <div style="display:flex; gap:14px; align-items:center; font-size:10px; color:#aaa; margin-top:3px; flex-wrap:wrap">
-        <label>steady <input type="range" min="0" max="5" step="0.1" value="${glitchMs}" style="vertical-align:middle; width:90px"
-          oninput="rig.devices.photodiode.glitch_ms=parseFloat(this.value); document.getElementById('pd-steady-v').textContent=this.value"><span id="pd-steady-v">${glitchMs}</span> ms</label>
-        <label>hold-off <input type="range" min="0" max="20" step="0.5" value="${holdMs}" style="vertical-align:middle; width:90px"
-          oninput="rig.devices.photodiode.debounce_ms=parseFloat(this.value); document.getElementById('pd-hold-v').textContent=this.value"><span id="pd-hold-v">${holdMs}</span> ms</label>
-        <button class="btn btn-sm btn-blue" onclick="saveRig()">Save to rig</button>
-        <span style="color:#666">tune live; Save persists · re-Init applies the steady filter to hardware</span>
-      </div>` : ''}
-    <div style="font-size:10px; color:#666; margin-top:2px">Filters: steady ${glitchOn ? glitchMs + ' ms' : 'off'} · hold-off ${holdOn ? holdMs + ' ms' : 'off'} <span style="color:#555">(re-Init to apply a change)</span></div>
-    <div style="font-size:10px; color:#666; margin-top:2px">Rising edge detection on GPIO${gpio} — red sync square at ${corner}, ${sizePx ? sizePx + 'px' : 'auto (' + sizeCap + 'px = dead-band width)'}, brightness ${brightness}</div>`;
+    ${monitoring ? `<canvas id="photodiode-canvas" class="lick-canvas" width="460" height="120" style="width:460px;height:120px;max-width:100%"></canvas>` : ''}
+    <div style="font-size:10px; color:#666; margin-top:2px">Rising edge detection on GPIO${gpio} (clean pulses from the Teensy — filtering runs on the Teensy) — red sync square at ${corner}, ${sizePx ? sizePx + 'px' : 'auto (' + sizeCap + 'px = dead-band width)'}, brightness ${brightness}</div>`;
 }
 
 function renderRewardControls(dev) {

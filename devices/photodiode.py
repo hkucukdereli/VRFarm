@@ -2,9 +2,6 @@
 devices/photodiode.py
 
 Photodiode TTL sync input for stimulus frame timing.
-<<<<<<< HEAD
-GPIO input via lgpio hardware alerts (nanosecond ticks) — works on Pi 5 (RP1) and Pi 4 (BCM), no daemon.
-=======
 
 Reads a CLEAN, pre-filtered 3.3V sync pulse from a Teensy (teensy/photodiode_sync.ino):
 the Teensy watches the raw photodiode and applies the steady/hold-off filtering, then
@@ -12,8 +9,7 @@ emits one square pulse per sync frame. So this device just timestamps the rising
 no on-Pi glitch/hold-off filtering. (The old self-filtering version is stashed at
 devices/photodiode_filtered.py in case the Teensy path is abandoned.)
 
-GPIO input via pigpio hardware callbacks (microsecond resolution).
->>>>>>> main
+GPIO input via lgpio hardware alerts (nanosecond ticks) — works on Pi 5 (RP1) and Pi 4 (BCM), no daemon.
 """
 
 from __future__ import annotations
@@ -24,11 +20,7 @@ from .base import Device, DeviceInfo, IOType, register_device
 
 @register_device
 class Photodiode(Device):
-<<<<<<< HEAD
-    info = DeviceInfo("photodiode", "Photodiode", IOType.GPIO_IN, ["lgpio"])
-=======
-    info = DeviceInfo("photodiode", "Photodiode (Teensy sync)", IOType.GPIO_IN, ["pigpio"])
->>>>>>> main
+    info = DeviceInfo("photodiode", "Photodiode (Teensy sync)", IOType.GPIO_IN, ["lgpio"])
 
     @classmethod
     def task_params_schema(cls):
@@ -45,19 +37,6 @@ class Photodiode(Device):
         self.gpio = rig_config.get("gpio", 24)
         self.pulse_every_n = task_params.get("pulse_every_n_frames",
                              rig_config.get("pulse_every_n_frames", 5))
-<<<<<<< HEAD
-        # Two independent edge filters, both authored in the Setup UI (ms). Each has an enable flag
-        # so it can be toggled off while keeping its value; effective 0 => that filter is off.
-        #  - STEADY (lgpio debounce filter): reports an edge only after the level held N µs, dropping
-        #    anything narrower — a driver-level filter that also DELAYS every reported edge by N.
-        #  - HOLD-OFF (debounce): once a rising edge is accepted, ignore edges for N ms (in _on_edge);
-        #    no delay on the accepted edge.
-        glitch_on = bool(rig_config.get("glitch_enabled", True))
-        glitch_ms = float(rig_config.get("glitch_ms", 0.5))
-        self._glitch_us = max(int(glitch_ms * 1000), 0) if glitch_on else 0
-        debounce_on = bool(rig_config.get("debounce_enabled", True))
-        debounce_ms = float(rig_config.get("debounce_ms", 5.0))
-        self._debounce_us = max(int(debounce_ms * 1000), 0) if debounce_on else 0
         # lgpio handle to the header gpiochip. Pi 5 (current OS) & Pi 4 expose the 40-pin header as
         # gpiochip0; very early Pi 5 images used gpiochip4 — set rig 'gpiochip' to override.
         self._chipnum = int(rig_config.get("gpiochip", 0))
@@ -66,19 +45,10 @@ class Photodiode(Device):
         except Exception as e:
             raise RuntimeError(f"lgpio: cannot open gpiochip{self._chipnum} ({e})")
         # Claim the pin for alerts on BOTH edges with a pull-down; the per-mode callbacks below filter
-        # to the edge they want. The STEADY filter maps to lgpio's debounce; set it now (0 clears it).
+        # to the edge they want. Filtering lives on the Teensy now — clear the debounce (0) so the
+        # clean Teensy edges pass through untouched.
         lgpio.gpio_claim_alert(self._chip, self.gpio, lgpio.BOTH_EDGES, lgpio.SET_PULL_DOWN)
-        lgpio.gpio_set_debounce_micros(self._chip, self.gpio, self._glitch_us)
-=======
-        self._pi = pigpio.pi()
-        if not self._pi.connected:
-            raise RuntimeError("pigpiod not running")
-        self._pi.set_mode(self.gpio, pigpio.INPUT)
-        self._pi.set_pull_up_down(self.gpio, pigpio.PUD_DOWN)
-        # Filtering lives on the Teensy now — clear any glitch filter a previous (filtered) init may
-        # have left on this GPIO so the clean Teensy edges pass through untouched.
-        self._pi.set_glitch_filter(self.gpio, 0)
->>>>>>> main
+        lgpio.gpio_set_debounce_micros(self._chip, self.gpio, 0)
         self._cb = None
         self._callback = None
         self._active = False
@@ -102,14 +72,7 @@ class Photodiode(Device):
         self._active = True
         self._pulse_idx = 0
         self._ref_tick = None
-<<<<<<< HEAD
-        self._last_accept_tick = None
-        # detected stream uses the configured STEADY (glitch) filter
-        lgpio.gpio_set_debounce_micros(self._chip, self.gpio, self._glitch_us)
         self._cb = lgpio.callback(self._chip, self.gpio, lgpio.RISING_EDGE, self._on_edge)
-=======
-        self._cb = self._pi.callback(self.gpio, pigpio.RISING_EDGE, self._on_edge)
->>>>>>> main
 
     def stop_stream(self):
         self._active = False
@@ -118,17 +81,10 @@ class Photodiode(Device):
             self._cb = None
 
     def start_raw_capture(self, callback):
-<<<<<<< HEAD
         """Diagnostic (setup-UI scope): capture EVERY transition (both edges) at hardware-tick
-        resolution with the glitch filter DISABLED, so the browser sees the true digital waveform and
-        applies steady/hold-off in software. callback({'t': unix_seconds, 'level': 0|1})."""
-        lgpio = self._lgpio
-=======
-        """Diagnostic (setup-UI scope): capture EVERY transition (both edges) at µs resolution, so
-        the browser can display the true digital waveform coming from the Teensy.
+        resolution, so the browser can display the true digital waveform coming from the Teensy.
         callback({'t': unix_seconds, 'level': 0|1})."""
-        import pigpio
->>>>>>> main
+        lgpio = self._lgpio
         if self._raw_cb:                 # cancel a prior capture so a re-start can't double-deliver
             self._raw_cb.cancel()
             self._raw_cb = None
@@ -136,12 +92,8 @@ class Photodiode(Device):
         self._raw_callback = callback
         self._raw_ref_tick = None
         self._raw_ref_time = None
-<<<<<<< HEAD
         lgpio.gpio_set_debounce_micros(self._chip, self.gpio, 0)   # raw view: no driver-level filtering
         self._raw_cb = lgpio.callback(self._chip, self.gpio, lgpio.BOTH_EDGES, self._on_raw_edge)
-=======
-        self._raw_cb = self._pi.callback(self.gpio, pigpio.EITHER_EDGE, self._on_raw_edge)
->>>>>>> main
 
     def _on_raw_edge(self, chip, gpio, level, tick):
         if not self._raw_active:
@@ -157,22 +109,11 @@ class Photodiode(Device):
             self._raw_callback({"t": t, "level": int(level)})
 
     def stop_raw_capture(self):
-<<<<<<< HEAD
-        """Stop diagnostic capture and restore the configured glitch (debounce) filter."""
-=======
         """Stop diagnostic capture."""
->>>>>>> main
         self._raw_active = False
         if self._raw_cb:
             self._raw_cb.cancel()
             self._raw_cb = None
-<<<<<<< HEAD
-        try:
-            self._lgpio.gpio_set_debounce_micros(self._chip, self.gpio, getattr(self, "_glitch_us", 0))
-        except Exception:
-            pass
-=======
->>>>>>> main
 
     def reset_trial(self):
         """Reset pulse counter at trial start."""
@@ -184,20 +125,9 @@ class Photodiode(Device):
     def _on_edge(self, chip, gpio, level, tick):
         if not self._active:
             return
-<<<<<<< HEAD
         if level == 2:      # lgpio watchdog/timeout, not a real edge
             return
-        # HOLD-OFF debounce: after an accepted rising edge, ignore edges for _debounce_us. Uses the
-        # lgpio hardware tick (nanoseconds, uint64 — no wrap), NOT a fresh time.time() call. First edge
-        # (_last_accept_tick None) always passes; 0 disables. NB lgpio ticks are CLOCK_REALTIME-based,
-        # so a rare NTP step could momentarily perturb the hold-off (pigpio's monotonic µs tick did not).
-        if self._debounce_us > 0 and self._last_accept_tick is not None:
-            if (tick - self._last_accept_tick) < self._debounce_us * 1000:
-                return
-        self._last_accept_tick = tick
-=======
         # No hold-off/glitch filtering here — the Teensy already delivered a clean, single pulse.
->>>>>>> main
         wall_t = time.time()
         if self._ref_tick is None:
             self._ref_tick = tick

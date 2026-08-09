@@ -493,7 +493,7 @@ def _display_thread_fn():
                     # the loop then owns this thread until _sync_test_stop is set out-of-band.
                     _sync_test_stop.clear()
                     if hasattr(dev, "set_sync_layout"):   # move the square to the current corner/size live
-                        dev.set_sync_layout(cmd.get("sync_corner"), cmd.get("sync_size_px"))
+                        dev.set_sync_layout(cmd.get("sync_corner"), cmd.get("sync_size_px"), cmd.get("sync_brightness"))
                     _display_result_q.put({"ok": True, "message": "sync test running"})
                     try:
                         dev.run_sync_test(int(cmd.get("every_n", 5)), _sync_test_stop)
@@ -1149,7 +1149,7 @@ def photodiode_test_start():
     _sync_test_stop.set()      # stop any prior run and let the display thread return to the queue
     time.sleep(0.05)
     cmd = {"action": "sync_test", "every_n": every_n}
-    for k in ("sync_corner", "sync_size_px"):   # apply the current dropdown live, no re-deploy needed
+    for k in ("sync_corner", "sync_size_px", "sync_brightness"):   # apply the current controls live, no re-deploy needed
         if k in data:
             cmd[k] = data[k]
     return jsonify(_display_command(cmd, timeout=5))

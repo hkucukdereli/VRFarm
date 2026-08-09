@@ -2,16 +2,14 @@ data:
   leader_dir: /home/vruser/data
   video_dir: /home/vruser/data
 devices:
-  calibration_probe:
-    enabled: true
-    gpio: 22
-    type: calibration_probe
   camera:
     auto_exposure: false
-    bitrate_mbps: 3
+    bitrate_mbps: 12
     enabled: true
+    exposure_us: 10000
     fps: 50
-    live_preset: low
+    gain: 2.0
+    live_preset: high
     resolution:
     - 1280
     - 720
@@ -29,9 +27,9 @@ devices:
     enabled: true
     i2c_address: '0x36'
     i2c_bus: 1
-    sample_hz: 100
+    sample_hz: 500
     type: encoder
-    wheel_diameter_cm: 15.0
+    wheel_diameter_cm: 14.4
   lick_sensor:
     electrode: 4
     enabled: true
@@ -43,10 +41,11 @@ devices:
     enabled: true
     glitch_enabled: true
     glitch_ms: 0.5
-    gpio: 24
+    gpio: 16
     pulse_every_n_frames: 5
-    sync_corner: top-left
-    sync_size_px: 0
+    sync_corner: top-right
+    sync_size_px: 150
+    sync_brightness: 1.0
     type: photodiode
   reward:
     calibration:
@@ -56,10 +55,10 @@ devices:
     enabled: true
     pins:
       home:
-        gpio: 17
+        gpio: 24
         label: home
       main:
-        gpio: 18
+        gpio: 23
         label: reward
     reward_type: sucrose
     type: reward
@@ -80,7 +79,6 @@ pis:
   - reward
   - photodiode
   - camera
-  - calibration_probe
   - encoder
   ip: 192.168.10.101
   name: cheddar

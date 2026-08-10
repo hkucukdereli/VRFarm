@@ -21,6 +21,24 @@ os.environ["SDL_HINT_NO_SIGNAL_HANDLERS"] = "1"
 from .base import Device, DeviceInfo, IOType, register_device
 
 
+def _prewarm_budget_surfaces(per_bytes: int) -> int:
+    """Max full-frame surfaces to pre-warm: ~40% of MemAvailable, hard-capped at 512 MB, >= 1.
+    Reads /proc/meminfo (Linux/Pi); on other platforms or a read failure, uses a conservative
+    256 MB so pre-warming can never over-commit RAM on a memory-tight Pi."""
+    HARD_CAP = 512 * 1024 * 1024
+    avail = None
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    avail = int(line.split()[1]) * 1024   # kB -> bytes
+                    break
+    except Exception:
+        avail = None
+    budget = min(int(avail * 0.4), HARD_CAP) if avail else 256 * 1024 * 1024
+    return max(1, budget // max(1, int(per_bytes)))
+
+
 @register_device
 class Display(Device):
     info = DeviceInfo("display", "Stimulus Display", IOType.HDMI, ["pygame"])
@@ -39,6 +57,7 @@ class Display(Device):
         self.refresh_hz = float(rig_config.get("refresh_hz", 60))
         self.bg_gray = task_params.get("background_gray", 0.0)
         self._screen = None
+        self._vsync = False      # set True in start_display when vsync-locked flip is granted
         self._warp = None
         self._patch_cache = {}
         self._blank_cache = {}   # corrected uniform-field surfaces, keyed by bg value
@@ -65,9 +84,11 @@ class Display(Device):
                 try:
                     self._screen = pygame.display.set_mode(
                         self.resolution, flags, vsync=1)
+                    self._vsync = True
                     print("Display: vsync-locked flip")
                 except (pygame.error, TypeError):
                     self._screen = pygame.display.set_mode(self.resolution, flags)
+                    self._vsync = False
                     print("Display: vsync NOT available (unsynced flip)")
                 pygame.mouse.set_visible(False)
                 self.blank()
@@ -151,7 +172,7 @@ class Display(Device):
         pixels = np.zeros((self._corr_map.shape[0], self._corr_map.shape[1], 3), dtype=np.uint8)
         pixels[valid, 1] = code[valid]
         pixels[valid, 2] = code[valid]
-        return pygame.surfarray.make_surface(pixels.transpose(1, 0, 2))
+        return pygame.surfarray.make_surface(pixels.transpose(1, 0, 2)).convert()  # match display format -> fast blits
 
     def load_warp(self, npz_path: str):
         """Load warp map for warped rendering."""
@@ -216,19 +237,50 @@ class Display(Device):
         by the intensity-cal measurement, which must read the uncorrected delivered luminance.
         Surfaces are cached; silently no-ops if no warp is loaded (follower falls back to show_rect)."""
         import pygame
-        if self._screen is None or self._warp is None:
+        surf = self._get_patch_surface(az_deg, alt_deg, size_deg, frac, bg_gray, shape, apply_lum)
+        if surf is None:
             return
+        self._screen.blit(surf, (0, 0))
+        self._draw_sync_border(sync_square)
+        pygame.display.flip()
+
+    def _get_patch_surface(self, az_deg, alt_deg, size_deg, frac, bg_gray, shape, apply_lum):
+        """Cached patch surface for these params (build + cache on miss); None if the display/warp
+        isn't ready. Shared by show_patch_spherical (which then blits/flips) and prewarm (cache only),
+        so both use exactly the same cache key."""
+        if self._screen is None or self._warp is None:
+            return None
         key = (round(float(az_deg), 2), round(float(alt_deg), 2),
                round(float(size_deg), 2), round(float(frac), 4),
                round(float(bg_gray), 4), str(shape), bool(apply_lum))
         surf = self._patch_cache.get(key)
         if surf is None:
-            surf = self._build_patch_surface(az_deg, alt_deg, size_deg,
-                                             frac, bg_gray, shape, apply_lum)
+            surf = self._build_patch_surface(az_deg, alt_deg, size_deg, frac, bg_gray, shape, apply_lum)
             self._patch_cache[key] = surf
-        self._screen.blit(surf, (0, 0))
-        self._draw_sync_border(sync_square)
-        pygame.display.flip()
+        return surf
+
+    def prewarm(self, combos, bg_gray, shape, apply_lum=True):
+        """Build + cache the patch surface for each (az, alt, size_deg, frac) in `combos` (bg/shape
+        held constant), up to a RAM budget, so the FIRST show of each is a warm blit instead of a
+        cold surface build on the stimulus-onset path. Returns (built, skipped). Bounded by
+        _prewarm_budget_surfaces so it can't over-commit memory on a small Pi."""
+        if self._screen is None or self._warp is None:
+            return (0, 0)
+        w, h = self.resolution
+        per = int(w) * int(h) * 4                       # bytes per cached (32-bit post-convert) surface
+        max_surfaces = _prewarm_budget_surfaces(per)
+        built = skipped = 0
+        for (az, alt, size_deg, frac) in combos:
+            if len(self._patch_cache) >= max_surfaces:   # budget reached -> leave the rest lazy
+                skipped += 1
+                continue
+            try:
+                self._get_patch_surface(az, alt, size_deg, frac, bg_gray, shape, apply_lum)
+                built += 1
+            except Exception as e:
+                print(f"[prewarm] skip ({az},{alt},{size_deg},{frac}): {e}", flush=True)
+                skipped += 1
+        return (built, skipped)
 
     def _build_patch_surface(self, az0, alt0, size_deg, frac, bg_gray,
                              shape="square", apply_lum=True):
@@ -266,7 +318,7 @@ class Display(Device):
         pixels = np.zeros((az_map.shape[0], az_map.shape[1], 3), dtype=np.uint8)
         pixels[valid, 1] = code[valid]
         pixels[valid, 2] = code[valid]
-        return pygame.surfarray.make_surface(pixels.transpose(1, 0, 2))
+        return pygame.surfarray.make_surface(pixels.transpose(1, 0, 2)).convert()  # match display format -> fast blits
 
     def show_checkers(self, n: int = 8, use_warp: bool = True):
         """Draw checkerboard. Uses warp map if loaded and use_warp=True, else simple grid."""
@@ -318,7 +370,7 @@ class Display(Device):
         pixels[valid & checker] = 255
         pixels[valid & ~checker] = 0
 
-        surf = pygame.surfarray.make_surface(pixels.transpose(1, 0, 2))
+        surf = pygame.surfarray.make_surface(pixels.transpose(1, 0, 2)).convert()  # match display format
         self._screen.blit(surf, (0, 0))
         pygame.display.flip()
 

@@ -85,6 +85,43 @@ class Follower:
         print(f"  Loaded {n} trials from {npz_path}")
         if self._sync_every_n > 0:
             print(f"  Sync square every {self._sync_every_n} frames")
+        self._prewarm_stims()
+
+    def _prewarm_stims(self):
+        """Build every unique stimulus surface up front (spherical path only) so no trial pays the
+        cold surface build on the onset path — the fix for the first-of-each-stimulus onset hitch /
+        missed photodiode sync. Synchronous: a short startup pause before trials, bounded by a RAM
+        budget in display.prewarm(). No-op on the flat show_rect path (which caches nothing)."""
+        display = self.devices.get("display")
+        if display is None or self.stims is None:
+            return
+        warp_ready = getattr(display, "_warp", None) is not None
+        if not (warp_ready and "stim_size_deg" in self.stims and "stim_az_deg" in self.stims):
+            return
+        n = int(self.stims.get("n_trials", [0])[0])
+        if n <= 0:
+            return
+        bg = float(self.stims["background_gray"][0])
+        shape = str(self.stims["shape"][0]) if "shape" in self.stims else "square"
+        seen, combos = set(), []
+        for t in range(n):
+            az = float(self.stims["stim_az_deg"][t])
+            alt = float(self.stims["stim_alt_deg"][t])
+            size = float(self.stims["stim_size_deg"][t])
+            frac = float(self.stims["corr_contrast"][t])
+            k = (round(az, 2), round(alt, 2), round(size, 2), round(frac, 4))
+            if k in seen:
+                continue
+            seen.add(k)
+            combos.append((az, alt, size, frac))
+        if not combos:
+            return
+        t0 = time.time()
+        built, skipped = display.prewarm(combos, bg, shape)
+        msg = f"  Pre-warmed {built} unique stimulus surface(s) in {time.time() - t0:.1f}s"
+        if skipped:
+            msg += f"; {skipped} left to build lazily (RAM budget)"
+        print(msg)
 
     # ── Main loop ──
 
@@ -207,8 +244,13 @@ class Follower:
     def _show_synced(self, display, draw, duration, trial):
         """Per-frame render loop for photodiode sync. `draw(sync)` renders one frame (rect
         or spherical patch) with the sync square ON every Nth frame starting at frame 0.
-        Relies on vsync-locked flip to pace frames; the wall-clock bound guarantees the
-        stimulus stays up for `duration` regardless of vsync."""
+        The vsync-locked flip paces frames when available; if vsync was NOT granted, a
+        Clock.tick(refresh_hz) fallback paces the loop so it can't busy-spin and the
+        'every Nth frame' cadence stays meaningful. The wall-clock bound guarantees the
+        stimulus stays up for `duration` regardless of pacing."""
+        import pygame
+        clock = None if getattr(display, "_vsync", False) else pygame.time.Clock()
+        refresh_hz = int(getattr(display, "refresh_hz", 60) or 60)
         onset_t = None
         fi = 0
         while True:
@@ -220,6 +262,8 @@ class Follower:
             fi += 1
             if time.time() - onset_t >= duration:
                 break
+            if clock is not None:
+                clock.tick(refresh_hz)   # no vsync: pace to the refresh instead of spinning
         display.blank()
 
     def _handle_blank(self):

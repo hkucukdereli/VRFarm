@@ -116,11 +116,18 @@ class Photodiode(Device):
             self._raw_cb = None
 
     def reset_trial(self):
-        """Reset pulse counter at trial start."""
+        """Reset the per-trial pulse buffer AND re-anchor the trial timebase on the MAIN thread from
+        a paired (hardware ns tick, wall clock) read — so the first pulse's timestamp comes from the
+        jitter-free hardware tick, not a time.time() sampled inside the GIL-scheduled lgpio callback.
+        lgpio alert ticks are CLOCK_REALTIME ns, so time.time_ns() is the matching main-thread tick."""
         self._pulse_idx = 0
-        self._ref_tick = None
-        self._ref_time = None
         self._trial_pulses = []
+        try:
+            self._ref_tick = time.time_ns()
+            self._ref_time = time.time()
+        except Exception:
+            self._ref_tick = None            # fall back to first-pulse anchoring in _on_edge
+            self._ref_time = None
 
     def _on_edge(self, chip, gpio, level, tick):
         if not self._active:
@@ -128,11 +135,13 @@ class Photodiode(Device):
         if level == 2:      # lgpio watchdog/timeout, not a real edge
             return
         # No hold-off/glitch filtering here — the Teensy already delivered a clean, single pulse.
-        wall_t = time.time()
+        # Timebase is anchored in reset_trial (main thread); fall back to the first pulse if that
+        # reference read failed, so timing still works if reset_trial wasn't called.
         if self._ref_tick is None:
             self._ref_tick = tick
-            self._ref_time = wall_t
-        # anchor the precise edge time to the first edge's wall clock + hardware-tick delta (ns -> s)
+            self._ref_time = time.time()
+        # lgpio tick is CLOCK_REALTIME ns; the main-thread (time_ns, time) anchor makes the precise
+        # edge time = ref wall clock + hardware-tick delta (ns -> s), free of callback-thread jitter.
         t_precise = self._ref_time + (tick - self._ref_tick) / 1e9
         self._pulse_idx += 1
         self._trial_pulses.append(t_precise)

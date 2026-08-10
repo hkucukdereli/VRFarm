@@ -110,21 +110,30 @@ class Photodiode(Device):
             self._raw_cb = None
 
     def reset_trial(self):
-        """Reset pulse counter at trial start."""
+        """Reset the per-trial pulse buffer AND re-anchor the trial timebase on the MAIN thread from
+        a paired (hardware µs tick, wall clock) read — so the first pulse's timestamp comes from the
+        jitter-free hardware tick, not a time.time() sampled inside the GIL-scheduled pigpio callback.
+        Re-anchoring each trial keeps the tick delta sub-second, so the uint32-µs tick can't wrap."""
         self._pulse_idx = 0
-        self._ref_tick = None
-        self._ref_time = None
         self._trial_pulses = []
+        try:
+            self._ref_tick = self._pi.get_current_tick()
+            self._ref_time = time.time()
+        except Exception:
+            self._ref_tick = None            # fall back to first-pulse anchoring in _on_edge
+            self._ref_time = None
 
     def _on_edge(self, gpio, level, tick):
         if not self._active:
             return
         # No hold-off/glitch filtering here — the Teensy already delivered a clean, single pulse.
-        wall_t = time.time()
+        # Timebase is anchored in reset_trial (main thread); fall back to the first pulse if that read
+        # failed, so timing still works if reset_trial wasn't called or get_current_tick raised.
         if self._ref_tick is None:
             self._ref_tick = tick
-            self._ref_time = wall_t
-        # tick is uint32 microseconds, wraps at 2^32 (~71 min)
+            self._ref_time = time.time()
+        # tick is uint32 microseconds, wraps at 2^32 (~71 min); the per-trial re-anchor keeps the
+        # delta small and the mask stays wrap-safe for a rare within-trial wrap.
         tick_diff_us = (tick - self._ref_tick) & 0xFFFFFFFF
         t_precise = self._ref_time + tick_diff_us / 1e6
         self._pulse_idx += 1

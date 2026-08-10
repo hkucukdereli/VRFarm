@@ -143,6 +143,12 @@ class Follower:
                 print(f"  Warp map loaded from {warp_path}")
             else:
                 print(f"  No warp map at {warp_path} — stimuli use flat fallback")
+            # Pre-warm HERE, not in load_stims: the launch path passes --stims, so load_stims runs
+            # before the display is started and the warp is loaded — at that point _prewarm_stims
+            # can't build (no display surface for .convert(), _warp still None) and silently no-ops.
+            # Now that start_display + load_warp have run, build every unique stimulus surface up
+            # front. Idempotent with the load_stims call (which covers the LOAD_STIMS-during-run path).
+            self._prewarm_stims()
 
         while self.running:
             try:

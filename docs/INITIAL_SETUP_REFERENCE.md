@@ -198,7 +198,10 @@ sudo apt-get install -y python3-libcamera python3-picamera2
 
 GPIO uses **lgpio**, which works on Pi 5 (RP1) and Pi 4 (BCM). There is **no daemon** and nothing to
 enable on boot — it talks to `/dev/gpiochip*` directly (this replaced `pigpio`/`pigpiod`, which do
-**not** work on the Pi 5). The setup UI Install just `pip install lgpio` for these devices. Verify:
+**not** work on the Pi 5). `pip install lgpio` **builds from source and needs `swig`**, so Install
+uses the apt binding + symlink instead (same pattern as the camera bindings): `sudo apt install -y
+python3-lgpio`, then symlink `lgpio.py` + `_lgpio*.so` from `/usr/lib/python3/dist-packages` into the
+rig env (env Python must == system Python). Verify:
 
 ```bash
 python3 -c "import lgpio; h=lgpio.gpiochip_open(0); print('gpiochip0 ok', h); lgpio.gpiochip_close(h)"
@@ -305,6 +308,14 @@ export DISPLAY=:0
 in this repo's `dlp/`**, which the setup UI pushes to `~/dlp/` via scp on Deploy (follower
 only — `~/dlp` sits outside `~/rig`, so it rides scp, not the REST upload). A reflashed card
 gets it back on the next Deploy.
+
+**Two prerequisites**, both handled by **Install → Deploy** — do them before running the script
+by hand, or `cd ~/dlp` fails and the DLPC never initializes:
+- **`~/dlp/` must exist** — it lands on the first **Deploy** (follower). A fresh card has no
+  `~/dlp` until then.
+- **I²C must be enabled** — `init_parallel_mode.py` drives the DLPC over `/dev/i2c-*` (raw
+  `fcntl.ioctl` in `dlp/linuxi2c.py` — **no `smbus2` needed**). Install runs
+  `sudo raspi-config nonint do_i2c 0` for the follower; by hand: enable I²C in `raspi-config`.
 
 ### Folder structure on Pi
 

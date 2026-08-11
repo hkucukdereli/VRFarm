@@ -131,6 +131,8 @@ def api_install_pi():
     conda_activate = ("source ~/miniforge3/etc/profile.d/conda.sh && "
                       "conda activate rig && ")
     needs_camera = "camera" in devices
+    needs_gpio = any(d in devices for d in ["reward", "photodiode", "calibration_probe"])
+    needs_i2c = any(d in devices for d in ["lick_sensor", "encoder", "display"])
 
     try:
         # 1. Create directories
@@ -151,10 +153,13 @@ def api_install_pi():
              timeout=400)
         steps.append("Ensured conda 'rig' env (matched to system python)")
 
-        # 2. System packages (apt) — camera bindings only; GPIO uses lgpio (pip), no daemon needed.
+        # 2. System packages (apt) — camera bindings + lgpio (its pip build needs swig, so use the
+        #    apt-built binding and symlink it into the env like the camera bindings; no daemon).
         apt_packages = []
         if needs_camera:
             apt_packages.extend(["python3-libcamera", "python3-picamera2"])
+        if needs_gpio:
+            apt_packages.append("python3-lgpio")
         if apt_packages:
             apt_str = " ".join(apt_packages)
             _ssh(ssh_prefix,
@@ -162,11 +167,17 @@ def api_install_pi():
                  timeout=300)
             steps.append(f"Installed system packages: {apt_str}")
 
-        # 3. Symlink system Python packages into conda env (camera only)
-        #    picamera2 + libcamera are apt-installed for the SYSTEM python and
-        #    ship compiled .so files (e.g. _libcamera.cpython-3XX-*.so). The
-        #    symlink only loads if the env python minor version == system python.
-        if needs_camera:
+        # 2b. Enable I2C — MPR121 lick + AS5600 encoder (leader), and the DLPC projector (follower,
+        #     via dlp/linuxi2c.py raw ioctl on /dev/i2c-*). Idempotent.
+        if needs_i2c:
+            _ssh(ssh_prefix, "sudo raspi-config nonint do_i2c 0", timeout=20)
+            steps.append("Enabled I2C")
+
+        # 3. Symlink apt-built Python bindings into the conda env (camera + lgpio).
+        #    picamera2/libcamera and python3-lgpio are apt-installed for the SYSTEM python and
+        #    ship compiled .so files (e.g. _libcamera.cpython-3XX-*.so, _lgpio.cpython-3XX-*.so).
+        #    The symlink only loads if the env python minor version == system python.
+        if needs_camera or needs_gpio:
             # Guard: env python must match system python, else the symlinked
             # .so bindings have the wrong ABI and import fails silently later.
             envpy, syspy = _ssh(
@@ -177,34 +188,35 @@ def api_install_pi():
             ).split()
             if envpy != syspy:
                 raise RuntimeError(
-                    f"Camera setup aborted: conda 'rig' env python is {envpy} but "
-                    f"system python is {syspy}. libcamera/picamera2 are apt-built "
-                    f"for {syspy} and won't import in a {envpy} env. Recreate the env "
+                    f"Setup aborted: conda 'rig' env python is {envpy} but system python "
+                    f"is {syspy}. The apt-built bindings (picamera2/libcamera, lgpio) are "
+                    f"compiled for {syspy} and won't import in a {envpy} env. Recreate the env "
                     f"to match: conda create -n rig python={syspy} -y (then reinstall deps)."
                 )
-            symlink_packages = [
-                "libcamera", "picamera2", "pykms",       # dirs
-                "pidng", "videodev2",                      # dirs
-                "prctl.py",                                # single file
-            ]
-            # Also symlink any .so files for prctl
-            _ssh(ssh_prefix,
-                 f"{conda_activate}"
-                 "SITE=$(python -c 'import site; print(site.getsitepackages()[0])') && "
-                 "SYS=/usr/lib/python3/dist-packages && "
-                 + " && ".join(
-                     f"ln -sfn $SYS/{pkg} $SITE/{pkg}" for pkg in symlink_packages
-                 ) + " && "
-                 "for f in $SYS/_prctl*.so; do ln -sfn $f $SITE/$(basename $f); done")
-            steps.append(f"Symlinked picamera2 system packages into conda env (py{envpy})")
+            link_names, so_globs = [], []
+            if needs_camera:
+                link_names += ["libcamera", "picamera2", "pykms", "pidng", "videodev2", "prctl.py"]
+                so_globs.append("_prctl*.so")
+            if needs_gpio:
+                link_names += ["lgpio.py"]
+                so_globs.append("_lgpio*.so")
+            cmd = (f"{conda_activate}"
+                   "SITE=$(python -c 'import site; print(site.getsitepackages()[0])') && "
+                   "SYS=/usr/lib/python3/dist-packages && "
+                   + " && ".join(f"ln -sfn $SYS/{pkg} $SITE/{pkg}" for pkg in link_names))
+            for g in so_globs:
+                cmd += f" && for f in $SYS/{g}; do ln -sfn $f $SITE/$(basename $f); done"
+            _ssh(ssh_prefix, cmd)
+            steps.append(f"Symlinked apt bindings into conda env (py{envpy}): "
+                         + ", ".join(link_names))
 
         # 4. Python packages (pip)
         packages = {"flask", "pyyaml", "numpy"}
         device_packages = {
             "lick_sensor": ["smbus2"],
-            "reward": ["lgpio", "scipy"],
+            "reward": ["scipy"],        # lgpio comes from apt + symlink (step 2/3), not pip
             "camera": ["h5py", "pillow", "simplejpeg", "piexif", "av"],
-            "photodiode": ["lgpio"],
+            "photodiode": [],           # lgpio via apt + symlink; the DLPC needs no pip pkg (raw ioctl)
             "display": ["pygame"],
         }
         for dev in devices:

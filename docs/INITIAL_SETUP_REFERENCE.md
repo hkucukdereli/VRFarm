@@ -456,7 +456,16 @@ competes for the default route. Do this once per new or reflashed Pi, before Ins
    ssh-copy-id vruser@192.168.10.101            # run on the controller
    ssh vruser@192.168.10.101 echo ok            # seeds known_hosts
    ```
-8. **Register + bring up.** Setup UI (`localhost:4999`) → *Add a Pi* (name, ip, role,
+8. **Passwordless sudo** — Install runs `sudo apt`/`raspi-config` **non-interactively over SSH**,
+   so `vruser` must have NOPASSWD, else Install fails with `sudo: a terminal is required`. Images
+   flashed with the Pi Imager user preset usually have it; a hand-created user often doesn't:
+   ```bash
+   # on the Pi, enter the password this once:
+   echo "vruser ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/010_vruser-nopasswd >/dev/null
+   sudo chmod 440 /etc/sudoers.d/010_vruser-nopasswd
+   sudo visudo -c && sudo -n true && echo "passwordless sudo OK"
+   ```
+9. **Register + bring up.** Setup UI (`localhost:4999`) → *Add a Pi* (name, ip, role,
    devices), or edit the `pis:` list in `rigs/cheese.yaml`. Then **Connect → Install →
    Deploy**.
 

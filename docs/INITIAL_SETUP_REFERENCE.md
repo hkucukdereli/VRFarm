@@ -1,7 +1,7 @@
 # VRFarm — Environment Setup Reference
 
 **Project:** VRFarm
-**Last updated:** 2026-08-03
+**Last updated:** 2026-08-11
 **Current rig:** cheese (cheddar = Leader, mozzarella = Follower)
 
 This is the first-time **rig bring-up** reference: hardware, network/IPs, OS, conda
@@ -26,6 +26,10 @@ or debugging Install — the manual steps document what Install does under the h
 Both Pis run **Debian 13 (trixie)**, user `vruser`, conda base at `~/miniforge3`.
 The `rig` env Python **must match the system Python** (3.13 on trixie) — see the
 conda note under each Pi.
+
+> **Bringing up a new or reflashed Pi?** Start with
+> [Onboarding a new Pi onto the switch](#onboarding-a-new-pi-onto-the-switch) (static IP +
+> SSH key), then run the setup UI's **Install → Deploy**.
 
 ---
 
@@ -152,8 +156,8 @@ ssh-copy-id vruser@192.168.10.101
 ## Cheddar (Leader Pi) Setup
 
 Everything below is what the setup UI **Install** does automatically; do it by hand only
-for a fresh SD card. cheddar owns the behavioral GPIO devices: lick sensor, reward,
-photodiode, camera, calibration probe.
+for a fresh SD card. cheddar owns the behavioral devices: lick sensor, reward,
+photodiode (Teensy-fed sync pulse), camera, and the running-wheel encoder.
 
 ### Conda environment
 
@@ -297,9 +301,10 @@ sleep 3
 export DISPLAY=:0
 ```
 
-**`~/dlp/` is not in this repo.** `start_projector.sh` calls `~/dlp/init_parallel_mode.py`,
-a vendored TI DLPC SDK that the setup UI pushes to `~/dlp/` via scp on Deploy (follower
-only). If you reflash the card, restore `~/dlp/` separately.
+`start_projector.sh` calls `~/dlp/init_parallel_mode.py`, from the **vendored TI DLPC SDK
+in this repo's `dlp/`**, which the setup UI pushes to `~/dlp/` via scp on Deploy (follower
+only — `~/dlp` sits outside `~/rig`, so it rides scp, not the REST upload). A reflashed card
+gets it back on the next Deploy.
 
 ### Folder structure on Pi
 
@@ -332,7 +337,7 @@ python setup/app.py    # opens localhost:4999
    code runs; the follower also gets `start_projector.sh`, the calibration tools, and
    `~/dlp/` via scp.
 5. **Init Devices** — initializes each enabled device on its Pi (projector + display,
-   lick, reward, camera, photodiode, calibration probe).
+   lick, reward, camera, photodiode, encoder).
 
 Any parameter change in the UI invalidates a deploy (Go grays out in the experiment UI).
 
@@ -399,14 +404,56 @@ UDP / TCP ports:
 - 5575: Leader -> Follower (display commands)
 - 5080: REST API on each Pi (HTTP)
 
-### Static IP on Pis
+### Onboarding a new Pi onto the switch
 
-```bash
-sudo nmcli con add type ethernet ifname eth0 con-name eth-static \
-  ip4 192.168.10.10X/24        # 101 for cheddar, 102 for mozzarella
-sudo nmcli con up eth-static
-# No gateway on eth0 on purpose — WiFi (wlan0) stays the default route to the internet.
-```
+The wired switch is a private, **gateway-less** `192.168.10.0/24` island carrying only
+experiment traffic (low-latency UDP + REST). Each Pi keeps WiFi (`wlan0`) as its default
+route to the internet; eth0 gets a **static** address with **no gateway**, so it never
+competes for the default route. Do this once per new or reflashed Pi, before Install/Deploy.
+
+> **Which IP:** a replacement Leader takes cheddar's `192.168.10.101`, a replacement Follower
+> takes mozzarella's `192.168.10.102`. Adding an *extra* Pi → next free `.10x` (`.1` is the
+> controller). Keep the `pis:` list in `rigs/cheese.yaml` in sync.
+
+1. **Flash + first boot (headless).** Flash Debian 13 (trixie) with Raspberry Pi Imager; in
+   its settings set the hostname, user `vruser`, enable SSH, and join the **institute WiFi**
+   so the Pi has internet on first boot — the wired switch has none, so WiFi is how you first
+   reach the Pi and how Install pulls packages.
+2. **Cable eth0 to the gigabit switch** — the same switch as the controller and the other Pi.
+3. **First login over WiFi** (the wired side has no IP yet):
+   ```bash
+   ssh vruser@<hostname>.local          # mDNS; or the wlan0 IP from your router
+   ```
+4. **Hostname** (skip if you set it at flash time):
+   ```bash
+   sudo hostnamectl set-hostname cheddar        # or mozzarella / a new name
+   ```
+5. **Static IP on eth0** (NetworkManager is the trixie default). Delete the auto wired
+   profile first so it can't fight the static one:
+   ```bash
+   nmcli -f NAME,DEVICE con show | grep eth0     # find its name (usually "Wired connection 1")
+   sudo nmcli con delete "Wired connection 1"     # use the exact name you found
+   sudo nmcli con add type ethernet ifname eth0 con-name eth-static \
+     ipv4.method manual ipv4.addresses 192.168.10.101/24     # .101 Leader / .102 Follower
+   # NO ipv4.gateway / ipv4.dns on purpose — wlan0 stays the default route to the internet.
+   sudo nmcli con up eth-static
+   ```
+6. **Verify from the controller** (over the switch):
+   ```bash
+   ping -c1 192.168.10.101
+   ```
+7. **Copy the controller's SSH key** (the setup UI needs passwordless SSH):
+   ```bash
+   ssh-copy-id vruser@192.168.10.101            # run on the controller
+   ssh vruser@192.168.10.101 echo ok            # seeds known_hosts
+   ```
+8. **Register + bring up.** Setup UI (`localhost:4999`) → *Add a Pi* (name, ip, role,
+   devices), or edit the `pis:` list in `rigs/cheese.yaml`. Then **Connect → Install →
+   Deploy**.
+
+> If the WiFi is firewall-gated (the `public` captive portal blocks egress), Install's
+> package pulls won't reach the internet — run the controller HTTP proxy and set
+> `HTTPS_PROXY` on the Pi (see Troubleshooting), or flash on an open network first.
 
 ---
 

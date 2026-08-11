@@ -111,10 +111,24 @@ rig's device list):
 ```bash
 pip install flask pyyaml numpy h5py       # base + leader (h5py)
 pip install smbus2                          # lick_sensor
-pip install pigpio scipy                    # reward
-pip install pigpio                          # photodiode
+pip install pigpio scipy                    # reward      (Pi 4 / main;  Pi 5 -> lgpio scipy)
+pip install pigpio                          # photodiode  (Pi 4 / main;  Pi 5 -> lgpio)
 pip install pillow simplejpeg piexif av     # camera (plus h5py)
 ```
+
+> **GPIO library is board-dependent.** **Pi 4** (`main`): reward/photodiode use **`pigpio`** +
+> the `pigpiod` daemon (below). **Pi 5** (`dev-pi5`): they use **`lgpio`** — **no daemon**, it
+> opens `/dev/gpiochip0` (the RP1 40-pin header) directly. Note **`pip install lgpio` builds
+> from source and needs `swig` + `python3-dev`** (otherwise it dies with `command 'swig' failed`),
+> so on a Pi install it one of two ways:
+> - `sudo apt install -y swig python3-dev && pip install lgpio` — build it in the env, **or**
+> - `sudo apt install -y python3-lgpio` then symlink it in like the camera bindings:
+>   `SITE=$(python3 -c 'import site;print(site.getsitepackages()[0])')` then
+>   `ln -sf /usr/lib/python3/dist-packages/lgpio.py /usr/lib/python3/dist-packages/_lgpio*.so "$SITE"/`
+>   (rig env Python must == system Python, same rule as the camera bindings).
+>
+> Verify either way: `python3 -c "import lgpio; h=lgpio.gpiochip_open(0); print('ok',h); lgpio.gpiochip_close(h)"`
+> (`gpiodetect` shows `gpiochip0 [pinctrl-rp1]`). See `docs/PI5_LEADER_FEASIBILITY.md`.
 
 ### Camera bindings (apt + symlink, only if camera enabled)
 
@@ -127,7 +141,11 @@ sudo apt-get install -y python3-libcamera python3-picamera2
 # compiled .so bindings have the wrong ABI and import fails.
 ```
 
-### pigpiod (reward / photodiode)
+### pigpiod (reward / photodiode) — Pi 4 only
+
+> **Skip this whole section on a Pi 5** (`dev-pi5`): `lgpio` needs no daemon — it opens
+> `/dev/gpiochip0` directly — so there is no `pigpiod` to build or enable. `pip install lgpio`
+> is all the GPIO setup a Pi 5 Leader needs.
 
 The setup UI Install runs `sudo apt install pigpio-tools` and enables the `pigpiod`
 service. On **trixie the packaged `pigpio` may be unavailable**, in which case build the
@@ -293,7 +311,8 @@ python setup/app.py    # opens localhost:4999
 2. **Connect** — checks SSH + REST API on each Pi (`/api/status`)
 3. **Install** (first time, via SSH): ensures the `rig` conda env matched to system
    Python, installs the device-specific apt/pip packages, symlinks the camera bindings,
-   uploads the code, installs + enables the `vrfarm` systemd service, enables pigpiod.
+   uploads the code, installs + enables the `vrfarm` systemd service, and on a **Pi 4**
+   enables `pigpiod` (a **Pi 5**/`dev-pi5` install uses `lgpio` instead, no daemon).
 4. **Deploy** (via REST API): re-uploads the code files and restarts `pi_api` so the new
    code runs; the follower also gets `start_projector.sh`, the calibration tools, and
    `~/dlp/` via scp.
@@ -453,10 +472,10 @@ competes for the default route. Do this once per new or reflashed Pi, before Ins
 | pyyaml | yes | yes | yes |
 | pygame | — | — | yes |
 | smbus2 | — | yes (lick) | — |
-| pigpio (client) | — | yes (reward/photodiode) | — |
+| pigpio + pigpiod (**Pi 4** / `main`) | — | yes (reward/photodiode) | — |
 | pillow, simplejpeg, piexif, av | — | yes (camera) | — |
 | python3-picamera2 + python3-libcamera (apt, symlinked) | — | yes (camera) | — |
-| pigpiod daemon (apt pigpio-tools, or source) | — | yes (reward/photodiode) | — |
+| lgpio (**Pi 5** / `dev-pi5`; no daemon, opens gpiochip0) | — | yes (reward/photodiode) | — |
 | chrony (apt) | — | yes | yes |
 | xserver-xorg / libgl (apt) | — | — | yes |
 

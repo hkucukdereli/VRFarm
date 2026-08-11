@@ -136,6 +136,17 @@
                  style="flex:1; min-width:0; font-size:11px" oninput="onSlackChange()">
         </div>
         <div style="font-size:10px; color:#666; margin-top:2px">Saved in the rig (Save Rig); the experiment UI activates it on Load Rig.</div>
+        <div style="display:flex; align-items:center; gap:6px; margin-top:8px">
+          <label style="font-size:12px; margin:0; white-space:nowrap; width:60px">Data Dir</label>
+          <input type="text" id="data-leader-dir" placeholder="/home/vruser/data"
+                 style="flex:1; min-width:0; font-size:11px" oninput="onDataDirChange()">
+        </div>
+        <div style="display:flex; align-items:center; gap:6px; margin-top:4px">
+          <label style="font-size:12px; margin:0; white-space:nowrap; width:60px">Video Dir</label>
+          <input type="text" id="data-video-dir" placeholder="/media/vruser/ssd/video"
+                 style="flex:1; min-width:0; font-size:11px" oninput="onDataDirChange()">
+        </div>
+        <div style="font-size:10px; color:#666; margin-top:2px">Leader-Pi paths, saved in the rig. Put Video Dir on the SSD (e.g. /media/vruser/ssd/video).</div>
       </div>
     </div>
 
@@ -1827,6 +1838,7 @@ function renderAll() {
   renderPiList();
   renderDeviceList();
   renderSlackSettings();
+  renderDataDirs();
   if (uiBusy) _applyLockState();   // a re-render during a lock must not re-enable controls
 }
 
@@ -1844,6 +1856,22 @@ function onSlackChange() {
   rig.slack = rig.slack || {};
   rig.slack.enabled = document.getElementById('slack-enabled').checked;
   rig.slack.webhook_url = document.getElementById('slack-webhook').value.trim();
+}
+
+// Leader-Pi data + video directories, stored on the rig (rig.data) and saved by saveRig.
+function renderDataDirs() {
+  if (!rig) return;
+  rig.data = rig.data || {};
+  const ld = document.getElementById('data-leader-dir');
+  const vd = document.getElementById('data-video-dir');
+  if (ld) ld.value = rig.data.leader_dir || '';
+  if (vd) vd.value = rig.data.video_dir || '';
+}
+function onDataDirChange() {
+  if (!rig) return;
+  rig.data = rig.data || {};
+  rig.data.leader_dir = document.getElementById('data-leader-dir').value.trim();
+  rig.data.video_dir = document.getElementById('data-video-dir').value.trim();
 }
 
 function renderPiList() {

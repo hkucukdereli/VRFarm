@@ -389,16 +389,37 @@ competes for the default route. Do this once per new or reflashed Pi, before Ins
    ```bash
    sudo hostnamectl set-hostname cheddar        # or mozzarella / a new name
    ```
-5. **Static IP on eth0** (NetworkManager is the trixie default). Delete the auto wired
-   profile first so it can't fight the static one:
-   ```bash
-   nmcli -f NAME,DEVICE con show | grep eth0     # find its name (usually "Wired connection 1")
-   sudo nmcli con delete "Wired connection 1"     # use the exact name you found
-   sudo nmcli con add type ethernet ifname eth0 con-name eth-static \
-     ipv4.method manual ipv4.addresses 192.168.10.101/24     # .101 Leader / .102 Follower
-   # NO ipv4.gateway / ipv4.dns on purpose — wlan0 stays the default route to the internet.
-   sudo nmcli con up eth-static
-   ```
+5. **Static IP on eth0.** trixie images configure networking one of two ways — check which,
+   because it changes *where* you set the address:
+   - **NetworkManager** (most images, **including netplan that renders to NM** — you'll see
+     `netplan-*` connections in `nmcli` and `/etc/netplan/90-NM-*.yaml` files). Configure
+     **through NM, not by hand-editing netplan YAML** — those `90-NM-*` files are *generated
+     from* the NM connections, so a hand-written netplan file collides with them. Find the
+     wired profile and **modify it in place** (don't delete+add — the reflected profile is the
+     one that persists):
+     ```bash
+     nmcli -f NAME,DEVICE,TYPE connection show    # wired name: netplan-eth0 / "Wired connection 1" / ...
+     sudo nmcli connection modify netplan-eth0 \
+       ipv4.method manual ipv4.addresses 192.168.10.102/24 \
+       ipv4.gateway "" ipv4.dns "" ipv4.never-default yes \
+       ipv6.method link-local connection.autoconnect yes
+     sudo nmcli connection up netplan-eth0        # use the exact name you found
+     ```
+     (`.101` = Leader, `.102` = Follower. If there is *no* wired profile at all, use
+     `nmcli connection add type ethernet ifname eth0 con-name eth-static …` with the same
+     `ipv4.*` settings.) Confirm it persisted: `sudo cat /etc/netplan/90-NM-*.yaml` shows the
+     static address instead of `dhcp4: true`.
+   - **Hand-written netplan** (plain `/etc/netplan/*.yaml`, **no** `90-NM-*` files): add a
+     static eth0 stanza (`dhcp4: false`, `addresses: [192.168.10.10X/24]`, no gateway),
+     `sudo chmod 600` the file, `sudo netplan apply`.
+
+   No gateway/DNS on eth0 on purpose — **wlan0 stays the default route** to the internet.
+
+   > **Duplicate-IP trap (swapping Pis one at a time):** if the box you're replacing is still
+   > on the switch at the same address, NetworkManager's duplicate-address detection refuses
+   > to assign it — the log says `IP address 192.168.10.10X … already in use by host <MAC>`
+   > and `ip -br addr show eth0` shows **no IPv4** despite "activated". Power off the old box
+   > (or pick a free `.10x`), then re-run `sudo nmcli connection up …`.
 6. **Verify from the controller** (over the switch):
    ```bash
    ping -c1 192.168.10.101

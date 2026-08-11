@@ -230,8 +230,14 @@ def api_install_pi():
              timeout=120)
         steps.append(f"Installed Python packages: {pkg_str}")
 
-        # 5. Upload project files
+        # 5. Upload project files. scp won't create the ~/rig subdirs (shared/, devices/,
+        #    engine/, pi_api/, calibration/), so make them first — otherwise the first file
+        #    into a not-yet-existing subdir fails on a fresh Pi ("dest open ...: No such file").
         files_to_deploy = _get_deploy_files(role)
+        remote_dirs = sorted({os.path.dirname(remote) for _, remote in files_to_deploy
+                              if os.path.dirname(remote)})
+        if remote_dirs:
+            _ssh(ssh_prefix, "mkdir -p " + " ".join(f"~/rig/{d}" for d in remote_dirs))
         for local, remote in files_to_deploy:
             _scp(str(ROOT / local), f"{ssh_prefix}:~/rig/{remote}")
         steps.append(f"Deployed {len(files_to_deploy)} files")

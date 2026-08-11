@@ -285,6 +285,14 @@ in this repo's `dlp/`**, which the setup UI pushes to `~/dlp/` via scp on Deploy
 only — `~/dlp` sits outside `~/rig`, so it rides scp, not the REST upload). A reflashed card
 gets it back on the next Deploy.
 
+**Two prerequisites**, both handled by **Install → Deploy** — do them before running the script
+by hand, or `cd ~/dlp` fails and the DLPC never initializes:
+- **`~/dlp/` must exist** — it lands on the first **Deploy** (follower). A fresh card has no
+  `~/dlp` until then.
+- **I²C must be enabled** — `init_parallel_mode.py` drives the DLPC over `/dev/i2c-*` (raw
+  `fcntl.ioctl` in `dlp/linuxi2c.py` — **no `smbus2` needed**). Install runs
+  `sudo raspi-config nonint do_i2c 0` for the follower; by hand: enable I²C in `raspi-config`.
+
 ### Folder structure on Pi
 
 ```

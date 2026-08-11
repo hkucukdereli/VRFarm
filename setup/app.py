@@ -132,6 +132,7 @@ def api_install_pi():
                       "conda activate rig && ")
     needs_pigpio = any(d in devices for d in ["reward", "photodiode"])
     needs_camera = "camera" in devices
+    needs_i2c = any(d in devices for d in ["lick_sensor", "encoder", "display"])
 
     try:
         # 1. Create directories
@@ -164,6 +165,12 @@ def api_install_pi():
                  f"sudo apt-get update -qq && sudo apt-get install -y {apt_str}",
                  timeout=300)
             steps.append(f"Installed system packages: {apt_str}")
+
+        # 2b. Enable I2C — MPR121 lick + AS5600 encoder (leader), and the DLPC projector (follower,
+        #     via dlp/linuxi2c.py raw ioctl on /dev/i2c-*). Idempotent.
+        if needs_i2c:
+            _ssh(ssh_prefix, "sudo raspi-config nonint do_i2c 0", timeout=20)
+            steps.append("Enabled I2C")
 
         # 3. Symlink system Python packages into conda env (camera only)
         #    picamera2 + libcamera are apt-installed for the SYSTEM python and

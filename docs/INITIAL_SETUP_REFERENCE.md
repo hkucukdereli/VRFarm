@@ -143,6 +143,19 @@ ssh-keygen -R 192.168.10.101
 ssh-copy-id vruser@192.168.10.101
 ```
 
+### 5. Passwordless sudo (the setup UI's Install needs it)
+
+Install runs `sudo apt`, `raspi-config`, etc. **non-interactively over SSH**, so `vruser` must have
+**passwordless sudo** — otherwise Install fails with `sudo: a terminal is required to read the password`.
+Images flashed with the Pi Imager's user preset usually have it; a hand-created user often doesn't. Add
+it (enter the password this once):
+```bash
+echo "vruser ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/010_vruser-nopasswd >/dev/null
+sudo chmod 440 /etc/sudoers.d/010_vruser-nopasswd
+sudo visudo -c                      # verify sudoers syntax
+sudo -n true && echo "passwordless sudo OK"
+```
+
 ### Pi 5 notes
 - Boots from **NVMe SSD** — no more tiny-SD-card churn; video can live on the NVMe.
 - **GPIO is lgpio, not pigpio** (Pi 5's RP1 GPIO — `pigpio`/`pigpiod` don't work). No daemon; see the

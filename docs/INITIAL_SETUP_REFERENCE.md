@@ -28,8 +28,8 @@ The `rig` env Python **must match the system Python** (3.13 on trixie) — see t
 conda note under each Pi.
 
 > **Bringing up a new or reflashed Pi?** Start with
-> [Onboarding a new Pi onto the switch](#onboarding-a-new-pi-onto-the-switch) (static IP +
-> SSH key), then run the setup UI's **Install → Deploy**.
+> [New Pi first boot](#new-pi-first-boot-headless-bring-up) (SSH, WiFi, static IP, sudo),
+> then run the setup UI's **Install → Deploy**.
 
 ---
 
@@ -428,77 +428,8 @@ UDP / TCP ports:
 - 5575: Leader -> Follower (display commands)
 - 5080: REST API on each Pi (HTTP)
 
-### Onboarding a new Pi onto the switch
-
-The wired switch is a private, **gateway-less** `192.168.10.0/24` island carrying only
-experiment traffic (low-latency UDP + REST). Each Pi keeps WiFi (`wlan0`) as its default
-route to the internet; eth0 gets a **static** address with **no gateway**, so it never
-competes for the default route. Do this once per new or reflashed Pi, before Install/Deploy.
-
-> **Which IP:** a replacement Leader takes cheddar's `192.168.10.101`, a replacement Follower
-> takes mozzarella's `192.168.10.102`. Adding an *extra* Pi → next free `.10x` (`.1` is the
-> controller). Keep the `pis:` list in `rigs/cheese.yaml` in sync.
-
-1. **Flash + first boot (headless).** Flash Debian 13 (trixie) with Raspberry Pi Imager; in
-   its settings set the hostname, user `vruser`, enable SSH, and join the **institute WiFi**
-   so the Pi has internet on first boot — the wired switch has none, so WiFi is how you first
-   reach the Pi and how Install pulls packages.
-2. **Cable eth0 to the gigabit switch** — the same switch as the controller and the other Pi.
-3. **First login over WiFi** (the wired side has no IP yet):
-   ```bash
-   ssh vruser@<hostname>.local          # mDNS; or the wlan0 IP from your router
-   ```
-4. **Hostname** (skip if you set it at flash time):
-   ```bash
-   sudo hostnamectl set-hostname cheddar        # or mozzarella / a new name
-   ```
-5. **Static IP on eth0.** trixie images configure networking one of two ways — check which,
-   because it changes *where* you set the address:
-   - **NetworkManager** (most images, **including netplan that renders to NM** — you'll see
-     `netplan-*` connections in `nmcli` and `/etc/netplan/90-NM-*.yaml` files). Configure
-     **through NM, not by hand-editing netplan YAML** — those `90-NM-*` files are *generated
-     from* the NM connections, so a hand-written netplan file collides with them. Find the
-     wired profile and **modify it in place** (don't delete+add — the reflected profile is the
-     one that persists):
-     ```bash
-     nmcli -f NAME,DEVICE,TYPE connection show    # wired name: netplan-eth0 / "Wired connection 1" / ...
-     sudo nmcli connection modify netplan-eth0 \
-       ipv4.method manual ipv4.addresses 192.168.10.102/24 \
-       ipv4.gateway "" ipv4.dns "" ipv4.never-default yes \
-       ipv6.method link-local connection.autoconnect yes
-     sudo nmcli connection up netplan-eth0        # use the exact name you found
-     ```
-     (`.101` = Leader, `.102` = Follower. If there is *no* wired profile at all, use
-     `nmcli connection add type ethernet ifname eth0 con-name eth-static …` with the same
-     `ipv4.*` settings.) Confirm it persisted: `sudo cat /etc/netplan/90-NM-*.yaml` shows the
-     static address instead of `dhcp4: true`.
-   - **Hand-written netplan** (plain `/etc/netplan/*.yaml`, **no** `90-NM-*` files): add a
-     static eth0 stanza (`dhcp4: false`, `addresses: [192.168.10.10X/24]`, no gateway),
-     `sudo chmod 600` the file, `sudo netplan apply`.
-
-   No gateway/DNS on eth0 on purpose — **wlan0 stays the default route** to the internet.
-
-   > **Duplicate-IP trap (swapping Pis one at a time):** if the box you're replacing is still
-   > on the switch at the same address, NetworkManager's duplicate-address detection refuses
-   > to assign it — the log says `IP address 192.168.10.10X … already in use by host <MAC>`
-   > and `ip -br addr show eth0` shows **no IPv4** despite "activated". Power off the old box
-   > (or pick a free `.10x`), then re-run `sudo nmcli connection up …`.
-6. **Verify from the controller** (over the switch):
-   ```bash
-   ping -c1 192.168.10.101
-   ```
-7. **Copy the controller's SSH key** (the setup UI needs passwordless SSH):
-   ```bash
-   ssh-copy-id vruser@192.168.10.101            # run on the controller
-   ssh vruser@192.168.10.101 echo ok            # seeds known_hosts
-   ```
-8. **Register + bring up.** Setup UI (`localhost:4999`) → *Add a Pi* (name, ip, role,
-   devices), or edit the `pis:` list in `rigs/cheese.yaml`. Then **Connect → Install →
-   Deploy**.
-
-> If the WiFi is firewall-gated (the `public` captive portal blocks egress), Install's
-> package pulls won't reach the internet — run the controller HTTP proxy and set
-> `HTTPS_PROXY` on the Pi (see Troubleshooting), or flash on an open network first.
+The per-Pi onboarding steps (SSH, WiFi, static IP, sudo) live in
+[New Pi first boot](#new-pi-first-boot-headless-bring-up) above.
 
 ---
 

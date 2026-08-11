@@ -476,6 +476,67 @@ def camera_feed():
                     mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
+# Device init order (display/projector first so the screen is up before the rest).
+_INIT_ORDER = ["display", "lick_sensor", "reward", "camera",
+               "photodiode", "encoder", "calibration_probe"]
+
+
+def _init_one_device(dev_name, devices, post):
+    """Run the Pi-side init for a SINGLE device. `post(endpoint, payload, label, timeout) -> (ok, msg)`
+    is supplied by the caller (it POSTs to the device's Pi and logs to the caller's steps). Returns
+    (ok, msg). Shared by /api/init_devices (loop over all) and /api/reinit_device (one card)."""
+    cfg = devices.get(dev_name, {})
+    if dev_name == "display":
+        ok1, _ = post("/api/init_projector", {}, "Projector", 35)
+        ok2, msg = post("/api/init_display", {"rig_config": _display_init_cfg(devices)}, "Display init", 30)
+        return (ok1 and ok2), msg
+    if dev_name == "camera":
+        # Release any stuck/streaming camera first so a frozen preview recovers, then check the sensor.
+        post("/api/camera_preview_stop", {}, "Camera release", 15)
+        return post("/api/init_camera", {}, "Camera", 15)
+    if dev_name == "lick_sensor":
+        return post("/api/init_lick",
+                    {"i2c_address": cfg.get("i2c_address", "0x5A"), "electrode": cfg.get("electrode", 4)},
+                    "Lick sensor", 10)
+    if dev_name == "reward":
+        return post("/api/init_reward",
+                    {"pins": cfg.get("pins", {"main": {"gpio": 18}})}, "Reward", 10)
+    if dev_name == "photodiode":
+        return post("/api/init_photodiode", {
+            "gpio": cfg.get("gpio", 24),
+            "glitch_enabled": cfg.get("glitch_enabled", True),
+            "glitch_ms": cfg.get("glitch_ms", 0.5),
+            "debounce_enabled": cfg.get("debounce_enabled", True),
+            "debounce_ms": cfg.get("debounce_ms", 5),
+        }, "Photodiode", 10)
+    if dev_name == "encoder":
+        return post("/api/init_encoder", {
+            "i2c_address": cfg.get("i2c_address", "0x36"),
+            "i2c_bus": cfg.get("i2c_bus", 1),
+            "wheel_diameter_cm": cfg.get("wheel_diameter_cm", 15.0),
+            "sample_hz": cfg.get("sample_hz", 100),
+        }, "Encoder", 10)
+    if dev_name == "calibration_probe":
+        return post("/api/init_calibration_probe", {"gpio": cfg.get("gpio", 22)}, "Calibration probe", 10)
+    return False, f"no init handler for '{dev_name}'"
+
+
+def _mk_post(ip, api_port, steps):
+    """A post(endpoint, payload, label, timeout) -> (ok, msg) bound to one Pi, logging to `steps`."""
+    def _post(endpoint, payload, label, timeout=10):
+        try:
+            r = requests.post(f"http://{ip}:{api_port}{endpoint}", json=payload, timeout=timeout)
+            res = r.json()
+            ok = res.get("ok", False)
+            msg = res.get("message", res.get("error", ""))
+            steps.append(f"{label}: {'OK' if ok else 'FAIL'} {msg}")
+            return ok, msg
+        except Exception as e:
+            steps.append(f"{label}: FAIL ({e})")
+            return False, str(e)
+    return _post
+
+
 @app.route("/api/init_devices", methods=["POST"])
 def api_init_devices():
     """Initialize all enabled devices on their assigned Pis.
@@ -495,91 +556,12 @@ def api_init_devices():
 
     devices = _rig_config.get("devices", {})
 
-    def _init(dev_name, ip, endpoint, payload, label, timeout=10):
-        try:
-            r = requests.post(f"http://{ip}:{api_port}{endpoint}",
-                              json=payload, timeout=timeout)
-            res = r.json()
-            ok = res.get("ok", False)
-            msg = res.get("message", res.get("error", ""))
-            steps.append(f"{label}: {'OK' if ok else 'FAIL'} {msg}")
-            return ok, msg
-        except Exception as e:
-            steps.append(f"{label}: FAIL ({e})")
-            return False, str(e)
-
-    # Display: init projector then display
-    if "display" in devices and devices["display"].get("enabled"):
-        ip = dev_to_ip.get("display")
-        if ip:
-            ok1, _ = _init("display", ip, "/api/init_projector", {},
-                           "Projector", timeout=35)
-            ok2, msg = _init("display", ip, "/api/init_display",
-                             {"rig_config": _display_init_cfg(devices)},
-                             "Display init", timeout=30)
-            results["display"] = {"ok": ok1 and ok2, "message": msg}
-
-    # Lick sensor: I2C init
-    if "lick_sensor" in devices and devices["lick_sensor"].get("enabled"):
-        ip = dev_to_ip.get("lick_sensor")
-        if ip:
-            cfg = devices["lick_sensor"]
-            ok, msg = _init("lick_sensor", ip, "/api/init_lick", {
-                "i2c_address": cfg.get("i2c_address", "0x5A"),
-                "electrode": cfg.get("electrode", 4),
-            }, "Lick sensor")
-            results["lick_sensor"] = {"ok": ok, "message": msg}
-
-    # Reward: pigpiod + GPIO check
-    if "reward" in devices and devices["reward"].get("enabled"):
-        ip = dev_to_ip.get("reward")
-        if ip:
-            ok, msg = _init("reward", ip, "/api/init_reward", {
-                "pins": devices["reward"].get("pins", {"main": {"gpio": 18}}),
-            }, "Reward")
-            results["reward"] = {"ok": ok, "message": msg}
-
-    # Camera: detection check
-    if "camera" in devices and devices["camera"].get("enabled"):
-        ip = dev_to_ip.get("camera")
-        if ip:
-            ok, msg = _init("camera", ip, "/api/init_camera", {},
-                            "Camera")
-            results["camera"] = {"ok": ok, "message": msg}
-
-    # Photodiode: pigpiod + GPIO check
-    if "photodiode" in devices and devices["photodiode"].get("enabled"):
-        ip = dev_to_ip.get("photodiode")
-        if ip:
-            ok, msg = _init("photodiode", ip, "/api/init_photodiode", {
-                "gpio": devices["photodiode"].get("gpio", 24),
-                "glitch_enabled": devices["photodiode"].get("glitch_enabled", True),
-                "glitch_ms": devices["photodiode"].get("glitch_ms", 0.5),
-                "debounce_enabled": devices["photodiode"].get("debounce_enabled", True),
-                "debounce_ms": devices["photodiode"].get("debounce_ms", 5),
-            }, "Photodiode")
-            results["photodiode"] = {"ok": ok, "message": msg}
-
-    # Running-wheel encoder: AS5600 magnetic angle sensor (I2C)
-    if "encoder" in devices and devices["encoder"].get("enabled"):
-        ip = dev_to_ip.get("encoder")
-        if ip:
-            ok, msg = _init("encoder", ip, "/api/init_encoder", {
-                "i2c_address": devices["encoder"].get("i2c_address", "0x36"),
-                "i2c_bus": devices["encoder"].get("i2c_bus", 1),
-                "wheel_diameter_cm": devices["encoder"].get("wheel_diameter_cm", 15.0),
-                "sample_hz": devices["encoder"].get("sample_hz", 100),
-            }, "Encoder")
-            results["encoder"] = {"ok": ok, "message": msg}
-
-    # Calibration probe: pigpiod + GPIO latch
-    if "calibration_probe" in devices and devices["calibration_probe"].get("enabled"):
-        ip = dev_to_ip.get("calibration_probe")
-        if ip:
-            ok, msg = _init("calibration_probe", ip, "/api/init_calibration_probe", {
-                "gpio": devices["calibration_probe"].get("gpio", 22),
-            }, "Calibration probe")
-            results["calibration_probe"] = {"ok": ok, "message": msg}
+    for dev_name in _INIT_ORDER:
+        if dev_name in devices and devices[dev_name].get("enabled"):
+            ip = dev_to_ip.get(dev_name)
+            if ip:
+                ok, msg = _init_one_device(dev_name, devices, _mk_post(ip, api_port, steps))
+                results[dev_name] = {"ok": ok, "message": msg}
 
     all_ok = all(r["ok"] for r in results.values())
     return jsonify({"ok": all_ok, "steps": steps, "results": results})
@@ -587,45 +569,22 @@ def api_init_devices():
 
 @app.route("/api/reinit_device", methods=["POST"])
 def api_reinit_device():
-    """Reinitialize a SINGLE device (display or camera) without touching the others —
-    same per-device flow as /api/init_devices, for the per-card Reinit buttons."""
+    """Reinitialize a SINGLE enabled device on its Pi, without touching the others — the same
+    per-device flow as /api/init_devices, for the per-card Reinit buttons (any device type)."""
     if not _rig_config:
         return jsonify({"ok": False, "error": "No rig loaded"}), 400
     dev_name = (request.json or {}).get("device")
-    if dev_name not in ("display", "camera"):
-        return jsonify({"ok": False, "error": f"reinit not supported for '{dev_name}'"}), 400
     devices = _rig_config.get("devices", {})
     if dev_name not in devices or not devices[dev_name].get("enabled"):
         return jsonify({"ok": False, "error": f"{dev_name} is not enabled"}), 400
-    api_port = _rig_config["network"]["api_port"]
     ip = next((pi["ip"] for pi in _rig_config.get("pis", [])
                if dev_name in pi.get("devices", [])), None)
     if not ip:
         return jsonify({"ok": False, "error": f"{dev_name} is not assigned to a Pi"}), 400
 
     steps = []
-
-    def _post(endpoint, payload, label, timeout=10):
-        try:
-            r = requests.post(f"http://{ip}:{api_port}{endpoint}", json=payload, timeout=timeout)
-            res = r.json()
-            ok = res.get("ok", False)
-            steps.append(f"{label}: {'OK' if ok else 'FAIL'} {res.get('message', res.get('error', ''))}")
-            return ok
-        except Exception as e:
-            steps.append(f"{label}: FAIL ({e})")
-            return False
-
-    if dev_name == "display":
-        ok1 = _post("/api/init_projector", {}, "Projector", timeout=35)
-        ok2 = _post("/api/init_display", {"rig_config": _display_init_cfg(devices)},
-                    "Display init", timeout=30)
-        ok = ok1 and ok2
-    else:  # camera
-        # Release any stuck/streaming camera first so a frozen preview actually recovers,
-        # then verify the sensor is detected.
-        _post("/api/camera_preview_stop", {}, "Camera release", timeout=15)
-        ok = _post("/api/init_camera", {}, "Camera check", timeout=15)
+    ok, _msg = _init_one_device(
+        dev_name, devices, _mk_post(ip, _rig_config["network"]["api_port"], steps))
     return jsonify({"ok": ok, "device": dev_name, "steps": steps})
 
 

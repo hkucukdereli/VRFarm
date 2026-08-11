@@ -671,7 +671,7 @@ async function initDevices() {
   }
 }
 
-// Reinitialize just one device (display or camera) from its card, without re-initing the rig.
+// Reinitialize just one device from its card, without re-initing the whole rig.
 async function reinitDevice(name) {
   _lockUI();
   log('Reinitializing ' + name + '...');
@@ -1992,8 +1992,8 @@ function renderDeviceCard(name, dev, pisReady) {
     else if (name === 'encoder') controlsHtml = renderEncoderControls(dev);
   }
 
-  // Reinit lives in the header row (next to title/status) for camera + display.
-  const reinitBtn = (showControls && (name === 'camera' || name === 'display'))
+  // Reinit lives in the header row (next to title/status) — one per device.
+  const reinitBtn = showControls
     ? `<button class="btn btn-yellow btn-sm" style="margin-left:auto"
                onclick="reinitDevice('${name}')" ${devicesInitialized ? '' : 'disabled'}>Reinit</button>`
     : '';

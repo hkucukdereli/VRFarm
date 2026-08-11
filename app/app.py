@@ -49,6 +49,7 @@ state = {
     "session_id": None,
     "session_dir": None,    # controller-side data folder for this session (created at Go)
     "deployed": False,
+    "camera_override": {},  # runtime-only exposure/gain tweaks from the experiment UI (not saved to yaml)
 }
 
 # Event queue for SSE
@@ -155,6 +156,7 @@ def api_load_rig():
     state["deployed"] = False
     state["phase"] = "setup"
     state["trial_table"] = []
+    state["camera_override"] = {}   # drop runtime exposure tweaks -> revert to the rig yaml
 
     # Reset all Pis: stop processes, release devices
     rig = state["rig_config"]
@@ -789,10 +791,8 @@ def go():
             "resolution": cam_cfg.get("resolution", [1280, 720]),
             "fps": cam_cfg.get("fps", 50),
             "bitrate_mbps": cam_cfg.get("bitrate_mbps", 8),
-            "auto_exposure": cam_cfg.get("auto_exposure", True),
-            "exposure_us": cam_cfg.get("exposure_us", 10000),
-            "gain": cam_cfg.get("gain", 1.0),
             "live_preset": cam_cfg.get("live_preset", "med"),
+            **_cam_exposure(cam_cfg),   # runtime exposure/gain override -> carried from the UI into the recording
         }
         if save_camera:
             payload.update({"session_id": state["session_id"], "video_dir": video_dir})  # -> record
@@ -1116,6 +1116,44 @@ def engine_logs():
     return jsonify(result)
 
 
+def _cam_exposure(cam_cfg):
+    """Effective camera exposure/gain: the experiment UI's runtime override (set via
+    /api/camera_controls) merged over the rig-yaml defaults. Runtime-only — cleared on Load Rig, so
+    it reverts to the yaml on relaunch. Used by both the Live preview and the GO recording start."""
+    ov = state.get("camera_override", {})
+    return {
+        "auto_exposure": ov.get("auto_exposure", cam_cfg.get("auto_exposure", True)),
+        "exposure_us": ov.get("exposure_us", cam_cfg.get("exposure_us", 10000)),
+        "gain": ov.get("gain", cam_cfg.get("gain", 1.0)),
+    }
+
+
+@app.route("/api/camera_controls", methods=["POST"])
+def camera_controls():
+    """Live exposure/gain tweak from the experiment UI. Stores a runtime-only override (the Live
+    preview + GO recording read it via _cam_exposure) and pushes it to the running camera so the
+    preview updates immediately. Refused once recording has started (phase 'running') — no mid-run
+    changes. Never written to the rig yaml."""
+    rig = state["rig_config"]
+    if not rig:
+        return jsonify({"ok": False, "error": "No rig loaded"}), 400
+    if state.get("phase") == "running":
+        return jsonify({"ok": False, "error": "locked during recording"}), 409
+    data = request.json or {}
+    ov = {k: data[k] for k in ("auto_exposure", "exposure_us", "gain") if k in data}
+    state["camera_override"].update(ov)     # runtime-only; GO + Live read this via _cam_exposure
+    api_port = rig["network"]["api_port"]
+    ip = next((pi["ip"] for pi in rig["pis"] if "camera" in pi.get("devices", [])), None)
+    if not ip:
+        return jsonify({"ok": True, "stored": ov})   # no camera Pi; just remembered for GO
+    try:
+        # apply live to the running preview (a no-op on the Pi if the camera isn't open yet)
+        r = requests.post(f"http://{ip}:{api_port}/api/camera_controls", json=ov, timeout=5)
+        return jsonify(r.json())
+    except Exception as e:
+        return jsonify({"ok": True, "stored": ov, "warn": str(e)})
+
+
 @app.route("/api/camera_start", methods=["POST"])
 def camera_start():
     """Start camera preview on leader Pi (Pi-side guard prevents restart if already recording)."""
@@ -1140,9 +1178,7 @@ def camera_start():
                                 "fps": cam_cfg.get("fps", 50),
                                 "downsample": True,
                                 "live_preset": cam_cfg.get("live_preset", "med"),
-                                "auto_exposure": cam_cfg.get("auto_exposure", True),
-                                "exposure_us": cam_cfg.get("exposure_us", 10000),
-                                "gain": cam_cfg.get("gain", 1.0)},
+                                **_cam_exposure(cam_cfg)},
                           timeout=10)
         return jsonify(r.json())
     except Exception as e:

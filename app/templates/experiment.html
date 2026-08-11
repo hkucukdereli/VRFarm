@@ -354,6 +354,15 @@
         <div class="video-box" id="panel-camera">
           <div class="box-header">
             <h3><label style="margin:0; display:inline-flex; align-items:center; gap:4px; cursor:pointer;"><input type="checkbox" id="cb-camera" checked> Camera</label></h3>
+            <div id="cam-exp" style="display:flex; align-items:center; gap:8px; margin-left:auto; margin-right:8px; font-size:11px; color:#bcd;"
+                 title="Camera exposure/gain — live-adjustable before GO, locked during a recording. Runtime only: reverts to the rig on reload.">
+              <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer;">
+                <input type="checkbox" id="exp-auto" onchange="onExpAutoToggle(this.checked)"> Auto</label>
+              <label style="margin:0; display:inline-flex; align-items:center; gap:3px;">µs
+                <input type="number" id="exp-us" min="100" step="100" style="width:62px" onchange="onExpChange()"></label>
+              <label style="margin:0; display:inline-flex; align-items:center; gap:3px;">gain
+                <input type="number" id="exp-gain" min="1" max="16" step="0.1" style="width:46px" onchange="onExpChange()"></label>
+            </div>
             <button id="btn-camera-reset" onclick="resetCamera()" title="Recover a frozen/wedged camera: rebinds the sensor driver on the Pi and re-mounts the feed"
                     style="font-size:11px; padding:2px 8px; background:#16213e; color:#8fa; border:1px solid #2a3a5e; border-radius:4px; cursor:pointer;">⟳ Reset</button>
           </div>
@@ -586,6 +595,7 @@ async function loadRig() {
     }
     updateDevicePanels();
     renderSaveDevices();
+    _initCamExp();          // seed the camera exposure/gain fields from the rig (runtime-only)
     buildPiStatus();
     for (const [name, res] of Object.entries(data.pi_results)) {
       const dot = document.getElementById('dot-' + name);
@@ -1454,6 +1464,42 @@ async function _stopCamera() {
   document.getElementById('camera-content').innerHTML = '<span class="placeholder">Camera off</span>';
 }
 
+// ── Camera exposure / gain (runtime-only) ──
+// Seeded from the rig config; NEVER saved to the yaml (reverts on reload / Load Rig). Editable during
+// Live before GO; LOCKED once recording starts — updateButtons() disables the fields at phase 'running',
+// and the server refuses /api/camera_controls while running. Each change pushes to the Pi (applies live
+// if the preview is up) and updates the server-side override that GO's recording start reads.
+function _initCamExp() {
+  const cam = (config && config.rig && config.rig.devices && config.rig.devices.camera) || {};
+  const a = document.getElementById('exp-auto');
+  const u = document.getElementById('exp-us');
+  const g = document.getElementById('exp-gain');
+  if (a) a.checked = cam.auto_exposure ?? true;
+  if (u) u.value = cam.exposure_us ?? 10000;
+  if (g) g.value = cam.gain ?? 1.0;
+  updateButtons();   // sync enabled/disabled (auto hides the manual fields; a run locks everything)
+}
+function _pushCamExp() {
+  const a = document.getElementById('exp-auto');
+  const u = document.getElementById('exp-us');
+  const g = document.getElementById('exp-gain');
+  if (!a) return;
+  const cam = (config && config.rig && config.rig.devices && config.rig.devices.camera) || {};
+  const maxUs = Math.floor(1e6 / (cam.fps || 50));   // exposure can't exceed the frame period
+  const body = {
+    auto_exposure: a.checked,
+    exposure_us: Math.min(Math.max(parseInt(u.value) || 10000, 100), maxUs),
+    gain: Math.min(Math.max(parseFloat(g.value) || 1.0, 1), 16),
+  };
+  if (u) u.value = body.exposure_us;   // reflect the clamp back into the field
+  if (g) g.value = body.gain;
+  fetch('/api/camera_controls', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+  }).catch(() => {});
+}
+function onExpAutoToggle(checked) { updateButtons(); _pushCamExp(); }
+function onExpChange() { _pushCamExp(); }
+
 // Driver-level recovery for a wedged sensor (libcamera hung mid-capture): the Pi rebinds the
 // camera's i2c driver, then we bring the preview back up.
 async function resetCamera() {
@@ -2298,6 +2344,7 @@ function setPhase(p) {
   steps.forEach((el, i) => {
     el.className = 'phase-step' + (i < idx ? ' done' : i === idx ? ' active' : '');
   });
+  updateButtons();   // keep buttons + the camera exposure lock in sync with the phase (e.g. GO -> lock)
 }
 
 function _lockUI() {
@@ -2335,6 +2382,17 @@ function updateButtons() {
   // Deliberately NOT during transfer/transient ops: those have no Cancel, so Quit must stay
   // available as the escape hatch (a stalled transfer would otherwise freeze the whole UI).
   document.getElementById('btn-quit').disabled = running;
+
+  // Camera exposure controls: live-adjustable pre-GO, LOCKED once recording starts (running).
+  const expAuto = document.getElementById('exp-auto');
+  if (expAuto) {
+    const expLocked = running || uiBusy || !rigLoaded;
+    expAuto.disabled = expLocked;
+    ['exp-us', 'exp-gain'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.disabled = expLocked || expAuto.checked;   // manual fields off when auto-exposure or locked
+    });
+  }
 }
 
 // ── Log ──

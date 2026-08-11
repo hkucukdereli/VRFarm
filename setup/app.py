@@ -1147,8 +1147,9 @@ def _get_deploy_files(role: str) -> list[tuple[str, str]]:
             # The display Pi (follower) also gets projector bring-up + the calibration tools,
             # so Deploy alone makes it fully self-sufficient. start_projector.sh -> ~/rig/;
             # the rest -> ~/rig/calibration/ (same place the Calibrate button uses).
-            # NOTE: start_projector.sh still calls ~/dlp/init_parallel_mode.py, an external
-            # dep NOT in this repo — vendor that separately if the SD card is ever reflashed.
+            # NOTE: start_projector.sh calls ~/dlp/init_parallel_mode.py. The dlp/ SDK IS
+            # vendored in this repo and pushed to ~/dlp/ during Deploy (scp, follower only) —
+            # it lives outside ~/rig so it rides scp, not the REST /api/upload (see below).
             ("display_calibration/start_projector.sh", "start_projector.sh"),
             ("display_calibration/calib_geo.py", "calibration/calib_geo.py"),
             ("display_calibration/cal_start.sh", "calibration/cal_start.sh"),

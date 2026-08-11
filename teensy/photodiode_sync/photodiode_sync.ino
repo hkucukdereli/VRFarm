@@ -30,7 +30,7 @@
  */
 
 // ── Pins ─────────────────────────────────────────────────────────────────────
-const int PD_PIN  = A0;   // photodiode analog input  (MUST be <= 3.3 V at the pin)
+const int PD_PIN  = A1;   // photodiode analog input  (MUST be <= 3.3 V at the pin)
 const int OUT_PIN = 1;    // digital square-pulse output -> RPi GPIO (idles LOW, pulses HIGH)
 const int LED_PIN = 13;   // onboard LED mirrors the output (quick visual check)
 
@@ -47,8 +47,8 @@ const bool  ACTIVE_HIGH = true;    // true: pulse = signal ABOVE threshold; fals
 // below LO). Tune both from the two-trace plot: HI between baseline and peak; LO just above baseline
 // but below the notch troughs. (baseline≈0, peak≈1.85 V -> HI 0.9, LO 0.5. If your baseline sits high —
 // the scope Mean read 1.18 V — raise both: HI just under the peak, LO just over the baseline.)
-const float THRESHOLD_HI_V = 1.8f;
-const float THRESHOLD_LO_V = 0.8f;
+const float THRESHOLD_HI_V = 0.8f;
+const float THRESHOLD_LO_V = 0.2f;
 
 // ── Filters ──────────────────────────────────────────────────────────────────
 const uint32_t STEADY_US  = 150;    // Filter 1: steady/glitch — MUST be << the pulse's time-above-
@@ -61,7 +61,7 @@ const uint32_t OUT_PULSE_US = 2000; // width of the square pulse (µs). Must be 
                                     // glitch filter (0.5 ms) and << the inter-pulse interval.
 
 // ── Debug ────────────────────────────────────────────────────────────────────
-#define DEBUG 1                       // 1 = stream "V hyst detect" (3 traces) for the Serial Plotter (tuning); 0 = silent (production)
+#define DEBUG 0                       // 1 = stream "V hyst detect" (3 traces) for the Serial Plotter (tuning); 0 = silent (production)
 const uint32_t DEBUG_PERIOD_US = 200;   // V print interval (µs); 200 = 5 kHz so a ~1.3 ms pulse shows ~6-7
                                         // points (Teensy USB ignores baud). Detection uses EVERY sample regardless.
 

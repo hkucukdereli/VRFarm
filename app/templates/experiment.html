@@ -1930,7 +1930,10 @@ function updateClocks() {
   const itiEl = document.getElementById('iti-clock');
   if (itiEl) itiEl.innerHTML = _timerHTML(itiStartTime, currentItiTotalS, nextItiTotalS, now, '#666');
   const trialNum = document.getElementById('trial-num');
-  if (trialNum) trialNum.textContent = currentTrialNum || '--';
+  if (trialNum) {
+    const totalTrials = trialTable.length || null;   // planned total, known after deploy
+    trialNum.textContent = (currentTrialNum || '--') + (totalTrials ? '/' + totalTrials : '');
+  }
 }
 
 // ── Phase 2: session-time estimate ──

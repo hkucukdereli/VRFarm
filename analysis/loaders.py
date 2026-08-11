@@ -1,248 +1,382 @@
-"""Loaders for VRFarm session data.
-
-As of format_version 2 a transferred session is a single self-contained HDF5:
-
-    /                       root attrs: session_id, subject_id, date, session_num,
-                            notes, level, rig_name, timestamp, n_trials_completed,
-                            n_trials_planned, saved_devices, skipped_devices,
-                            task_config (JSON), format_version
-    /trials/                recorded per-trial data (one row per completed trial)
-    /stimulus/              pre-generated plan (per-trial + block arrays; scalar attrs)
-    /lick/  /reward/  /photodiode/   per-device data (present only if that device was saved)
-    /camera/frame_timestamps         Nx3 [frame_idx, wall_clock_s, sensor_ts_ns]
-
-Older sessions (flat datasets at the root, no groups) still load via a fallback.
 """
+analysis/loaders.py
 
-from pathlib import Path
+Pandas IO for VRFarm v2 session files (one self-contained ``<session_id>.h5`` per
+session — see docs/DATA_FORMAT.md).
+
+The data lives at several granularities, so it loads as a small family of tidy
+DataFrames rather than one table:
+
+    Session(path)            one .h5 -> DataFrames, each tagged with session_id/subject_id
+      .trials      one row / completed trial  (the analysis-ready wide table:
+                   /trials + reward + lick/pulse summaries + planned stimulus + derived cols)
+      .running     one row / wheel-encoder sample   (continuous, ~tens of thousands of rows)
+      .licks       one row / lick                   (long form, in-trial + ITI)
+      .pulses      one row / photodiode sync pulse   (long form)
+      .stimulus    one row / planned trial
+      .camera      one row / recorded video frame
+      .meta        dict of root attributes (task_config parsed from JSON)
+
+    Dataset(source)          many sessions -> the same tables, concatenated
+      ds = Dataset("data/HK1")            # dir (recursive *.h5), glob, list, or Session(s)
+      ds.trials                            # every session stacked, + session_id column
+      ds.add("HK1_20260811_001.h5")        # append another session
+
+Only format_version 2 is supported (consolidation is automatic at session end).
+"""
+from __future__ import annotations
+
+import glob
 import json
-import numpy as np
+from functools import cached_property
+from pathlib import Path
+
 import h5py
+import numpy as np
+import pandas as pd
+
+__all__ = ["Session", "Dataset"]
+
+# AS5600 is a 12-bit absolute encoder: 4096 counts per wheel revolution (the ground
+# truth in /trials/running_counts). rotations = counts / COUNTS_PER_REV.
+COUNTS_PER_REV = 4096
+
+# Per-trial columns pulled from the planned /stimulus group into the wide trials table
+# (sliced to the trials that actually ran). Everything else in /stimulus stays in .stimulus.
+_STIM_INTO_TRIALS = ("stim_alt_deg", "px_x", "px_y", "px_size",
+                     "duration_s", "prestim_s", "poststim_s")
+
+# Root attrs stored as JSON strings by consolidate.py -> parse back to Python objects.
+_JSON_ATTRS = ("task_config", "saved_devices", "skipped_devices")
 
 
-# ── low-level helpers ────────────────────────────────────────────────────
+# ── helpers ──────────────────────────────────────────────────────────────────
 
-def _resolve_h5(path):
-    path = Path(path)
-    if path.is_dir():
-        h5s = sorted(path.glob("*.h5"))
+def _decode(v):
+    """bytes -> str, numpy scalar -> python scalar; pass everything else through."""
+    if isinstance(v, bytes):
+        return v.decode()
+    if isinstance(v, np.generic):
+        return v.item()
+    return v
+
+
+def _vlen_rows(ds):
+    """A vlen HDF5 dataset -> list of 1-D numpy arrays (one per trial)."""
+    return [np.asarray(ds[i]) for i in range(len(ds))]
+
+
+def _session_h5(path) -> Path:
+    """Resolve a session dir or a .h5 path to the .h5 file."""
+    p = Path(path)
+    if p.is_dir():
+        h5s = sorted(p.glob("*.h5"))
         if not h5s:
-            raise FileNotFoundError(f"No .h5 file in {path}")
-        path = h5s[0]
-    return path
+            raise FileNotFoundError(f"No .h5 file in {p}")
+        return h5s[0]
+    return p
 
 
-def _is_grouped(f):
-    """format_version 2 (grouped) vs legacy flat."""
-    return f.attrs.get("format_version", 0) >= 2 or "trials" in f
+# ── one session ──────────────────────────────────────────────────────────────
 
+class Session:
+    """One consolidated ``<session_id>.h5``. Tables are built once, lazily, and cached."""
 
-def _read(ds):
-    """Read a dataset: vlen strings -> list[str]; vlen numeric -> list[ndarray]; else ndarray."""
-    if h5py.check_string_dtype(ds.dtype):
-        return [s.decode() if isinstance(s, bytes) else s for s in ds[:]]
-    if h5py.check_vlen_dtype(ds.dtype) is not None:
-        return [np.asarray(ds[i]) for i in range(len(ds))]
-    return ds[:]
+    def __init__(self, path):
+        self.h5_path = _session_h5(path)
 
+    def __repr__(self):
+        return f"Session({self.session_id!r}, n_trials={self.n_trials})"
 
-def _read_attrs(obj):
-    out = {}
-    for k, v in obj.attrs.items():
-        if isinstance(v, str) and k in ("task_config", "saved_devices", "skipped_devices"):
-            try:
-                v = json.loads(v)
-            except Exception:
-                pass
-        out[k] = v
-    return out
+    # identity -----------------------------------------------------------------
+    @property
+    def session_id(self) -> str:
+        return str(self.meta.get("session_id", self.h5_path.stem))
 
+    @property
+    def subject_id(self) -> str:
+        return str(self.meta.get("subject_id", ""))
 
-# ── HDF5 (experiment recording) ──────────────────────────────────────────
+    @property
+    def n_trials(self) -> int:
+        return len(self._tables["trials"])
 
-def load_session(path):
-    """Load a session HDF5 into a nested dict.
+    # tables (public) ----------------------------------------------------------
+    @property
+    def trials(self) -> pd.DataFrame:
+        return self._tables["trials"]
 
-    Returns {"attrs": {...root metadata...}, "trials": {...}, "stimulus": {...},
-    "lick"/"reward"/"photodiode"/"camera": {...}}. Each group dict maps dataset name
-    -> array (vlen datasets -> list of arrays; trial_outcome -> list of str); a group's
-    own attributes (e.g. /stimulus scalars) are under its "_attrs" key.
-    Legacy flat files return everything under "trials".
-    """
-    path = _resolve_h5(path)
-    out = {}
-    with h5py.File(path, "r") as f:
-        out["attrs"] = _read_attrs(f)
-        if _is_grouped(f):
-            for gname, node in f.items():
-                if isinstance(node, h5py.Group):
-                    g = {k: _read(node[k]) for k in node}
-                    g["_attrs"] = _read_attrs(node)
-                    out[gname] = g
-        else:
-            out["trials"] = {name: _read(f[name]) for name in f}
-    return out
+    @property
+    def running(self) -> pd.DataFrame:
+        return self._tables["running"]
 
+    @property
+    def licks(self) -> pd.DataFrame:
+        return self._tables["licks"]
 
-def load_trials(path):
-    """Per-trial recorded data as a numpy structured array (one row per trial)."""
-    path = _resolve_h5(path)
-    with h5py.File(path, "r") as f:
-        grp = f["trials"] if "trials" in f else f
-        names = [k for k in sorted(grp.keys()) if not k.startswith("_")]
-        n = len(grp["trial_num"]) if "trial_num" in grp else 0
-        if n == 0:
-            return np.array([])
-        dtypes, columns = [], []
-        for name in names:
-            ds = grp[name]
-            if h5py.check_vlen_dtype(ds.dtype) is not None and not h5py.check_string_dtype(ds.dtype):
-                continue                      # skip per-trial vlen (lick_times etc.)
-            if len(ds) != n:
-                continue
-            if h5py.check_string_dtype(ds.dtype):
-                dtypes.append((name, "U16"))
-                columns.append([s.decode() if isinstance(s, bytes) else s for s in ds[:]])
+    @property
+    def pulses(self) -> pd.DataFrame:
+        return self._tables["pulses"]
+
+    @property
+    def stimulus(self) -> pd.DataFrame:
+        return self._tables["stimulus"]
+
+    @property
+    def camera(self) -> pd.DataFrame:
+        return self._tables["camera"]
+
+    @cached_property
+    def meta(self) -> dict:
+        with h5py.File(self.h5_path, "r") as f:
+            out = {}
+            for k, v in f.attrs.items():
+                v = _decode(v)
+                if k in _JSON_ATTRS and isinstance(v, str):
+                    try:
+                        v = json.loads(v)
+                    except (ValueError, TypeError):
+                        pass
+                out[k] = v
+        return out
+
+    @cached_property
+    def stim_attrs(self) -> dict:
+        """Scalar /stimulus group attrs + its non-per-trial datasets (block_delays, …)."""
+        return self._tables["_stim_attrs"]
+
+    # build --------------------------------------------------------------------
+    def _ident(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Prepend session_id / subject_id so tables from different sessions stack."""
+        if len(df):
+            df.insert(0, "subject_id", self.subject_id)
+            df.insert(0, "session_id", self.session_id)
+        return df
+
+    @cached_property
+    def _tables(self) -> dict:
+        with h5py.File(self.h5_path, "r") as f:
+            grp = f["trials"] if "trials" in f else f
+            n = len(grp["trial_num"]) if "trial_num" in grp else 0
+
+            # /trials -> per-trial scalar cols (len == n) vs continuous stream (len != n)
+            per_trial, running = {}, {}
+            for name, ds in grp.items():
+                if name.startswith("_"):
+                    continue
+                is_str = h5py.check_string_dtype(ds.dtype) is not None
+                is_vlen = h5py.check_vlen_dtype(ds.dtype) is not None
+                if is_vlen and not is_str:
+                    continue
+                if len(ds) == n:
+                    per_trial[name] = ([_decode(s) for s in ds[:]] if is_str else ds[:])
+                elif name.startswith("running_"):
+                    running[name] = ds[:]
+
+            df = pd.DataFrame(per_trial)
+
+            # per-trial event times other tables need (may be absent)
+            onset = np.asarray(per_trial.get("true_onset_t", np.full(n, np.nan)), float)
+            win = np.asarray(per_trial.get("response_window_t", np.full(n, np.nan)), float)
+            sw = np.asarray(per_trial.get("stim_onset_t", np.full(n, np.nan)), float)
+            tnums = np.asarray(per_trial.get("trial_num", np.arange(n)))
+
+            # merge /reward
+            if "reward" in f:
+                r = f["reward"]
+                if "reward_t" in r:
+                    df["reward_t"] = r["reward_t"][:]
+                if "reward_amount_ul" in r:
+                    df["reward_ul"] = r["reward_amount_ul"][:]
+                if "reward_pavlovian" in r:
+                    df["pavlovian"] = r["reward_pavlovian"][:].astype(bool)
+
+            # merge /lick summaries + collect long-form rows
+            lick_rows = []
+            if "lick" in f:
+                lk = f["lick"]
+                if "iti_lick_count" in lk:
+                    df["iti_lick_count"] = lk["iti_lick_count"][:]
+                lt = _vlen_rows(lk["lick_times"]) if "lick_times" in lk else [np.array([])] * n
+                it = _vlen_rows(lk["iti_lick_times"]) if "iti_lick_times" in lk else [np.array([])] * n
+                df["n_licks"] = [len(lt[i]) for i in range(n)]
+                df["n_iti_licks"] = [len(it[i]) for i in range(n)]
+                for i in range(n):
+                    for t in lt[i]:
+                        lick_rows.append((tnums[i], "trial", float(t),
+                                          float(t) - onset[i], float(t) - win[i]))
+                    for t in it[i]:
+                        lick_rows.append((tnums[i], "iti", float(t),
+                                          float(t) - onset[i], float(t) - win[i]))
+
+            # merge /photodiode summary + collect long-form rows
+            pulse_rows = []
+            if "photodiode" in f and "sync_pulses" in f["photodiode"]:
+                sp = _vlen_rows(f["photodiode"]["sync_pulses"])
+                df["n_pulses"] = [len(sp[i]) for i in range(n)]
+                df["first_pulse_t"] = [float(sp[i][0]) if len(sp[i]) else np.nan
+                                       for i in range(n)]
+                for i in range(n):
+                    for k, t in enumerate(sp[i]):
+                        pulse_rows.append((tnums[i], k, float(t),
+                                           (float(t) - sw[i]) * 1e3))
+
+            # merge planned /stimulus (per-trial cols, sliced to the trials that ran)
+            stim_df, stim_attrs = pd.DataFrame(), {}
+            if "stimulus" in f:
+                sg = f["stimulus"]
+                for name in _STIM_INTO_TRIALS:
+                    if name in sg and len(sg[name]) >= n:
+                        df[name] = sg[name][:n]
+                stim_df, stim_attrs = self._read_stimulus(sg)
+
+            # derived, human-readable columns
+            if "display_latency_s" in df:
+                df["latency_ms"] = df["display_latency_s"] * 1e3
+            if {"first_lick_t", "response_window_t"} <= set(df.columns):
+                df["rt_ms"] = (df["first_lick_t"] - df["response_window_t"]) * 1e3
+            if {"reward_t", "true_onset_t"} <= set(df.columns):
+                rt = df["reward_t"].where(df["reward_t"] > 0)
+                df["reward_lat_ms"] = (rt - df["true_onset_t"]) * 1e3
+            if {"first_pulse_t", "stim_onset_t"} <= set(df.columns):
+                df["first_pulse_lat_ms"] = (df["first_pulse_t"] - df["stim_onset_t"]) * 1e3
+            if "trial_outcome" in df:
+                df["hit"] = df["trial_outcome"] == "hit"
+
+            # running-wheel stream
+            run_df = pd.DataFrame({k: running[k] for k in sorted(running)})
+            if "running_counts" in run_df:
+                run_df["rotations"] = run_df["running_counts"] / COUNTS_PER_REV
+
+            # licks / pulses long form
+            licks = pd.DataFrame(lick_rows, columns=[
+                "trial_num", "phase", "t", "t_rel_onset_s", "t_rel_window_s"])
+            pulses = pd.DataFrame(pulse_rows, columns=[
+                "trial_num", "pulse_idx", "t", "t_rel_onset_ms"])
+
+            camera = self._read_camera(f)
+
+        return {
+            "trials": self._ident(df),
+            "running": self._ident(run_df),
+            "licks": self._ident(licks),
+            "pulses": self._ident(pulses),
+            "stimulus": self._ident(stim_df),
+            "camera": self._ident(camera),
+            "_stim_attrs": stim_attrs,
+        }
+
+    @staticmethod
+    def _read_stimulus(sg):
+        """Return (per-planned-trial DataFrame, attrs dict). Per-trial arrays share the
+        modal length; scalar group-attrs and shorter arrays (block_*) go to the dict."""
+        lengths = [len(ds) for ds in sg.values()]
+        n_plan = max(set(lengths), key=lengths.count) if lengths else 0
+        cols, attrs = {}, {}
+        for name, ds in sg.items():
+            if len(ds) == n_plan:
+                cols[name] = ds[:]
             else:
-                dtypes.append((name, ds.dtype))
-                columns.append(ds[:])
-        arr = np.zeros(n, dtype=dtypes)
-        for (name, _), col in zip(dtypes, columns):
-            arr[name] = col
-    return arr
+                attrs[name] = ds[:]                      # block_delays, block_start_indices, …
+        for k, v in sg.attrs.items():
+            attrs[k] = _decode(v)
+        df = pd.DataFrame(cols)
+        if len(df):
+            df.insert(0, "trial_idx", np.arange(n_plan))
+        return df, attrs
+
+    @staticmethod
+    def _read_camera(f):
+        if "camera" not in f or "frame_timestamps" not in f["camera"]:
+            return pd.DataFrame()
+        ds = f["camera"]["frame_timestamps"]
+        arr = ds[:]
+        cols = [_decode(c) for c in ds.attrs.get(
+            "columns", ["frame_idx", "wall_clock_s", "sensor_ts_ns"])]
+        return pd.DataFrame(arr, columns=cols[:arr.shape[1]])
 
 
-def session_info(path):
-    """Summary dict: session_id, n_trials, duration_s, hit_rate, total_rewards_ul, groups."""
-    path = _resolve_h5(path)
-    info = {}
-    with h5py.File(path, "r") as f:
-        attrs = _read_attrs(f)
-        info["session_id"] = attrs.get("session_id")
-        info["groups"] = [k for k in f if isinstance(f[k], h5py.Group)] or list(f.keys())
-        grp = f["trials"] if "trials" in f else f
-        n = len(grp["trial_num"]) if "trial_num" in grp else 0
-        info["n_trials"] = n
-        if n == 0:
-            return info
-        info["duration_s"] = float(grp["outcome_t"][-1] - grp["iti_start_t"][0])
-        outcomes = [s.decode() if isinstance(s, bytes) else s for s in grp["trial_outcome"][:]]
-        info["hit_rate"] = sum(1 for o in outcomes if o == "hit") / n
-        rw = f.get("reward/reward_amount_ul", f.get("reward_amount_ul"))
-        if rw is not None:
-            info["total_rewards_ul"] = float(np.nansum(rw[:]))
-    return info
+# ── many sessions ────────────────────────────────────────────────────────────
 
-
-def response_times(path, ref="onset", within_window=False):
-    """Per-trial first-lick latency (s) — the response/reaction time.
-
-    ref="onset"  : measured from the stimulus onset (true_onset_t, the photodiode-corrected
-                   onset, with a stim_onset_t fallback where the sync failed).
-    ref="window" : measured from when the response window opens (response_window_t).
-
-    within_window=True restricts the qualifying lick to the response window: it must land before
-    the window closes (response_window_t + reward.response_window). Because per-trial licks are
-    recorded across the WHOLE trial (pre-stim → stim → response window → post-stim), the default
-    (False) can return a latency into the post-stim period — a first post-onset lick that occurs
-    after the window has closed — so RTs can exceed resp_delay + response_window. Set True to
-    exclude those late licks.
-
-    Uses the full per-trial lick_times when the lick device was saved (first lick at/after the
-    reference — so pre-stim/anticipatory licks don't count); otherwise falls back to the recorded
-    first_lick_t. Returns a length-n_trials array; NaN for trials with no qualifying lick.
-    """
-    s = load_session(path)
-    tr = s.get("trials", {})
-    n = len(tr.get("trial_num", []))
-    if n == 0:
-        return np.array([])
-    win_open = np.asarray(tr["response_window_t"], float)
-    if ref == "window":
-        ref_t = win_open
+def _iter_sessions(source):
+    """Yield Session objects from a Session, a path/glob/dir, or an iterable of those."""
+    if source is None:
+        return
+    if isinstance(source, Session):
+        yield source
+    elif isinstance(source, (str, Path)):
+        s = str(source)
+        if any(c in s for c in "*?[") and not Path(s).exists():
+            for m in sorted(glob.glob(s, recursive=True)):
+                yield Session(m)
+        elif Path(s).is_dir():
+            for h in sorted(Path(s).rglob("*.h5")):
+                yield Session(h)
+        else:
+            yield Session(s)
     else:
-        onset = np.asarray(tr["true_onset_t"], float)
-        ref_t = np.where(np.isfinite(onset), onset, np.asarray(tr["stim_onset_t"], float))
-
-    hi = np.full(n, np.inf)
-    if within_window:
-        rw = float(((s.get("attrs", {}).get("task_config") or {}).get("reward", {})
-                    ).get("response_window", 1.4))
-        hi = win_open + rw   # window close time; licks at/after this are post-stim
-
-    lick_times = s.get("lick", {}).get("lick_times")   # list of per-trial arrays, or None
-    first_lick = np.asarray(tr.get("first_lick_t", np.full(n, np.nan)), float)
-    out = np.full(n, np.nan)
-    for i in range(n):
-        r = ref_t[i]
-        if not np.isfinite(r):
-            continue
-        if lick_times is not None:
-            a = np.asarray(lick_times[i], float)
-            a = a[(a >= r) & (a < hi[i])]
-            if a.size:
-                out[i] = a[0] - r
-        elif np.isfinite(first_lick[i]) and r <= first_lick[i] < hi[i]:
-            out[i] = first_lick[i] - r
-    return out
+        for item in source:
+            yield from _iter_sessions(item)
 
 
-# ── stimulus plan + camera timestamps (now inside the h5; .npz/.npy fallback) ──
+class Dataset:
+    """A collection of Sessions whose tables concatenate on access, each row tagged with
+    its session_id. Build from a dir / glob / list, and grow it with ``.add()``."""
 
-def load_stims(path):
-    """Pre-generated stimulus plan. Reads /stimulus from the session h5 (v2); falls back to a
-    legacy stimuli.npz. Returns a dict of arrays plus unpacked scalar params."""
-    path = Path(path)
-    if path.is_dir():
-        h5s = sorted(path.glob("*.h5"))
-        if h5s:
-            with h5py.File(h5s[0], "r") as f:
-                if "stimulus" in f:
-                    d = {k: _read(f["stimulus"][k]) for k in f["stimulus"]}
-                    d.update(_read_attrs(f["stimulus"]))
-                    return d
-        path = path / "stimuli.npz"
-    data = dict(np.load(path, allow_pickle=True))
-    for key in ("n_trials", "background_gray", "global_delay",
-                "block_delay_skip_first", "sync_square_every_n"):
-        if key in data and data[key].size == 1:
-            data[key] = data[key].item()
-    return data
+    def __init__(self, source=None):
+        self.sessions: list[Session] = []
+        if source is not None:
+            self.add(source)
 
+    def __repr__(self):
+        return f"Dataset({len(self.sessions)} sessions, {len(self.trials)} trials)"
 
-def load_video_timestamps(path):
-    """Camera frame timestamps as {frame_idx, t (wall clock), t_sensor, avg_fps}.
+    def __len__(self):
+        return len(self.sessions)
 
-    Reads /camera/frame_timestamps from the session h5 (v2); falls back to a legacy
-    frame_timestamps.npy. Columns: [frame_idx, host wall clock (time.time(), NTP-synced,
-    same timebase as all trial events), SensorTimestamp ns on CLOCK_BOOTTIME]. t_sensor maps
-    the sensor clock onto the wall clock via the session-median offset (accurate frame spacing,
-    no ISP jitter); None if the sensor column is absent.
-    """
-    path = Path(path)
-    arr = None
-    if path.is_dir():
-        h5s = sorted(path.glob("*.h5"))
-        if h5s:
-            with h5py.File(h5s[0], "r") as f:
-                if "camera/frame_timestamps" in f:
-                    arr = f["camera/frame_timestamps"][:]
-        if arr is None:
-            path = path / "frame_timestamps.npy"
-    if arr is None and str(path).endswith(".h5"):
-        with h5py.File(path, "r") as f:
-            arr = f["camera/frame_timestamps"][:]
-    if arr is None:
-        arr = np.load(path)
+    def __iter__(self):
+        return iter(self.sessions)
 
-    n = len(arr)
-    out = {
-        "frame_idx": arr[:, 0].astype(int),
-        "t": arr[:, 1],
-        "t_sensor": None,
-        "avg_fps": float((n - 1) / max(arr[-1, 1] - arr[0, 1], 1e-9)) if n > 1 else float("nan"),
-    }
-    if arr.ndim == 2 and arr.shape[1] >= 3 and np.any(arr[:, 2] > 0):
-        sens_s = arr[:, 2] / 1e9
-        out["t_sensor"] = sens_s + np.median(arr[:, 1] - sens_s)
-    return out
+    def __getitem__(self, i):
+        return self.sessions[i]
+
+    def add(self, source) -> "Dataset":
+        """Append one or more sessions (dir, glob, path, Session, or an iterable). Chainable."""
+        self.sessions.extend(_iter_sessions(source))
+        return self
+
+    def _concat(self, attr: str) -> pd.DataFrame:
+        frames = [getattr(s, attr) for s in self.sessions]
+        frames = [df for df in frames if df is not None and len(df)]
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    @property
+    def trials(self) -> pd.DataFrame:
+        return self._concat("trials")
+
+    @property
+    def running(self) -> pd.DataFrame:
+        return self._concat("running")
+
+    @property
+    def licks(self) -> pd.DataFrame:
+        return self._concat("licks")
+
+    @property
+    def pulses(self) -> pd.DataFrame:
+        return self._concat("pulses")
+
+    @property
+    def stimulus(self) -> pd.DataFrame:
+        return self._concat("stimulus")
+
+    @property
+    def camera(self) -> pd.DataFrame:
+        return self._concat("camera")
+
+    @property
+    def meta(self) -> pd.DataFrame:
+        """One row per session (task_config dropped — reach it via Session.meta)."""
+        rows = [{k: v for k, v in s.meta.items() if k != "task_config"}
+                for s in self.sessions]
+        return pd.DataFrame(rows)

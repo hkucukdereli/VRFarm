@@ -786,7 +786,7 @@ def go():
     save_camera = bool(save.get("camera", True))
     cam_recording = False
     if cam_cfg.get("enabled", False):
-        video_dir = rig["data"].get("video_dir", "/media/vruser/ssd/video")
+        video_dir = rig["data"].get("video_dir") or "/media/vruser/ssd/video"   # `or`: a present-but-empty value falls back too
         payload = {
             "resolution": cam_cfg.get("resolution", [1280, 720]),
             "fps": cam_cfg.get("fps", 50),

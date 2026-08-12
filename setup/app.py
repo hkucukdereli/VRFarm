@@ -260,17 +260,23 @@ def api_install_pi():
                     steps.append(f"WARN ~/dlp/ push skipped: {e}")
             # The DLPC control I2C is a bit-banged bus on GPIO23(SDA)/22(SCL), exposed as /dev/i2c-22
             # (dlp/i2c.py opens bus 22) — created by this device-tree overlay. GPIO22/23 are outside
-            # the DPI range (0-21), so no clash with the projector video. Idempotent append; needs a
-            # REBOOT to take effect.
+            # the DPI range (0-21), so no clash with the projector video. Needs a REBOOT to take effect.
             try:
                 overlay = "dtoverlay=i2c-gpio,bus=22,i2c_gpio_sda=23,i2c_gpio_scl=22,i2c_gpio_delay_us=2"
+                cfg = "/boot/firmware/config.txt"
+                # Delete any prior i2c-gpio overlay on these pins (e.g. an earlier auto-bus variant)
+                # and re-append the canonical bus=22 line — so re-running Install always leaves exactly
+                # one, never a conflicting pair. The tail-byte check guarantees a newline boundary so
+                # the append can't glue onto a config.txt that lacks a trailing newline.
                 _ssh(ssh_prefix,
-                     f"grep -qxF '{overlay}' /boot/firmware/config.txt || "
-                     f"echo '{overlay}' | sudo tee -a /boot/firmware/config.txt >/dev/null",
+                     f"sudo sed -i '/^dtoverlay=i2c-gpio,.*i2c_gpio_scl=22/d' {cfg}; "
+                     f"[ -n \"$(sudo tail -c1 {cfg})\" ] && echo | sudo tee -a {cfg} >/dev/null; "
+                     f"echo '{overlay}' | sudo tee -a {cfg} >/dev/null",
                      timeout=15)
-                steps.append("Added DLPC i2c-gpio overlay to config.txt — REBOOT the follower for /dev/i2c-22")
+                steps.append("Set DLPC i2c-gpio overlay (bus=22) in config.txt — REBOOT the follower for /dev/i2c-22")
             except Exception as e:
-                steps.append(f"WARN DLPC overlay skipped: {e}")
+                steps.append(f"WARN: DLPC overlay NOT set ({e}) — /dev/i2c-22 will be ABSENT and the projector "
+                             "control bus won't work; fix passwordless sudo, then re-run Install and reboot")
 
         # 6. Upload and enable systemd service
         _scp(str(ROOT / "pi_api" / "vrfarm.service"),
@@ -1125,12 +1131,11 @@ def _get_deploy_files(role: str) -> list[tuple[str, str]]:
         files += [
             ("engine/__init__.py", "engine/__init__.py"),
             ("engine/follower.py", "engine/follower.py"),
-            # The display Pi (follower) also gets projector bring-up + the calibration tools,
-            # so Deploy alone makes it fully self-sufficient. start_projector.sh -> ~/rig/;
-            # the rest -> ~/rig/calibration/ (same place the Calibrate button uses).
-            # NOTE: start_projector.sh calls ~/dlp/init_parallel_mode.py. The dlp/ SDK IS
-            # vendored in this repo and pushed to ~/dlp/ during Deploy (scp, follower only) —
-            # it lives outside ~/rig so it rides scp, not the REST /api/upload (see below).
+            # The display Pi (follower) also gets projector bring-up + the calibration tools:
+            # start_projector.sh -> ~/rig/; the rest -> ~/rig/calibration/ (same place the
+            # Calibrate button uses). NOTE: start_projector.sh calls ~/dlp/init_parallel_mode.py.
+            # The dlp/ SDK is vendored in this repo but pushed to ~/dlp/ at INSTALL, not Deploy
+            # (it's static — see step 5b) — it lives outside ~/rig so it rides scp, not /api/upload.
             ("display_calibration/start_projector.sh", "start_projector.sh"),
             ("display_calibration/calib_geo.py", "calibration/calib_geo.py"),
             ("display_calibration/cal_start.sh", "calibration/cal_start.sh"),

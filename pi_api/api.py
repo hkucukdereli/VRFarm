@@ -285,6 +285,24 @@ def release_devices():
     return jsonify({"ok": True, "released": released})
 
 
+def _release_one(name):
+    """Release and drop a single stored device BEFORE a re-init reclaims its line/bus.
+    Without this, re-initializing a persistent device (the per-card Reinit button, or a
+    second Init Devices without a pi_api restart) leaves the old instance still holding the
+    GPIO line — the new claim then fails 'GPIO busy' (lgpio, exclusive) or silently orphans
+    the old handle/thread (I2C). Mirrors release_devices' stop_stream()->close() order."""
+    with _devices_lock:
+        dev = _devices.pop(name, None)
+        if dev is not None:
+            try:
+                if hasattr(dev, 'stop_stream'):
+                    dev.stop_stream()
+                if hasattr(dev, 'close'):
+                    dev.close()
+            except Exception:
+                pass
+
+
 @app.route("/api/generate_stims", methods=["POST"])
 def generate_stims():
     """Leader only. Generate stimuli from task config + warp map."""
@@ -632,6 +650,7 @@ def init_lick():
         "electrode": data.get("electrode", 4),
         "i2c_bus": data.get("i2c_bus", 1),
     }
+    _release_one("lick_sensor")   # free any prior instance so this (re)init can re-claim the bus
     try:
         dev = LickSensor()
         dev.init(rig_config=rig_cfg, task_params={})
@@ -691,6 +710,7 @@ def init_encoder():
         "wheel_diameter_cm": data.get("wheel_diameter_cm", 15.0),
         "sample_hz": data.get("sample_hz", 100),
     }
+    _release_one("encoder")   # free any prior instance so this (re)init can re-claim the bus
     try:
         dev = Encoder()
         dev.init(rig_config=rig_cfg, task_params={})
@@ -783,6 +803,7 @@ def init_photodiode():
     from devices.photodiode import Photodiode
     data = request.json or {}
     gpio = data.get("gpio", 24)
+    _release_one("photodiode")   # release the old instance first so this (re)init doesn't leak its pigpio callback/handle
     try:
         dev = Photodiode()
         dev.init(rig_config={
@@ -807,6 +828,7 @@ def init_calibration_probe():
     from devices.calibration_probe import CalibrationProbe
     data = request.json or {}
     gpio = data.get("gpio", 22)
+    _release_one("calibration_probe")   # release the old instance first so this (re)init doesn't leak its pigpio handle
     try:
         dev = CalibrationProbe()
         dev.init(rig_config={"gpio": gpio}, task_params={})

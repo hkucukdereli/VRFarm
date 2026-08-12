@@ -119,11 +119,14 @@ class Photodiode(Device):
         """Reset the per-trial pulse buffer AND re-anchor the trial timebase on the MAIN thread from
         a paired (hardware ns tick, wall clock) read — so the first pulse's timestamp comes from the
         jitter-free hardware tick, not a time.time() sampled inside the GIL-scheduled lgpio callback.
-        lgpio alert ticks are CLOCK_REALTIME ns, so time.time_ns() is the matching main-thread tick."""
+        lgpio alert ticks are CLOCK_MONOTONIC ns (the kernel GPIO-event timestamp), so
+        time.monotonic_ns() is the matching main-thread reference. Using time.time_ns()
+        (CLOCK_REALTIME) here mismatched the clocks and put every pulse ~1.7e9 s in the past
+        (sync_ok=0 every trial, pulses off the raster)."""
         self._pulse_idx = 0
         self._trial_pulses = []
         try:
-            self._ref_tick = time.time_ns()
+            self._ref_tick = time.monotonic_ns()
             self._ref_time = time.time()
         except Exception:
             self._ref_tick = None            # fall back to first-pulse anchoring in _on_edge
@@ -140,8 +143,8 @@ class Photodiode(Device):
         if self._ref_tick is None:
             self._ref_tick = tick
             self._ref_time = time.time()
-        # lgpio tick is CLOCK_REALTIME ns; the main-thread (time_ns, time) anchor makes the precise
-        # edge time = ref wall clock + hardware-tick delta (ns -> s), free of callback-thread jitter.
+        # lgpio tick is CLOCK_MONOTONIC ns; the main-thread (monotonic_ns, time) anchor makes the
+        # precise edge time = ref wall clock + hardware-tick delta (ns -> s), free of callback jitter.
         t_precise = self._ref_time + (tick - self._ref_tick) / 1e9
         self._pulse_idx += 1
         self._trial_pulses.append(t_precise)

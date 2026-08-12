@@ -59,8 +59,8 @@ class Camera(Device):
         # bitrate_mbps (task_params first, then rig_config); not in task_params_schema.
         self.auto_exposure = bool(task_params.get("auto_exposure",
                              rig_config.get("auto_exposure", True)))
-        self.exposure_us = int(task_params.get("exposure_us",
-                           rig_config.get("exposure_us", 10000)))
+        self.exposure_ms = float(task_params.get("exposure_ms",
+                           rig_config.get("exposure_ms", 10.0)))
         self.gain = float(task_params.get("gain",
                     rig_config.get("gain", 1.0)))
         # Experiment live-view preset (high/med/low) — downsamples ONLY the live preview during a
@@ -231,7 +231,7 @@ class Camera(Device):
         if self.auto_exposure:
             return {"AeEnable": True}
         return {"AeEnable": False,
-                "ExposureTime": int(self.exposure_us),
+                "ExposureTime": int(self.exposure_ms * 1000),   # ms -> µs (libcamera ExposureTime is µs)
                 "AnalogueGain": float(self.gain)}
 
     def set_live_controls(self, ctrls: dict) -> dict:
@@ -249,13 +249,13 @@ class Camera(Device):
             self._cam.set_controls(applied)
         return applied
 
-    def apply_exposure(self, auto_exposure=None, exposure_us=None, gain=None) -> dict:
+    def apply_exposure(self, auto_exposure=None, exposure_ms=None, gain=None) -> dict:
         """Update exposure settings (any arg left None is unchanged) and push them to the running
         camera. Returns the controls applied (empty if the camera isn't open)."""
         if auto_exposure is not None:
             self.auto_exposure = bool(auto_exposure)
-        if exposure_us is not None:
-            self.exposure_us = int(exposure_us)
+        if exposure_ms is not None:
+            self.exposure_ms = float(exposure_ms)
         if gain is not None:
             self.gain = float(gain)
         return self.set_live_controls(self._exposure_controls())

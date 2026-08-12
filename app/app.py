@@ -1123,7 +1123,7 @@ def _cam_exposure(cam_cfg):
     ov = state.get("camera_override", {})
     return {
         "auto_exposure": ov.get("auto_exposure", cam_cfg.get("auto_exposure", True)),
-        "exposure_us": ov.get("exposure_us", cam_cfg.get("exposure_us", 10000)),
+        "exposure_ms": ov.get("exposure_ms", cam_cfg.get("exposure_ms", 10)),
         "gain": ov.get("gain", cam_cfg.get("gain", 1.0)),
     }
 
@@ -1140,7 +1140,7 @@ def camera_controls():
     if state.get("phase") == "running":
         return jsonify({"ok": False, "error": "locked during recording"}), 409
     data = request.json or {}
-    ov = {k: data[k] for k in ("auto_exposure", "exposure_us", "gain") if k in data}
+    ov = {k: data[k] for k in ("auto_exposure", "exposure_ms", "gain") if k in data}
     state["camera_override"].update(ov)     # runtime-only; GO + Live read this via _cam_exposure
     api_port = rig["network"]["api_port"]
     ip = next((pi["ip"] for pi in rig["pis"] if "camera" in pi.get("devices", [])), None)

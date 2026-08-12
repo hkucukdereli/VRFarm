@@ -1,0 +1,68 @@
+# =============================================================================
+# Raspberry Pi 4B (FOLLOWER) — DLPDLCR230NPEVM — /boot/firmware/config.txt
+# TESTED & WORKING on Raspberry Pi OS trixie (64-bit).
+# 1920x1080 @ 58 Hz via 18-bit DPI (RGB666), 125 MHz pixel clock.
+#
+# To apply on a fresh follower (Install does this automatically; here it is by hand):
+#   sudo cp /boot/firmware/config.txt /boot/firmware/config_default.txt   # back up first
+#   sudo cp ~/dlp/sample_config/config_dlp.txt /boot/firmware/config.txt
+#   sudo reboot
+# After reboot the runtime bring-up (GPIO->ALT2, DLPC source select, X) is done by
+#   ~/rig/start_projector.sh  (run via /api/init_projector at Load Rig / Deploy).
+#
+# THE CRUX: use FKMS (vc4-fkms-v3d), NOT full KMS (vc4-kms-v3d). Full KMS owns the
+# display pipeline and does NOT do DPI output — with it the DLPC only shows its
+# internal test pattern (color bars). FKMS lets the firmware retain DPI control
+# while still exposing DRM (/dev/dri/card0) for X11 + hardware OpenGL.
+# =============================================================================
+
+# --- Core system -------------------------------------------------------------
+dtparam=audio=on
+camera_auto_detect=1
+auto_initramfs=1
+arm_64bit=1
+disable_overscan=1
+arm_boost=1
+
+# GPU memory — needed for DPI video output + OpenGL rendering.
+gpu_mem=128
+
+# --- Display driver: Firmware KMS (see THE CRUX above) -----------------------
+#   - DPI output via firmware (GPIO0-21 -> projector)
+#   - DRM devices (/dev/dri/card0, renderD128) for X11 (modesetting driver)
+#   - Hardware OpenGL via the V3D GPU
+dtoverlay=vc4-fkms-v3d
+max_framebuffers=2
+
+[cm4]
+otg_mode=1
+
+[cm5]
+dtoverlay=dwc2,dr_mode=host
+
+[all]
+# --- DLPC3436 control bus: software I2C on GPIO23(SDA)/22(SCL) -> /dev/i2c-22 -
+# bus=22 is pinned so it is deterministic and matches dlp/i2c.py (DEFAULT_I2C_BUS=22).
+dtoverlay=i2c-gpio,bus=22,i2c_gpio_sda=23,i2c_gpio_scl=22,i2c_gpio_delay_us=2
+
+# --- DPI GPIO init -----------------------------------------------------------
+# BCM0: output, pull-none (becomes PCLK once pinctrl sets ALT2 after boot).
+# BCM1-27: input on boot, pull-none. Do NOT set ALT2 here — start_projector.sh
+# sets ALT2 AFTER the EVM has booted.
+gpio=0=op
+gpio=0=pn
+gpio=1-27=ip
+gpio=1-27=pn
+
+# --- DPI display output: RGB666 (Mode 5) -------------------------------------
+enable_dpi_lcd=1
+display_default_lcd=1
+dpi_group=2
+dpi_mode=87
+# RGB666 Configuration 1 (Mode 5): RGB order, output-enable active high,
+# hsync/vsync active low, data on rising edge, 6 bits per channel.
+dpi_output_format=458773
+
+# --- Video timing: 1920x1080 @ 58 Hz, 125 MHz pixel clock (TI-tested) --------
+# If you see jitter/artifacts with a longer ribbon than TI's 2", try gpio_drive=5.
+hdmi_timings=1920 0 20 10 10 1080 0 10 10 10 0 0 0 58 0 125000000 3

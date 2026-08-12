@@ -240,6 +240,36 @@ def api_install_pi():
             _scp(str(ROOT / local), f"{ssh_prefix}:~/rig/{remote}")
         steps.append(f"Deployed {len(files_to_deploy)} files")
 
+        # 5b. Follower projector setup (static config, so it rides Install — not every Deploy):
+        #     (a) push the vendored DLPC SDK to ~/dlp (it lives OUTSIDE ~/rig, so scp, not the
+        #         REST /api/upload); (b) add the DLPC control-bus device-tree overlay to config.txt.
+        if role == "follower":
+            dlp_local = ROOT / "dlp"
+            if dlp_local.exists():
+                try:
+                    _ssh(ssh_prefix, "mkdir -p ~/dlp", timeout=15)
+                    items = [str(p) for p in dlp_local.iterdir() if p.name != "__pycache__"]
+                    scp = subprocess.run(
+                        ["scp", "-r", "-o", "ConnectTimeout=5", *items, f"{ssh_prefix}:~/dlp/"],
+                        capture_output=True, text=True, timeout=90)
+                    steps.append("Pushed ~/dlp/ (projector init)" if scp.returncode == 0
+                                 else f"WARN ~/dlp/ scp: {scp.stderr.strip()[:100]}")
+                except Exception as e:
+                    steps.append(f"WARN ~/dlp/ push skipped: {e}")
+            # The DLPC control I2C is a bit-banged bus on GPIO23(SDA)/22(SCL), exposed as /dev/i2c-22
+            # (dlp/i2c.py opens bus 22) — created by this device-tree overlay. GPIO22/23 are outside
+            # the DPI range (0-21), so no clash with the projector video. Idempotent append; needs a
+            # REBOOT to take effect.
+            try:
+                overlay = "dtoverlay=i2c-gpio,i2c_gpio_sda=23,i2c_gpio_scl=22,i2c_gpio_delay_us=2"
+                _ssh(ssh_prefix,
+                     f"grep -qxF '{overlay}' /boot/firmware/config.txt || "
+                     f"echo '{overlay}' | sudo tee -a /boot/firmware/config.txt >/dev/null",
+                     timeout=15)
+                steps.append("Added DLPC i2c-gpio overlay to config.txt — REBOOT the follower for /dev/i2c-22")
+            except Exception as e:
+                steps.append(f"WARN DLPC overlay skipped: {e}")
+
         # 6. Upload and enable systemd service
         _scp(str(ROOT / "pi_api" / "vrfarm.service"),
              f"{ssh_prefix}:/tmp/vrfarm.service")
@@ -347,25 +377,8 @@ def api_deploy_pi():
                     timeout=10)
             steps.append(f"Uploaded {remote}")
 
-        # ~/dlp/ (projector DLPC-init SDK) lives OUTSIDE ~/rig, so the REST /api/upload
-        # (restricted to ~/rig) can't reach it — push the vendored copy via scp. Non-fatal:
-        # the projector usually already has it; this just keeps a reflash reproducible.
-        if role == "follower":
-            dlp_local = ROOT / "dlp"
-            if dlp_local.exists():
-                pi = next((p for p in (_rig_config or {}).get("pis", [])
-                           if p.get("ip") == ip), None)
-                target = f"{(pi or {}).get('user', 'vruser')}@{ip}"
-                try:
-                    _ssh(target, "mkdir -p ~/dlp", timeout=15)
-                    items = [str(p) for p in dlp_local.iterdir() if p.name != "__pycache__"]
-                    scp = subprocess.run(
-                        ["scp", "-r", "-o", "ConnectTimeout=5", *items, f"{target}:~/dlp/"],
-                        capture_output=True, text=True, timeout=90)
-                    steps.append("Pushed ~/dlp/ (projector init)" if scp.returncode == 0
-                                 else f"WARN ~/dlp/ scp: {scp.stderr.strip()[:100]}")
-                except Exception as e:
-                    steps.append(f"WARN ~/dlp/ push skipped: {e}")
+        # ~/dlp/ (projector DLPC-init SDK) is pushed at Install now (it's static) — Deploy no longer
+        # re-sends it. Reflashed a follower? Re-run Install to restore ~/dlp/.
 
         # Restart pi_api so the just-uploaded code actually RUNS. A long-running Python
         # process won't pick up overwritten files on its own — this is why a redeploy alone

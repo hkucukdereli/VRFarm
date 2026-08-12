@@ -2,12 +2,12 @@
 
 **Project:** VRFarm
 **Last updated:** 2026-08-11
-**Current rig:** cheese (cheddar = Leader, mozzarella = Follower)
+**Current rig:** cheese (Leader, Follower)
 
 This is the first-time **rig bring-up** reference: hardware, network/IPs, OS, conda
 Pi bring-up, envs, package installs, GPIO (lgpio), projector startup, systemd service, SSH keys, gotchas.
-For the **controller** machine (the Mac/Linux box running the UIs) the authoritative doc
-is `docs/CONTROLLER_SETUP.md`; the Mac section here is a short version of it.
+For the **controller** machine (the macOS/Linux box running the UIs) the authoritative doc
+is `docs/CONTROLLER_SETUP.md`; the Controller section here is a short version of it.
 
 Most of the per-Pi package/service work below is automated by the setup UI's **Install**
 button (`setup/app.py` -> `api_install_pi`). Do it by hand only when reflashing an SD card
@@ -19,9 +19,9 @@ or debugging Install — the manual steps document what Install does under the h
 
 | Machine | Role | Conda env | IP |
 |---|---|---|---|
-| Controller (Mac/Ubuntu) | UI + data storage | `vrfarm` | 192.168.10.1 |
-| cheddar | Leader Pi — imperative trial loop + GPIO devices | `rig` | 192.168.10.101 |
-| mozzarella | Follower Pi — pygame display | `rig` | 192.168.10.102 |
+| Controller (macOS/Ubuntu) | UI + data storage | `vrfarm` | 192.168.10.1 |
+| Leader | Leader Pi — imperative trial loop + GPIO devices | `rig` | 192.168.10.101 |
+| Follower | Follower Pi — pygame display | `rig` | 192.168.10.102 |
 
 Both Pis run **Debian 13 (trixie)**, user `vruser`, conda base at `~/miniforge3`.
 The `rig` env Python **must match the system Python** (3.13 on trixie) — see the
@@ -33,7 +33,7 @@ conda note under each Pi.
 
 ---
 
-## Mac / Controller Setup
+## Controller Setup
 
 Short version; full detail (Ubuntu netplan, firewall, `$VRFARM_DATA_DIR`) is in
 `docs/CONTROLLER_SETUP.md`.
@@ -73,12 +73,12 @@ controller path in the rig yaml (see `docs/CONTROLLER_SETUP.md` §3b).
 
 ```bash
 ssh-keygen -t ed25519          # skip if you already have a key
-ssh-copy-id vruser@192.168.10.101   # cheddar
-ssh-copy-id vruser@192.168.10.102   # mozzarella
+ssh-copy-id vruser@192.168.10.101   # leader
+ssh-copy-id vruser@192.168.10.102   # follower
 
 # Test — seeds known_hosts, which the non-interactive setup UI needs
-ssh vruser@192.168.10.101 echo "cheddar OK"
-ssh vruser@192.168.10.102 echo "mozzarella OK"
+ssh vruser@192.168.10.101 echo "leader OK"
+ssh vruser@192.168.10.102 echo "follower OK"
 ```
 
 The experiment-run UI (`app/app.py`) uses no SSH — only the setup UI does (deploy,
@@ -88,8 +88,8 @@ warp push, reboot, calibrate). Every new controller must add **its own** key to 
 
 ## New Pi first boot (headless bring-up)
 
-Getting a fresh Pi onto the rig — the steps we used replacing the Leader with a Pi 5 (still named
-`cheddar`, still at `192.168.10.101`). A fresh Raspberry Pi OS / Debian image usually boots with
+Getting a fresh Pi onto the rig — the steps we used replacing the Leader with a Pi 5 (still the
+Leader, still at `192.168.10.101`). A fresh Raspberry Pi OS / Debian image usually boots with
 **SSH off** and only on WiFi (or a stray address), **not** on the experiment switch, so these steps
 get it reachable and onto the switch. Skip any that are already done.
 
@@ -124,14 +124,14 @@ sudo nmcli connection modify "Wired connection 1" \
   ipv4.method manual ipv4.addresses 192.168.10.101/24 \
   ipv4.gateway "" ipv4.dns "" ipv4.never-default yes
 sudo nmcli connection up "Wired connection 1"
-ip -br addr show eth0                        # expect 192.168.10.101/24  (mozzarella = .102)
+ip -br addr show eth0                        # expect 192.168.10.101/24  (Follower = .102)
 ```
 Do this from a monitor or over WiFi — changing `eth0` drops an `eth0` SSH session.
 
 ### 4. Passwordless SSH from the controller
 
 ```bash
-# on the controller (fystyk):
+# on the controller:
 ls ~/.ssh/id_*.pub || ssh-keygen -t ed25519     # make a key if you have none
 ssh-copy-id vruser@192.168.10.101               # enter the Pi password once
 ssh vruser@192.168.10.101 hostname              # prints the hostname, no password
@@ -166,10 +166,10 @@ sudo -n true && echo "passwordless sudo OK"
 
 ---
 
-## Cheddar (Leader Pi) Setup
+## Leader Pi Setup
 
 Everything below is what the setup UI **Install** does automatically; do it by hand only
-for a fresh SD card. cheddar owns the behavioral devices: lick sensor, reward,
+for a fresh SD card. The Leader owns the behavioral devices: lick sensor, reward,
 photodiode (Teensy-fed sync pulse), camera, and the running-wheel encoder.
 
 ### Conda environment
@@ -228,7 +228,7 @@ device in `rigs/cheese.yaml`.
 ### SSD mount for video
 
 Camera video (H.264) writes to the rig yaml's `data.video_dir`. The default is
-`/media/vruser/ssd/video` (an external SSD, because cheddar's SD card is too full to
+`/media/vruser/ssd/video` (an external SSD, because the leader's SD card is too full to
 hold video); the current `rigs/cheese.yaml` points it at `/home/vruser/data` instead.
 If you use the SSD:
 
@@ -252,9 +252,9 @@ At **Transfer** the sidecars are folded into one consolidated `<session_id>.h5`
 
 ---
 
-## Mozzarella (Follower Pi) Setup
+## Follower Pi Setup
 
-mozzarella runs only the pygame display (over the DLP projector). Install handles the
+The Follower runs only the pygame display (over the DLP projector). Install handles the
 packages, code, and systemd service; the manual steps here are for a fresh card.
 
 ### System packages (X11)
@@ -416,8 +416,8 @@ The Pis reach NTP over their WiFi (`wlan0`); the wired experiment switch has no 
 ```
 Gigabit switch (experiment traffic)
 ├── Controller        192.168.10.1   (wired NIC; any .x except .101/.102)
-├── cheddar           192.168.10.101 (eth0 static) — Leader
-└── mozzarella        192.168.10.102 (eth0 static) — Follower
+├── Leader            192.168.10.101 (eth0 static)
+└── Follower          192.168.10.102 (eth0 static)
 
 Both Pis also on institute WiFi (wlan0) for internet/NTP; WiFi stays the default route.
 ```
@@ -435,7 +435,7 @@ The per-Pi onboarding steps (SSH, WiFi, static IP, sudo) live in
 
 ## Dependency Summary
 
-| Package | Controller | Leader (cheddar) | Follower (mozzarella) |
+| Package | Controller | Leader | Follower |
 |---|---|---|---|
 | Python | 3.11 | match system (3.13 trixie) | match system (3.13 trixie) |
 | flask | yes | yes | yes |
@@ -472,8 +472,8 @@ No longer needed: `paramiko`, `pyzmq`, `psychopy`, `pyglet`, `psychtoolbox`, `li
 | SSD not mounting | check `lsblk`, verify `/etc/fstab` entry |
 | Warp map not found | Generate Warp in the setup UI (built on the controller, scp'd to `~/rig/calibration/warp_map.npz`) |
 | Pi can't reach the internet to install | Pis are firewall-gated off `public` WiFi; run an HTTP proxy on the controller (`python -m proxy --hostname 192.168.10.1 --port 8899`) and `export HTTPS_PROXY=http://192.168.10.1:8899` on the Pi |
-| cheddar SD card full | tiny ~8 GB card; reclaim with `conda clean -a -y` and `pip cache purge` |
-| Port 5000 taken on Mac | disable AirPlay Receiver (System Settings -> General -> AirDrop & Handoff) |
+| Leader SD card full | tiny ~8 GB card; reclaim with `conda clean -a -y` and `pip cache purge` |
+| Port 5000 taken on a macOS controller | disable AirPlay Receiver (System Settings -> General -> AirDrop & Handoff) |
 | conda not in SSH PATH | `source ~/miniforge3/etc/profile.d/conda.sh && conda activate rig` |
 </content>
 </invoke>

@@ -135,7 +135,11 @@ class Photodiode(Device):
     def _on_edge(self, chip, gpio, level, tick):
         if not self._active:
             return
-        if level == 2:      # lgpio watchdog/timeout, not a real edge
+        # The line is claimed BOTH_EDGES (the raw scope needs falling edges too), so this
+        # RISING-only detected stream must drop non-rising deliveries itself: level 0 = falling
+        # (the trailing edge of the Teensy's ~2 ms pulse — logging it double-counts every flash),
+        # level 2 = lgpio watchdog/timeout. Keep only level 1 = the rising edge = one per sync flash.
+        if level != 1:
             return
         # No hold-off/glitch filtering here — the Teensy already delivered a clean, single pulse.
         # Timebase is anchored in reset_trial (main thread); fall back to the first pulse if that

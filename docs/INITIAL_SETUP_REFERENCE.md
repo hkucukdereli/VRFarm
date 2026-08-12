@@ -2,12 +2,12 @@
 
 **Project:** VRFarm
 **Last updated:** 2026-08-11
-**Current rig:** cheese (cheddar = Leader, mozzarella = Follower)
+**Current rig:** cheese (Leader, Follower)
 
 This is the first-time **rig bring-up** reference: hardware, network/IPs, OS, conda
 envs, package installs, pigpiod, projector startup, systemd service, SSH keys, gotchas.
-For the **controller** machine (the Mac/Linux box running the UIs) the authoritative doc
-is `docs/CONTROLLER_SETUP.md`; the Mac section here is a short version of it.
+For the **controller** machine (the macOS/Linux box running the UIs) the authoritative doc
+is `docs/CONTROLLER_SETUP.md`; the Controller section here is a short version of it.
 
 Most of the per-Pi package/service work below is automated by the setup UI's **Install**
 button (`setup/app.py` -> `api_install_pi`). Do it by hand only when reflashing an SD card
@@ -19,9 +19,9 @@ or debugging Install — the manual steps document what Install does under the h
 
 | Machine | Role | Conda env | IP |
 |---|---|---|---|
-| Controller (Mac/Ubuntu) | UI + data storage | `vrfarm` | 192.168.10.1 |
-| cheddar | Leader Pi — imperative trial loop + GPIO devices | `rig` | 192.168.10.101 |
-| mozzarella | Follower Pi — pygame display | `rig` | 192.168.10.102 |
+| Controller (macOS/Ubuntu) | UI + data storage | `vrfarm` | 192.168.10.1 |
+| Leader | Leader Pi — imperative trial loop + GPIO devices | `rig` | 192.168.10.101 |
+| Follower | Follower Pi — pygame display | `rig` | 192.168.10.102 |
 
 Both Pis run **Debian 13 (trixie)**, user `vruser`, conda base at `~/miniforge3`.
 The `rig` env Python **must match the system Python** (3.13 on trixie) — see the
@@ -33,7 +33,7 @@ conda note under each Pi.
 
 ---
 
-## Mac / Controller Setup
+## Controller Setup
 
 Short version; full detail (Ubuntu netplan, firewall, `$VRFARM_DATA_DIR`) is in
 `docs/CONTROLLER_SETUP.md`.
@@ -73,12 +73,12 @@ controller path in the rig yaml (see `docs/CONTROLLER_SETUP.md` §3b).
 
 ```bash
 ssh-keygen -t ed25519          # skip if you already have a key
-ssh-copy-id vruser@192.168.10.101   # cheddar
-ssh-copy-id vruser@192.168.10.102   # mozzarella
+ssh-copy-id vruser@192.168.10.101   # leader
+ssh-copy-id vruser@192.168.10.102   # follower
 
 # Test — seeds known_hosts, which the non-interactive setup UI needs
-ssh vruser@192.168.10.101 echo "cheddar OK"
-ssh vruser@192.168.10.102 echo "mozzarella OK"
+ssh vruser@192.168.10.101 echo "leader OK"
+ssh vruser@192.168.10.102 echo "follower OK"
 ```
 
 The experiment-run UI (`app/app.py`) uses no SSH — only the setup UI does (deploy,
@@ -86,10 +86,10 @@ warp push, reboot, calibrate). Every new controller must add **its own** key to 
 
 ---
 
-## Cheddar (Leader Pi) Setup
+## Leader Pi Setup
 
 Everything below is what the setup UI **Install** does automatically; do it by hand only
-for a fresh SD card. cheddar owns the behavioral devices: lick sensor, reward,
+for a fresh SD card. The Leader owns the behavioral devices: lick sensor, reward,
 photodiode (Teensy-fed sync pulse), camera, and the running-wheel encoder.
 
 ### Conda environment
@@ -191,7 +191,7 @@ sudo systemctl start pigpiod
 ### SSD mount for video
 
 Camera video (H.264) writes to the rig yaml's `data.video_dir`. The default is
-`/media/vruser/ssd/video` (an external SSD, because cheddar's SD card is too full to
+`/media/vruser/ssd/video` (an external SSD, because the Leader's SD card is too full to
 hold video); the current `rigs/cheese.yaml` points it at `/home/vruser/data` instead.
 If you use the SSD:
 
@@ -215,9 +215,9 @@ At **Transfer** the sidecars are folded into one consolidated `<session_id>.h5`
 
 ---
 
-## Mozzarella (Follower Pi) Setup
+## Follower Pi Setup
 
-mozzarella runs only the pygame display (over the DLP projector). Install handles the
+The Follower runs only the pygame display (over the DLP projector). Install handles the
 packages, code, and systemd service; the manual steps here are for a fresh card.
 
 ### System packages (X11)
@@ -380,8 +380,8 @@ The Pis reach NTP over their WiFi (`wlan0`); the wired experiment switch has no 
 ```
 Gigabit switch (experiment traffic)
 ├── Controller        192.168.10.1   (wired NIC; any .x except .101/.102)
-├── cheddar           192.168.10.101 (eth0 static) — Leader
-└── mozzarella        192.168.10.102 (eth0 static) — Follower
+├── Leader            192.168.10.101 (eth0 static)
+└── Follower          192.168.10.102 (eth0 static)
 
 Both Pis also on institute WiFi (wlan0) for internet/NTP; WiFi stays the default route.
 ```
@@ -399,8 +399,8 @@ experiment traffic (low-latency UDP + REST). Each Pi keeps WiFi (`wlan0`) as its
 route to the internet; eth0 gets a **static** address with **no gateway**, so it never
 competes for the default route. Do this once per new or reflashed Pi, before Install/Deploy.
 
-> **Which IP:** a replacement Leader takes cheddar's `192.168.10.101`, a replacement Follower
-> takes mozzarella's `192.168.10.102`. Adding an *extra* Pi → next free `.10x` (`.1` is the
+> **Which IP:** a replacement Leader takes `192.168.10.101`, a replacement Follower
+> takes `192.168.10.102`. Adding an *extra* Pi → next free `.10x` (`.1` is the
 > controller). Keep the `pis:` list in `rigs/cheese.yaml` in sync.
 
 1. **Flash + first boot (headless).** Flash Debian 13 (trixie) with Raspberry Pi Imager; in
@@ -414,7 +414,7 @@ competes for the default route. Do this once per new or reflashed Pi, before Ins
    ```
 4. **Hostname** (skip if you set it at flash time):
    ```bash
-   sudo hostnamectl set-hostname cheddar        # or mozzarella / a new name
+   sudo hostnamectl set-hostname leader        # or follower / a new name
    ```
 5. **Static IP on eth0.** trixie images configure networking one of two ways — check which,
    because it changes *where* you set the address:
@@ -477,7 +477,7 @@ competes for the default route. Do this once per new or reflashed Pi, before Ins
 
 ## Dependency Summary
 
-| Package | Controller | Leader (cheddar) | Follower (mozzarella) |
+| Package | Controller | Leader | Follower |
 |---|---|---|---|
 | Python | 3.11 | match system (3.13 trixie) | match system (3.13 trixie) |
 | flask | yes | yes | yes |
@@ -515,8 +515,8 @@ No longer needed: `paramiko`, `pyzmq`, `psychopy`, `pyglet`, `psychtoolbox`, `li
 | SSD not mounting | check `lsblk`, verify `/etc/fstab` entry |
 | Warp map not found | Generate Warp in the setup UI (built on the controller, scp'd to `~/rig/calibration/warp_map.npz`) |
 | Pi can't reach the internet to install | Pis are firewall-gated off `public` WiFi; run an HTTP proxy on the controller (`python -m proxy --hostname 192.168.10.1 --port 8899`) and `export HTTPS_PROXY=http://192.168.10.1:8899` on the Pi |
-| cheddar SD card full | tiny ~8 GB card; reclaim with `conda clean -a -y` and `pip cache purge` |
-| Port 5000 taken on Mac | disable AirPlay Receiver (System Settings -> General -> AirDrop & Handoff) |
+| Leader SD card full | tiny ~8 GB card; reclaim with `conda clean -a -y` and `pip cache purge` |
+| Port 5000 taken on macOS | disable AirPlay Receiver (System Settings -> General -> AirDrop & Handoff) |
 | conda not in SSH PATH | `source ~/miniforge3/etc/profile.d/conda.sh && conda activate rig` |
 </content>
 </invoke>

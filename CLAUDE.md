@@ -8,13 +8,13 @@ Read this entire file before touching anything.
 ## What is VRFarm
 
 A behavioral neuroscience experiment system for mice. Two Raspberry Pi 4Bs
-per rig (Leader + Follower), controlled from a Mac via Flask web UIs.
+per rig (Leader + Follower), controlled from the Controller via Flask web UIs.
 Paradigms are tuned via task YAML (stimulus/reward/session/adaptive params); the trial
 engine is the imperative loop in engine/leader.py. Devices are pluggable.
 Named after cheese.
 
-**Current rig:** cheese (cheddar = Leader, mozzarella = Follower)
-**Mac:** balthazar (hakan@balthazar), conda env `vrfarm`, Python 3.11
+**Current rig:** cheese (Leader, Follower)
+**Controller:** the controller (hakan@the controller), conda env `vrfarm`, Python 3.11
 **Both Pis:** Debian 13 (trixie), conda env `rig`, user `vruser`. The `rig` env
 Python **must match the system Python** (3.13 on trixie) — the camera bindings
 (`python3-libcamera`/`python3-picamera2`) are apt-built for the system Python and are
@@ -26,7 +26,7 @@ symlinked into the env, so a version mismatch breaks `import picamera2`. Create 
 ## Project structure
 
 ```
-~/VRFarm/                              <- project root on Mac
+~/VRFarm/                              <- project root on the Controller
 ├── config/
 │   └── go_nogo_v1.yaml               <- task/paradigm config (stimulus/reward/session/adaptive)
 ├── rigs/
@@ -72,7 +72,7 @@ symlinked into the env, so a version mismatch breaks `import picamera2`. Create 
     └── AUDIT_20260331.md
 ```
 
-**On cheddar (Leader Pi, 192.168.10.101):**
+**On the Leader Pi (192.168.10.101):**
 ```
 ~/rig/                                 <- engine/leader.py, devices/*.py, shared/*.py
 ~/rig/pi_api/api.py                    <- REST API
@@ -80,7 +80,7 @@ symlinked into the env, so a version mismatch breaks `import picamera2`. Create 
 /media/vruser/ssd/video/               <- video recordings (SSD)
 ```
 
-**On mozzarella (Follower Pi, 192.168.10.102):**
+**On the Follower Pi (192.168.10.102):**
 ```
 ~/rig/                                 <- engine/follower.py, devices/display.py
 ~/rig/pi_api/api.py                    <- REST API
@@ -93,33 +93,33 @@ symlinked into the env, so a version mismatch breaks `import picamera2`. Create 
 
 ```
 Gigabit ethernet switch (experiment traffic)
-├── Mac balthazar     192.168.10.1   (en5)
-├── cheddar           192.168.10.101 (eth0 static) — Leader
-└── mozzarella        192.168.10.102 (eth0 static) — Follower
+├── the Controller    192.168.10.1   (en5)
+├── Leader            192.168.10.101 (eth0 static)
+└── Follower          192.168.10.102 (eth0 static)
 
 All Pis also on institute WiFi (wlan0) for internet/NTP.
 ```
 
-SSH keys: Mac `~/.ssh/id_rsa.pub` copied to both Pis. Passwordless SSH works.
+SSH keys: the Controller `~/.ssh/id_rsa.pub` copied to both Pis. Passwordless SSH works.
 
 ---
 
 ## Architecture
 
 ```
-Mac (app/app.py Flask, localhost:5000)
+the Controller (app/app.py Flask, localhost:5000)
   ↔ REST API (HTTP, port 5080) for deploy, config, start/stop, data transfer
   ← UDP :5571 events from Leader (trial, lick, reward, stim, sync)
   → UDP :5572 commands to Leader (START, STOP, REWARD)
 
-cheddar — Leader (engine/leader.py)
+Leader (engine/leader.py)
   - Imperative trial loop (ITI → pre-stim → stim → reward-delay → response window → post-stim)
   - All GPIO devices: lick sensor, reward, camera, photodiode
-  - HDF5 data saved locally, transferred to Mac after session
+  - HDF5 data saved locally, transferred to the Controller after session
   → UDP :5575 display commands to Follower (SHOW, QUIT)
-  → UDP :5571 events to Mac
+  → UDP :5571 events to the Controller
 
-mozzarella — Follower (engine/follower.py)
+Follower (engine/follower.py)
   - pygame display (HDMI/DPI)
   - Loads pre-generated stim NPZ at session start
   - On SHOW: look up trial params, render, wait duration, blank
@@ -171,14 +171,14 @@ from `devices/base.py` and declares:
 Setup -> Connect -> **Deploy** -> Running -> Ended -> Transfer
 
 - **Deploy** is required before Go: uploads configs, generates stims on Leader,
-  pushes NPZ to Follower, renders thumbnails on Mac.
+  pushes NPZ to Follower, renders thumbnails on the Controller.
 - Any parameter change in UI invalidates deploy (Go grays out).
 
 ---
 
 ## Packages
 
-**Mac (conda env vrfarm):**
+**Controller (conda env vrfarm):**
 Conda base at `/opt/homebrew/Caskroom/miniforge/base`.
 ```bash
 conda activate vrfarm
@@ -186,13 +186,13 @@ pip install flask requests scipy matplotlib numpy h5py pyyaml
 ```
 No longer needed: `paramiko`, `pyzmq` (replaced by REST API + UDP).
 
-**Cheddar / Leader (conda env rig):**
+**Leader (conda env rig):**
 ```bash
 pip install flask pyyaml numpy scipy h5py smbus2 pigpio
 ```
 Optional: `picamera2` (camera, enable in rig JSON)
 
-**Mozzarella / Follower (conda env rig):**
+**Follower (conda env rig):**
 ```bash
 pip install flask pyyaml numpy pygame
 ```
@@ -217,16 +217,16 @@ python setup/app.py        # rig setup UI, localhost:4999
 
 - `conda` not in PATH for non-interactive SSH — use
   `source ~/miniforge3/etc/profile.d/conda.sh && conda activate rig`
-- macOS port 5000 taken by AirPlay Receiver — disable in System Settings
+- On a macOS controller, port 5000 is taken by AirPlay Receiver — disable in System Settings
   -> General -> AirDrop & Handoff -> AirPlay Receiver off
 - pigpio `sudo make install` fails on its Python step (distutils missing) —
   harmless, C library + `pigpiod` install fine; use `pip install pigpio` for the client
-- cheddar is on a tiny ~8 GB SD card (often >90% full) — reclaim with
+- The leader is on a tiny ~8 GB SD card (often >90% full) — reclaim with
   `conda clean -a -y` / `pip cache purge`; a larger card is needed for sustained use
 - Pis are firewall-gated off the `public` WiFi (associated but no egress). To install
-  packages, run an HTTP proxy on the Mac (`python -m proxy --hostname 192.168.10.1
+  packages, run an HTTP proxy on the Controller (`python -m proxy --hostname 192.168.10.1
   --port 8899`) and set `HTTPS_PROXY=http://192.168.10.1:8899` on the Pi
-- Projector startup sequence needed on mozzarella before display:
+- Projector startup sequence needed on the follower before display:
   `~/rig/start_projector.sh` (sets GPIO ALT2, GPIO25 high, starts X :0)
 - Warp map not yet generated — stim_generator uses linear approximation fallback
 

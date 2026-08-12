@@ -1,6 +1,6 @@
 # Experiment Setup and Running Protocol
 
-**Rig:** cheddar (Leader Pi) + mozzarella (Follower Pi) + Mac/Ubuntu (UI)
+**Rig:** Leader Pi + Follower Pi + Controller/Ubuntu (UI)
 **Last updated:** 2026-08-03
 
 ---
@@ -13,11 +13,11 @@ Controller (app/app.py Flask, localhost:5000)
   ← UDP :5571 — events from Leader (trial, lick, reward, stim, sync)
   → UDP :5572 — commands to Leader (START, STOP, REWARD)
 
-cheddar — Leader (engine/leader.py)
+Leader (engine/leader.py)
   - Imperative trial loop + all GPIO devices (lick, reward, camera, photodiode)
   → UDP :5575 — display commands to Follower
 
-mozzarella — Follower (engine/follower.py)
+Follower (engine/follower.py)
   - pygame display, renders from pre-generated stim NPZ
 ```
 
@@ -48,12 +48,12 @@ Required for initial Pi setup. After that, the REST API is used.
 
 ```bash
 ssh-keygen -t ed25519   # if you don't have a key yet
-ssh-copy-id vruser@192.168.10.101   # cheddar
-ssh-copy-id vruser@192.168.10.102   # mozzarella
+ssh-copy-id vruser@192.168.10.101   # leader
+ssh-copy-id vruser@192.168.10.102   # follower
 
 # Test:
-ssh vruser@192.168.10.101 echo "cheddar OK"
-ssh vruser@192.168.10.102 echo "mozzarella OK"
+ssh vruser@192.168.10.101 echo "leader OK"
+ssh vruser@192.168.10.102 echo "follower OK"
 ```
 
 ### 3. Install dependencies
@@ -63,13 +63,13 @@ ssh vruser@192.168.10.102 echo "mozzarella OK"
 pip install flask requests scipy matplotlib numpy h5py pyyaml
 ```
 
-**cheddar / Leader** (`conda activate rig`):
+**Leader** (`conda activate rig`):
 ```bash
 pip install flask pyyaml numpy scipy h5py smbus2 pigpio
 ```
 Optional: `picamera2` (camera, enable in rig config).
 
-**mozzarella / Follower** (`conda activate rig`):
+**Follower** (`conda activate rig`):
 ```bash
 pip install flask pyyaml numpy pygame
 ```
@@ -93,14 +93,14 @@ Deploy code to each Pi and install the `pi_api/vrfarm.service` systemd unit
 (`restart=always`), so the REST API on port 5080 comes up on boot. (Code is also
 re-uploaded automatically on every **Deploy** in the experiment UI — see below.)
 
-### 5. SSD for video (cheddar, optional)
+### 5. SSD for video (Leader, optional)
 
 Camera video is written to the path in the rig config (`data.video_dir`). Point it at a
 mounted SSD when recording sustained sessions — the Leader's SD card is too small to hold
 video.
 
 ```bash
-# On cheddar:
+# On the leader:
 sudo mkdir -p /media/vruser/ssd
 sudo mount /dev/sda1 /media/vruser/ssd
 # Auto-mount:
@@ -129,7 +129,7 @@ the front), which the geometry model accounts for.
 - [ ] Mouse weighed and recorded
 - [ ] Room lights set to experiment condition
 
-### 2. Confirm pigpiod on cheddar
+### 2. Confirm pigpiod on the leader
 
 `pigpiod` runs as a systemd service. Check it:
 ```bash
@@ -363,12 +363,12 @@ Lick-to-reward is on the same Pi (Leader), so latency is <1ms (no network hop).
 - Check pigpiod is running: `ssh vruser@192.168.10.101 pgrep pigpiod`
 
 **Display not showing stimulus:**
-- Check the projector is on and connected to mozzarella
+- Check the projector is on and connected to the follower
 - Run the projector startup sequence: `~/rig/start_projector.sh`
 - Check the Follower process: `curl http://192.168.10.102:5080/api/status`
 
 **Video has dropped frames / no file:**
-- Check the SSD is mounted: `df -h` on cheddar, and that `data.video_dir` points to it
+- Check the SSD is mounted: `df -h` on the leader, and that `data.video_dir` points to it
 - Confirm the **Camera** save checkbox was checked at GO (unchecked = preview only)
 - Reduce the frame rate in the rig config (`devices.camera.fps`)
 

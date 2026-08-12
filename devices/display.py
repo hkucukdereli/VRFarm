@@ -433,19 +433,19 @@ class Display(Device):
         return (x, y, s, s)
 
     def _draw_sync_border(self, on: bool):
-        """Photodiode sync: when `on`, draw a SINGLE pure-red square flush in the configured
-        panel corner (sync_corner, default top-left), sized sync_size_px but never larger
-        than the dead band OUTSIDE the usable-area boundary marked in geometry calibration
-        (frame_x inset, symmetric left/right). It lives entirely off
-        the visible screen, and the visible stimulus/background is green+blue only (R=0),
-        so the red pulse never reaches the mouse's visual field. When off, nothing is drawn
-        — the field surfaces already leave off-screen pixels black, so the photodiode sees
-        a clean red-only pulse (see _show_synced: ON every Nth frame). No-op on the flat
-        fallback (no warp -> no boundary info)."""
+        """Photodiode sync: when `on`, draw a SINGLE pure-red square in the configured panel
+        corner (sync_corner, default top-left). WITH a warp loaded the square is capped to the
+        calibrated off-screen dead band (frame_x, from the warp's valid_map) so it never overlaps
+        the visible screen and the mouse never sees it; the visible stimulus/background is
+        green+blue only (R=0), a second layer of safety. WITHOUT a warp it falls back to a plain
+        corner square (the same rect the setup flash test uses) so photodiode sync still fires
+        during a run before a warp exists — note the pre-warp square may sit inside the visible
+        area, so generate a warp map for clean off-screen placement. When off, nothing is drawn,
+        so the photodiode sees a clean red-only pulse (see _show_synced: ON every Nth frame)."""
         import pygame
-        if self._screen is None or self._warp is None or not on:
+        if self._screen is None or not on:
             return
-        rect = self._sync_patch_rect()
+        rect = self._sync_test_rect()   # warp-derived dead-band rect, or the pre-warp corner fallback
         if rect is not None:
             self._screen.fill(self._sync_rgb(), pygame.Rect(*rect))
 

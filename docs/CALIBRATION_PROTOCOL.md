@@ -1,8 +1,8 @@
 # Rig Calibration Protocol
 
-**Rig:** cheese — display on Mozzarella (RPi4 + DLP **rear-projector**) + parabolic screen; reward valve on Cheddar (Leader)
+**Rig:** cheese — display on the Follower (RPi4 + DLP **rear-projector**) + parabolic screen; reward valve on the Leader
 **Last updated:** 2026-08-03
-**Files:** `display_calibration/` in the repo (on the controller); `~/rig/calibration/` on mozzarella
+**Files:** `display_calibration/` in the repo (on the controller); `~/rig/calibration/` on the follower
 
 ---
 
@@ -32,13 +32,13 @@ The parabolic screen is curved, so a flat image from the projector produces dist
 
 ### Where it runs
 
-The warp is **ray-traced on the controller** (Mac/Ubuntu, the miniforge `vrfarm` env has numpy/scipy/yaml/matplotlib) and the resulting `warp_map.npz` is deployed to both Pis — the Leader generates stimuli from it (`shared/stim_generator.py`), the Follower renders through it (`devices/display.py`). The *geometry* itself is calibrated interactively **on mozzarella** with the projector running.
+The warp is **ray-traced on the controller** (Mac/Ubuntu, the miniforge `vrfarm` env has numpy/scipy/yaml/matplotlib) and the resulting `warp_map.npz` is deployed to both Pis — the Leader generates stimuli from it (`shared/stim_generator.py`), the Follower renders through it (`devices/display.py`). The *geometry* itself is calibrated interactively **on the follower** with the projector running.
 
 ### Prerequisites
 
 - Projector is mounted in its final rear position and warmed up
 - Screen and mouse platform are in their final positions
-- Projector X is up on mozzarella (`~/rig/start_projector.sh`)
+- Projector X is up on the follower (`~/rig/start_projector.sh`)
 
 ### Step 1 — Calibrate the geometry (landmark registration)
 
@@ -82,7 +82,7 @@ The console prints **visible-screen coverage** (% of pixels the warp fills); ver
 
 ### Step 3 — Visual validation on the projector
 
-Run on mozzarella with the projector on (`display_calibration/validate_calibration_pygame.py` — pygame, since the follower has no PsychoPy; the old `validate_calibration.py` used PsychoPy and never ran on the follower):
+Run on the follower with the projector on (`display_calibration/validate_calibration_pygame.py` — pygame, since the follower has no PsychoPy; the old `validate_calibration.py` used PsychoPy and never ran on the follower):
 
 ```bash
 DISPLAY=:0 ~/miniforge3/envs/rig/bin/python validate_calibration_pygame.py \
@@ -168,7 +168,7 @@ Because the correction rides the normal warp pipeline, it **survives Regenerate 
 
 > **Full-field, per-column correction.** The correction is applied **per pixel at render time** to the **whole field — background, stimulus, and the ITI blank alike** (all pixels in an azimuth column get the same factor `C(az) = min(gain)/gain`; altitude doesn't matter). Because the background and stimulus scale together, this equalizes **absolute delivered luminance** *and* keeps **Weber/Michelson contrast** uniform — you get both. The only cost is peak brightness: **Bg = 1 is the brightest *uniform* level**, limited by the dimmest (outermost) azimuth. Set Intensity = **none** only if you want the raw, non-uniform projector output.
 
-### Legacy CLI (optional, on mozzarella)
+### Legacy CLI (optional, on the follower)
 
 The old standalone scripts still exist: `display_test_patches.py` (PsychoPy patch stepper, hand-typed cd/m²) → `fit_luminance_correction.py`. The fit accepts either the neutral `reading` field or the legacy `luminance_cdm2`. The setup-UI flow is preferred — no PsychoPy, automated meter, and it deploys for you.
 
@@ -285,7 +285,7 @@ Reward calibration is **not** a file here — it lives in the rig JSON under `de
 python compute_warp_map.py --validate                       # + validation plot
 python compute_warp_map.py --geo rig_geometry.yaml --lum-mode theoretical
 
-# On-projector visual validation (on mozzarella, projector X up):
+# On-projector visual validation (on the follower, projector X up):
 DISPLAY=:0 ~/miniforge3/envs/rig/bin/python validate_calibration_pygame.py \
     --warp ~/rig/calibration/warp_map.npz [--flip-h] [--flip-v]
 
@@ -296,7 +296,7 @@ DISPLAY=:0 ~/miniforge3/envs/rig/bin/python validate_calibration_pygame.py \
 # Rebuild the warp with a chosen luminance mode (what the UI does under the hood):
 python compute_warp_map.py --lum-mode empirical             # or theoretical / none
 
-# Legacy CLI (on mozzarella): measure with a photometer, then fit:
+# Legacy CLI (on the follower): measure with a photometer, then fit:
 DISPLAY=:0 python display_test_patches.py
 python fit_luminance_correction.py [luminance_measurements_YYYY-MM-DD.yaml]
 

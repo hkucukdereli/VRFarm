@@ -19,8 +19,8 @@ machine-specific baked into the rig config; any host on the rig subnet can drive
 | Python env `vrfarm` | flask requests scipy matplotlib numpy h5py pyyaml |
 | Passwordless SSH to both Pis | only for the setup UI (deploy/warp/calibrate) |
 
-The Pis are static: **cheddar `192.168.10.101`** (Leader), **mozzarella `192.168.10.102`**
-(Follower), both user `vruser`.
+The Pis are static: **Leader `192.168.10.101`**, **Follower `192.168.10.102`**,
+both user `vruser`.
 
 ---
 
@@ -69,8 +69,8 @@ System Settings -> Network -> the Ethernet/adapter -> Details -> TCP/IP -> Confi
 ```bash
 ip -4 addr show <iface>       # expect inet 192.168.10.1/24   (macOS: ifconfig)
 ip route                      # default route must be via WiFi/internet, NOT the wired NIC
-ping -c3 192.168.10.101       # cheddar
-ping -c3 192.168.10.102       # mozzarella
+ping -c3 192.168.10.101       # leader
+ping -c3 192.168.10.102       # follower
 ```
 
 ### Firewall

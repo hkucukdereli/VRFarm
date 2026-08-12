@@ -433,21 +433,29 @@ class Display(Device):
         return (x, y, s, s)
 
     def _draw_sync_border(self, on: bool):
-        """Photodiode sync: when `on`, draw a SINGLE pure-red square in the configured panel
-        corner (sync_corner, default top-left). WITH a warp loaded the square is capped to the
-        calibrated off-screen dead band (frame_x, from the warp's valid_map) so it never overlaps
-        the visible screen and the mouse never sees it; the visible stimulus/background is
-        green+blue only (R=0), a second layer of safety. WITHOUT a warp it falls back to a plain
-        corner square (the same rect the setup flash test uses) so photodiode sync still fires
-        during a run before a warp exists — note the pre-warp square may sit inside the visible
-        area, so generate a warp map for clean off-screen placement. When off, nothing is drawn,
-        so the photodiode sees a clean red-only pulse (see _show_synced: ON every Nth frame)."""
+        """Photodiode sync: paint the pure-red sync square in the configured corner on `on` frames.
+        WITH a warp the square is capped to the calibrated off-screen dead band (frame_x from the
+        warp's valid_map): that band is already BLACK on off-frames, so we only paint red when on —
+        the pulse is red-on-black (detectable) and off-screen (the mouse never sees it).
+        WITHOUT a warp there is no dark region — the whole panel shows the green+blue stimulus field,
+        and red merely REPLACING bright cyan is ~no brightness change, so a broadband photodiode
+        won't trigger (this is why the setup flash test, which clears to black, works but a flat run
+        didn't). There we force the corner patch red-on-BLACK every frame (a small black square in the
+        display corner, where the photodiode is taped) so the pulse is a real brightness spike. That
+        patch IS visible to the mouse — generate a warp for a true off-screen, invisible sync patch."""
         import pygame
-        if self._screen is None or not on:
+        if self._screen is None:
             return
-        rect = self._sync_test_rect()   # warp-derived dead-band rect, or the pre-warp corner fallback
-        if rect is not None:
-            self._screen.fill(self._sync_rgb(), pygame.Rect(*rect))
+        if self._warp is not None:
+            if not on:
+                return                      # dead band is already black; only flash red
+            rect = self._sync_patch_rect()
+            if rect is not None:
+                self._screen.fill(self._sync_rgb(), pygame.Rect(*rect))
+        else:
+            rect = self._sync_test_rect()   # pre-warp corner fallback (same rect as the setup test)
+            if rect is not None:            # red on flash frames, black otherwise -> detectable edge
+                self._screen.fill(self._sync_rgb() if on else (0, 0, 0), pygame.Rect(*rect))
 
     def _sync_patch_rect(self):
         """Cached (x, y, w, h) of the sync square in the configured corner. The size is

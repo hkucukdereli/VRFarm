@@ -730,7 +730,8 @@ function onCamExpChange() {
   // the model to the honorable range so it matches what the sensor runs and what's saved.
   const maxMs = 1000 / (rig.devices.camera.fps || 50);
   if (exp) {
-    const v = Math.min(Math.max(parseFloat(exp.value) || 10, 0.1), maxMs);
+    const raw = parseFloat(exp.value);   // a typed 0 must clamp to the 0.1 floor, not reset to 10
+    const v = Math.min(Math.max(isNaN(raw) ? 10 : raw, 0.1), maxMs);
     exp.value = v;
     rig.devices.camera.exposure_ms = v;
   }

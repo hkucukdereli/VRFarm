@@ -66,6 +66,17 @@ def _vlen_rows(ds):
     return [np.asarray(ds[i]) for i in range(len(ds))]
 
 
+def _to_n(arr, n, fill):
+    """Fit an optional per-trial device column to n trials — pad with `fill` or truncate. A
+    session SIGKILLed between the core-trial write and a device write can leave e.g. /reward at
+    n-1 while /trials is n; without this, `df[col] = arr` raises a pandas length error and the
+    whole (recoverable) session fails to load. Returns a plain list so pandas infers the dtype."""
+    arr = list(arr)
+    if len(arr) < n:
+        arr = arr + [fill] * (n - len(arr))
+    return arr[:n]
+
+
 def _session_h5(path) -> Path:
     """Resolve a session dir or a .h5 path to the .h5 file."""
     p = Path(path)
@@ -147,15 +158,26 @@ class Session:
 
     # build --------------------------------------------------------------------
     def _ident(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Prepend session_id / subject_id so tables from different sessions stack."""
-        if len(df):
-            df.insert(0, "subject_id", self.subject_id)
-            df.insert(0, "session_id", self.session_id)
+        """Prepend session_id / subject_id so tables from different sessions stack. Inserted even
+        on an empty table, so every table has the same schema (a 0-lick session still has the id
+        columns) and single-session code can rely on them."""
+        df.insert(0, "subject_id", self.subject_id)
+        df.insert(0, "session_id", self.session_id)
         return df
 
     @cached_property
     def _tables(self) -> dict:
         with h5py.File(self.h5_path, "r") as f:
+            # Enforce the "only format_version 2" contract instead of silently falling back to
+            # root for a legacy/flat file (which would sweep stray root datasets into the trial
+            # table). A consolidated v2 file carries the attr AND a /trials group (see
+            # shared.consolidate); require at least one so a partial/legacy file fails loudly.
+            if int(f.attrs.get("format_version", 0)) != 2 and "trials" not in f:
+                raise ValueError(
+                    f"{self.h5_path.name}: not a format_version 2 file (no /trials group, "
+                    f"format_version={f.attrs.get('format_version', 'unset')}). Consolidation "
+                    "runs automatically at session end — re-transfer, or run shared.consolidate "
+                    "on this session.")
             grp = f["trials"] if "trials" in f else f
             n = len(grp["trial_num"]) if "trial_num" in grp else 0
 
@@ -185,18 +207,18 @@ class Session:
             if "reward" in f:
                 r = f["reward"]
                 if "reward_t" in r:
-                    df["reward_t"] = r["reward_t"][:]
+                    df["reward_t"] = _to_n(r["reward_t"][:], n, np.nan)
                 if "reward_amount_ul" in r:
-                    df["reward_ul"] = r["reward_amount_ul"][:]
+                    df["reward_ul"] = _to_n(r["reward_amount_ul"][:], n, np.nan)
                 if "reward_pavlovian" in r:
-                    df["pavlovian"] = r["reward_pavlovian"][:].astype(bool)
+                    df["pavlovian"] = np.asarray(_to_n(r["reward_pavlovian"][:], n, False), bool)
 
             # merge /lick summaries + collect long-form rows
             lick_rows = []
             if "lick" in f:
                 lk = f["lick"]
                 if "iti_lick_count" in lk:
-                    df["iti_lick_count"] = lk["iti_lick_count"][:]
+                    df["iti_lick_count"] = _to_n(lk["iti_lick_count"][:], n, 0)
                 lt = _vlen_rows(lk["lick_times"]) if "lick_times" in lk else [np.array([])] * n
                 it = _vlen_rows(lk["iti_lick_times"]) if "iti_lick_times" in lk else [np.array([])] * n
                 df["n_licks"] = [len(lt[i]) for i in range(n)]
@@ -341,8 +363,15 @@ class Dataset:
         return self.sessions[i]
 
     def add(self, source) -> "Dataset":
-        """Append one or more sessions (dir, glob, path, Session, or an iterable). Chainable."""
-        self.sessions.extend(_iter_sessions(source))
+        """Append one or more sessions (dir, glob, path, Session, or an iterable). Chainable.
+        Sessions already in the collection (same resolved .h5 path) are skipped, so re-adding a
+        directory — or overlapping globs — won't silently double every row."""
+        seen = {s.h5_path for s in self.sessions}
+        for sess in _iter_sessions(source):
+            if sess.h5_path in seen:
+                continue
+            seen.add(sess.h5_path)
+            self.sessions.append(sess)
         return self
 
     def _concat(self, attr: str) -> pd.DataFrame:

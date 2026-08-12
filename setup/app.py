@@ -263,7 +263,7 @@ def api_install_pi():
             # the DPI range (0-21), so no clash with the projector video. Idempotent append; needs a
             # REBOOT to take effect.
             try:
-                overlay = "dtoverlay=i2c-gpio,i2c_gpio_sda=23,i2c_gpio_scl=22,i2c_gpio_delay_us=2"
+                overlay = "dtoverlay=i2c-gpio,bus=22,i2c_gpio_sda=23,i2c_gpio_scl=22,i2c_gpio_delay_us=2"
                 _ssh(ssh_prefix,
                      f"grep -qxF '{overlay}' /boot/firmware/config.txt || "
                      f"echo '{overlay}' | sudo tee -a /boot/firmware/config.txt >/dev/null",

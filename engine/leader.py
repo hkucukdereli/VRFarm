@@ -322,7 +322,13 @@ class Leader:
         # Nested: subject / subject_date / session_id
         subj = self.session["subject_id"]
         subj_date = f"{subj}_{self.session['date']}"
-        data_dir = Path(self.rig["data"]["leader_dir"]) / subj / subj_date / self.session_id
+        leader_dir = (self.rig.get("data", {}) or {}).get("leader_dir")
+        if not leader_dir:
+            # An empty/missing leader_dir would make Path("") == "." and silently write the
+            # session into pi_api's cwd — fall back to a known place with a loud warning instead.
+            leader_dir = str(Path.home() / "data")
+            print(f"WARNING: rig data.leader_dir is empty — writing session to {leader_dir}", flush=True)
+        data_dir = Path(leader_dir).expanduser() / subj / subj_date / self.session_id
         data_dir.mkdir(parents=True, exist_ok=True)
         try:
             import h5py

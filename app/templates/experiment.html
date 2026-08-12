@@ -1486,9 +1486,10 @@ function _pushCamExp() {
   if (!a) return;
   const cam = (config && config.rig && config.rig.devices && config.rig.devices.camera) || {};
   const maxMs = 1000 / (cam.fps || 50);   // exposure (ms) can't exceed the frame period
+  const rawExp = parseFloat(u.value);     // a typed 0 must clamp to the 0.1 floor, not reset to 10
   const body = {
     auto_exposure: a.checked,
-    exposure_ms: Math.min(Math.max(parseFloat(u.value) || 10, 0.1), maxMs),
+    exposure_ms: Math.min(Math.max(isNaN(rawExp) ? 10 : rawExp, 0.1), maxMs),
     gain: Math.min(Math.max(parseFloat(g.value) || 1.0, 1), 16),
   };
   if (u) u.value = body.exposure_ms;   // reflect the clamp back into the field

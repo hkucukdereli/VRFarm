@@ -15,8 +15,11 @@ source ~/miniforge3/etc/profile.d/conda.sh
 conda activate rig
 cd ~/dlp && python3 init_parallel_mode.py
 
-# 4. Kill any existing X server
-pkill -f 'Xorg :0' 2>/dev/null || true
+# 4. Free display :0 — the X server runs as root (started with sudo below), so killing it
+#    needs sudo, and its lock must be cleared, or a re-run dies "Server is already active
+#    for display 0" (the old plain `pkill -f 'Xorg :0'` matched nothing and never freed :0).
+sudo pkill -9 Xorg 2>/dev/null || true
+sudo rm -f /tmp/.X0-lock 2>/dev/null || true
 sleep 1
 
 # 5. Start X11

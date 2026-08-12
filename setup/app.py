@@ -1148,6 +1148,7 @@ def _get_deploy_files(role: str) -> list[tuple[str, str]]:
             # The dlp/ SDK is vendored in this repo but pushed to ~/dlp/ at INSTALL, not Deploy
             # (it's static — see step 5b) — it lives outside ~/rig so it rides scp, not /api/upload.
             ("display_calibration/start_projector.sh", "start_projector.sh"),
+            ("display_calibration/vsync_probe.py", "calibration/vsync_probe.py"),
             ("display_calibration/calib_geo.py", "calibration/calib_geo.py"),
             ("display_calibration/cal_start.sh", "calibration/cal_start.sh"),
             ("display_calibration/cal_stop.sh", "calibration/cal_stop.sh"),

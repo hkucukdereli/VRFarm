@@ -707,7 +707,7 @@ function _camApply() {
   const cam = rig.devices.camera || {};
   proxyPi(pi.ip, '/api/camera_controls', {
     auto_exposure: cam.auto_exposure ?? true,
-    exposure_us: cam.exposure_us ?? 10000,
+    exposure_ms: cam.exposure_ms ?? 10,
     gain: cam.gain ?? 1.0,
   });
 }
@@ -726,13 +726,13 @@ function onCamExpChange() {
   rig.devices.camera = rig.devices.camera || {};
   const exp = document.getElementById('cam-exp');
   const g = document.getElementById('cam-gain');
-  // Exposure can't exceed the frame period (1e6/fps) or libcamera silently clamps it; bound the
-  // model to the honorable range so it matches what the sensor actually runs and what's saved.
-  const maxExp = Math.floor(1e6 / (rig.devices.camera.fps || 50));
+  // Exposure (ms) can't exceed the frame period (1000/fps) or libcamera silently clamps it; bound
+  // the model to the honorable range so it matches what the sensor runs and what's saved.
+  const maxMs = 1000 / (rig.devices.camera.fps || 50);
   if (exp) {
-    const v = Math.min(Math.max(parseInt(exp.value) || 10000, 100), maxExp);
+    const v = Math.min(Math.max(parseFloat(exp.value) || 10, 0.1), maxMs);
     exp.value = v;
-    rig.devices.camera.exposure_us = v;
+    rig.devices.camera.exposure_ms = v;
   }
   if (g) {
     const v = Math.min(Math.max(parseFloat(g.value) || 1.0, 1), 16);
@@ -746,7 +746,7 @@ function onCamFpsChange() {
   rig.devices.camera = rig.devices.camera || {};
   const el = document.getElementById('cam-fps');
   if (el) rig.devices.camera.fps = parseInt(el.value) || 50;
-  renderDeviceList();   // re-render so the Exp µs max (1e6/fps) re-syncs to the new fps
+  renderDeviceList();   // re-render so the Exp ms max (1000/fps) re-syncs to the new fps
 }
 
 async function startCameraStream() {
@@ -757,7 +757,7 @@ async function startCameraStream() {
   const result = await proxyPi(pi.ip, '/api/camera_preview_start', {
     resolution: cam.resolution || [1280, 720], fps: cam.fps || 50,
     auto_exposure: cam.auto_exposure ?? true,
-    exposure_us: cam.exposure_us ?? 10000,
+    exposure_ms: cam.exposure_ms ?? 10,
     gain: cam.gain ?? 1.0,
   });
   if (result.ok) {
@@ -2021,8 +2021,8 @@ function renderCameraControls(dev) {
   const resStr = res[0] + 'x' + res[1];
   const fps = dev.fps || 50;
   const autoExp = dev.auto_exposure ?? true;
-  const maxExp = Math.floor(1e6 / fps);   // exposure is bounded by the frame period at this fps
-  const expUs = Math.max(100, Math.min(dev.exposure_us ?? 10000, maxExp));
+  const maxMs = 1000 / fps;   // exposure (ms) is bounded by the frame period at this fps
+  const expMs = Math.max(0.1, Math.min(dev.exposure_ms ?? 10, maxMs));
   const gainVal = dev.gain ?? 1.0;
   const bitrate = dev.bitrate_mbps ?? 8;
   const livePreset = dev.live_preset ?? 'med';
@@ -2063,8 +2063,8 @@ function renderCameraControls(dev) {
                onchange="onCamAutoToggle(this.checked)">
       </div>
       <div class="device-field">
-        <label>Exp µs</label>
-        <input type="number" id="cam-exp" value="${expUs}" min="100" max="${maxExp}" step="100"
+        <label>Exp ms</label>
+        <input type="number" id="cam-exp" value="${expMs}" min="0.1" max="${maxMs.toFixed(1)}" step="0.5"
                style="width:70px" ${autoExp ? 'disabled' : ''} onchange="onCamExpChange()">
       </div>
       <div class="device-field">

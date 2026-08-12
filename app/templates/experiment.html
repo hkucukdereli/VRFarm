@@ -358,8 +358,8 @@
                  title="Camera exposure/gain — live-adjustable before GO, locked during a recording. Runtime only: reverts to the rig on reload.">
               <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer;">
                 <input type="checkbox" id="exp-auto" onchange="onExpAutoToggle(this.checked)"> Auto</label>
-              <label style="margin:0; display:inline-flex; align-items:center; gap:3px;">µs
-                <input type="number" id="exp-us" min="100" step="100" style="width:62px" onchange="onExpChange()"></label>
+              <label style="margin:0; display:inline-flex; align-items:center; gap:3px;">ms
+                <input type="number" id="exp-ms" min="0.1" step="0.5" style="width:62px" onchange="onExpChange()"></label>
               <label style="margin:0; display:inline-flex; align-items:center; gap:3px;">gain
                 <input type="number" id="exp-gain" min="1" max="16" step="0.1" style="width:46px" onchange="onExpChange()"></label>
             </div>
@@ -1472,26 +1472,26 @@ async function _stopCamera() {
 function _initCamExp() {
   const cam = (config && config.rig && config.rig.devices && config.rig.devices.camera) || {};
   const a = document.getElementById('exp-auto');
-  const u = document.getElementById('exp-us');
+  const u = document.getElementById('exp-ms');
   const g = document.getElementById('exp-gain');
   if (a) a.checked = cam.auto_exposure ?? true;
-  if (u) u.value = cam.exposure_us ?? 10000;
+  if (u) u.value = cam.exposure_ms ?? 10;
   if (g) g.value = cam.gain ?? 1.0;
   updateButtons();   // sync enabled/disabled (auto hides the manual fields; a run locks everything)
 }
 function _pushCamExp() {
   const a = document.getElementById('exp-auto');
-  const u = document.getElementById('exp-us');
+  const u = document.getElementById('exp-ms');
   const g = document.getElementById('exp-gain');
   if (!a) return;
   const cam = (config && config.rig && config.rig.devices && config.rig.devices.camera) || {};
-  const maxUs = Math.floor(1e6 / (cam.fps || 50));   // exposure can't exceed the frame period
+  const maxMs = 1000 / (cam.fps || 50);   // exposure (ms) can't exceed the frame period
   const body = {
     auto_exposure: a.checked,
-    exposure_us: Math.min(Math.max(parseInt(u.value) || 10000, 100), maxUs),
+    exposure_ms: Math.min(Math.max(parseFloat(u.value) || 10, 0.1), maxMs),
     gain: Math.min(Math.max(parseFloat(g.value) || 1.0, 1), 16),
   };
-  if (u) u.value = body.exposure_us;   // reflect the clamp back into the field
+  if (u) u.value = body.exposure_ms;   // reflect the clamp back into the field
   if (g) g.value = body.gain;
   fetch('/api/camera_controls', {
     method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
@@ -2388,7 +2388,7 @@ function updateButtons() {
   if (expAuto) {
     const expLocked = running || uiBusy || !rigLoaded;
     expAuto.disabled = expLocked;
-    ['exp-us', 'exp-gain'].forEach(id => {
+    ['exp-ms', 'exp-gain'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.disabled = expLocked || expAuto.checked;   // manual fields off when auto-exposure or locked
     });

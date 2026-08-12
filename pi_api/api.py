@@ -847,7 +847,7 @@ def camera_preview_start():
             "fps": data.get("fps", 50),
             "bitrate_mbps": data.get("bitrate_mbps", 8),
             "auto_exposure": data.get("auto_exposure", True),
-            "exposure_us": data.get("exposure_us", 10000),
+            "exposure_ms": data.get("exposure_ms", 10),
             "gain": data.get("gain", 1.0),
             "live_preset": data.get("live_preset", "med"),
         }
@@ -932,7 +932,7 @@ def camera_controls():
         try:
             applied = dev.apply_exposure(
                 auto_exposure=data.get("auto_exposure"),
-                exposure_us=data.get("exposure_us"),
+                exposure_ms=data.get("exposure_ms"),
                 gain=data.get("gain"),
             )
             return jsonify({"ok": True, "applied": {k: str(v) for k, v in applied.items()}})

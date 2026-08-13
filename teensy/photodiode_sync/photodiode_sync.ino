@@ -57,7 +57,7 @@ const uint32_t HOLDOFF_US = 5000;   // Filter 2: hold-off — > the 1.5 ms pulse
                                     // ringing), << the inter-pulse interval (>=16.7 ms at 60 Hz).
 
 // ── Output pulse to the RPi ──────────────────────────────────────────────────
-const uint32_t OUT_PULSE_US = 2000; // width of the square pulse (µs). Must be >> the RPi's
+const uint32_t OUT_PULSE_US = 5000; // width of the square pulse (µs). Must be >> the RPi's
                                     // glitch filter (0.5 ms) and << the inter-pulse interval.
 
 // ── Debug ────────────────────────────────────────────────────────────────────

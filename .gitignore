@@ -215,12 +215,7 @@ data/
 
 # Docs — kept local by default (audits, protocols, manuals), but track setup guides
 # so they travel with the repo to every controller machine.
-docs/*
-!docs/CONTROLLER_SETUP.md
-!docs/DATA_FORMAT.md
-!docs/INITIAL_SETUP_REFERENCE.md
-!docs/EXPERIMENT_PROTOCOL.md
-!docs/CALIBRATION_PROTOCOL.md
+docs/assets
 
 # Generated calibration / stimulus artifacts
 *.npz

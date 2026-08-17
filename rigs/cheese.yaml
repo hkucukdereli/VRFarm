@@ -63,7 +63,7 @@ devices:
     reward_type: sucrose
     type: reward
 grace_period_s: 10
-name: cheese
+name: cheddar
 slack:
   enabled: false
   webhook_url: ''

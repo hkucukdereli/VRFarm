@@ -119,7 +119,7 @@ class Camera(Device):
             # so capture_array() can't starve the encoder (the N1 buffer-starvation freeze). The
             # preview runs at the live preset while the saved video stays full resolution/fps.
             cfg = self._cam.create_video_configuration(
-                main={"size": tuple(self.resolution), "format": "RGB888"},
+                main={"size": tuple(self.resolution), "format": "YUV420"},
                 lores={"size": lores_size, "format": "YUV420"},
                 controls=controls,
             )
@@ -187,7 +187,7 @@ class Camera(Device):
             # main (full-res, unread here) + lores YUV420 — mirrors start_recording's stream setup
             # minus the encoder; the preview captures `lores`, never the heavy `main`.
             cfg = self._cam.create_video_configuration(
-                main={"size": tuple(self.resolution), "format": "RGB888"},
+                main={"size": tuple(self.resolution), "format": "YUV420"},
                 lores={"size": lores_size, "format": "YUV420"},
                 controls=controls,
             )

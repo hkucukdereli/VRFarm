@@ -790,7 +790,9 @@ def go():
         payload = {
             "resolution": cam_cfg.get("resolution", [1280, 720]),
             "fps": cam_cfg.get("fps", 50),
-            "bitrate_mbps": cam_cfg.get("bitrate_mbps", 8),
+            "bitrate_mbps": cam_cfg.get("bitrate_mbps", 4),
+            "h264_profile": cam_cfg.get("h264_profile", "main"),
+            "gop_s": cam_cfg.get("gop_s", 5.0),
             "live_preset": cam_cfg.get("live_preset", "med"),
             **_cam_exposure(cam_cfg),   # runtime exposure/gain override -> carried from the UI into the recording
         }
@@ -865,52 +867,78 @@ def go():
     return jsonify({"ok": True, "steps": steps})
 
 
-@app.route("/api/stop", methods=["POST"])
-def stop():
-    """Send STOP via UDP, wait for leader to finalize, then kill processes."""
-    rig = state["rig_config"]
-    leader = get_leader_pi(rig)
-    api_port = rig["network"]["api_port"]
+# Serializes end-of-session teardown so a natural session_end racing a manual STOP can only
+# tear down once.
+_teardown_lock = threading.Lock()
 
-    # Stop camera recording first (so video file is finalized). force=True: this is the
-    # legitimate end-of-session stop, allowed to finalize a real session recording.
-    for pi in rig["pis"]:
-        if "camera" in pi.get("devices", []):
+
+def _teardown_session(reason: str) -> bool:
+    """End-of-session teardown: stop the cameras, STOP the leader, kill the engine processes,
+    save the logs, and mark the session ended.
+
+      reason "manual"      — the STOP button
+      reason "session_end" — the leader reported the session finished by itself
+
+    Idempotent: the first caller wins and later ones return False.
+
+    MUST NOT be called on the UDP listener thread — _stop_udp_listener() joins that thread,
+    which would raise "cannot join current thread". The session_end path dispatches a new
+    thread for exactly this reason.
+    """
+    with _teardown_lock:
+        if state.get("phase") != "running":
+            return False           # already torn down
+        rig = state["rig_config"]
+        leader = get_leader_pi(rig)
+        api_port = rig["network"]["api_port"]
+
+        # Stop camera recording first (so video file is finalized). force=True: this is the
+        # legitimate end-of-session stop, allowed to finalize a real session recording.
+        for pi in rig["pis"]:
+            if "camera" in pi.get("devices", []):
+                try:
+                    requests.post(f"http://{pi['ip']}:{api_port}/api/camera_preview_stop",
+                                  json={"force": True}, timeout=10)
+                except Exception:
+                    pass
+
+        # Send STOP via UDP (graceful shutdown signal)
+        _send_command(leader["ip"], rig["network"]["command_port"],
+                      {"cmd": "STOP"})
+
+        # Give leader time to finalize (write HDF5, metadata)
+        time.sleep(3)
+
+        # Stop engine processes on all Pis (SIGTERM → wait 10s → SIGKILL)
+        def _kill_pi(ip):
             try:
-                requests.post(f"http://{pi['ip']}:{api_port}/api/camera_preview_stop",
-                              json={"force": True}, timeout=10)
+                requests.post(f"http://{ip}:{api_port}/api/stop",
+                              json={}, timeout=15)
             except Exception:
                 pass
 
-    # Send STOP via UDP (graceful shutdown signal)
-    _send_command(leader["ip"], rig["network"]["command_port"],
-                  {"cmd": "STOP"})
+        threads = [threading.Thread(target=_kill_pi, args=(pi["ip"],))
+                   for pi in rig["pis"]]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=16)
 
-    # Give leader time to finalize (write HDF5, metadata)
-    time.sleep(3)
+        _stop_udp_listener()
+        _save_session_logs()
+        _app_logger.info(f"STOP({reason}) session={state['session_id']} "
+                         f"trials={len(_trials)}")
+        if reason == "manual" and not _session_end_seen:
+            notify(f"⏹️ {rig['name']} — stopped, but no session_end came from the leader "
+                   f"({state['session_id']})")
+        state["phase"] = "ended"
+        return True
 
-    # Stop engine processes on all Pis (SIGTERM → wait 10s → SIGKILL)
-    def _kill_pi(ip):
-        try:
-            requests.post(f"http://{ip}:{api_port}/api/stop",
-                          json={}, timeout=15)
-        except Exception:
-            pass
 
-    threads = [threading.Thread(target=_kill_pi, args=(pi["ip"],))
-               for pi in rig["pis"]]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout=16)
-
-    _stop_udp_listener()
-    _save_session_logs()
-    _app_logger.info(f"STOP session={state['session_id']} trials={len(_trials)}")
-    if state["phase"] == "running" and not _session_end_seen:
-        notify(f"⏹️ {rig['name']} — stopped, but no session_end came from the leader "
-               f"({state['session_id']})")
-    state["phase"] = "ended"
+@app.route("/api/stop", methods=["POST"])
+def stop():
+    """Send STOP via UDP, wait for leader to finalize, then kill processes."""
+    _teardown_session("manual")
     return jsonify({"ok": True})
 
 
@@ -1030,27 +1058,63 @@ def transfer():
 
     transferred = []
     for pi in rig["pis"]:
+        base = f"http://{pi['ip']}:{api_port}"
+        # Never pull from a Pi that is still writing the video: the download simply ends at
+        # whatever byte it has reached and the short copy replaces the good one with no error.
+        # ASD109_20260814_002 lost 346 MB (4.17%) exactly this way.
+        try:
+            st = requests.get(f"{base}/api/status", timeout=5).json()
+        except Exception as e:
+            transferred.append(f"ERROR ({pi['name']}): status unreachable: {e}")
+            continue
+        if st.get("camera_recording"):
+            transferred.append(f"ERROR ({pi['name']}): camera still recording — "
+                               f"STOP the session before transferring")
+            continue
         try:
             r = requests.get(
-                f"http://{pi['ip']}:{api_port}/api/files/{session_id}",
+                f"{base}/api/files/{session_id}",
                 params={"video_dir": rig.get("data", {}).get("video_dir", "")},
                 timeout=5)
-            files = r.json().get("files", [])
-            for fpath in files:
-                fname = Path(fpath).name
-                # Video files can be large — use longer timeout
-                dl_timeout = 300 if fname.endswith(".h264") else 60
-                r = requests.get(
-                    f"http://{pi['ip']}:{api_port}/api/download/{fpath}",
-                    timeout=dl_timeout, stream=True)
-                out = dest / fname
-                with open(out, "wb") as f:
-                    for chunk in r.iter_content(8192):
-                        f.write(chunk)
-                size_mb = out.stat().st_size / 1e6
-                transferred.append(f"{out} ({size_mb:.1f} MB)")
+            r.raise_for_status()
+            listing = r.json()
+            files = listing.get("files", [])
+            sizes = listing.get("sizes", {})   # {} from an un-redeployed Pi -> size check skipped
         except Exception as e:
-            transferred.append(f"ERROR ({pi['name']}): {e}")
+            transferred.append(f"ERROR ({pi['name']}): file list failed: {e}")
+            continue
+        # try/except INSIDE the loop: one bad file must not abandon the rest. The old single
+        # try around the whole per-Pi block is why five sessions arrived with no .h5 at all.
+        for fpath in files:
+            fname = Path(fpath).name
+            out = dest / fname
+            part = out.parent / (out.name + ".part")
+            expect = sizes.get(fpath)
+            try:
+                # Video files can be large — use longer timeout. Note this is a per-read stall
+                # timeout, not a deadline for the whole transfer.
+                dl_timeout = 300 if fname.endswith(".h264") else 60
+                with requests.get(f"{base}/api/download/{fpath}",
+                                  timeout=dl_timeout, stream=True) as r:
+                    r.raise_for_status()
+                    got = 0
+                    with open(part, "wb") as f:
+                        for chunk in r.iter_content(1 << 16):
+                            f.write(chunk)
+                            got += len(chunk)
+                if expect is not None and got != expect:
+                    raise IOError(f"size mismatch: got {got:,} of {expect:,} bytes "
+                                  f"({got / max(expect, 1) * 100:.2f}%)")
+                # Atomic: a partial download never takes the real filename, so a failed
+                # transfer leaves the previous good copy (or nothing) rather than a stub.
+                os.replace(part, out)
+                transferred.append(f"{out} ({got / 1e6:.1f} MB)")
+            except Exception as e:
+                try:
+                    part.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                transferred.append(f"ERROR ({pi['name']}) {fname}: {e}")
 
     # Register in subject database — always at the controller-default location so the index
     # stays consistent even when session files are sent to an override destination.
@@ -1394,6 +1458,15 @@ def _start_udp_listener(event_port: int):
                     notify(f"✅ {rig_name} — session ended: {event.get('n_completed', '?')}"
                            f"/{event.get('n_planned', '?')} trials ({state['session_id']})"
                            f"{_metrics_suffix(_trials)}")
+                    # A natural end MUST tear down server-side. Nothing else does: the browser
+                    # sets only ITS OWN phase to 'ended' (which then disables the STOP button),
+                    # while the server stays 'running' so /api/camera_stop returns early — and
+                    # the leader keeps recording. That is how ASD110_20260814_002 ran for 15.4 h
+                    # and produced a 138 GB video, stopping only when the disk filled. It also
+                    # means a closed browser leaves the camera running indefinitely.
+                    # Separate thread: _teardown_session joins THIS one.
+                    threading.Thread(target=_teardown_session,
+                                     args=("session_end",), daemon=True).start()
                 # Push to SSE queue
                 try:
                     _event_queue.put_nowait(event)

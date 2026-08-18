@@ -45,12 +45,21 @@ _reward_events: list = []
 
 @app.route("/api/status")
 def status():
-    """Health check: running process, disk space, hostname."""
+    """Health check: running process, disk space, hostname, live session recording."""
     disk = shutil.disk_usage(str(Path.home()))
+    # camera_recording = a real SESSION recording is still writing (not a throwaway preview).
+    # The controller checks this before a Transfer: downloading a video that is still being
+    # written silently produces a truncated copy, which is how ASD109_20260814_002 lost 346 MB.
+    with _devices_lock:
+        cam = _devices.get("camera")
+    cam_rec = bool(cam is not None
+                   and getattr(cam, "_recording", False)
+                   and not getattr(cam, "_is_preview", True))
     return jsonify({
         "ok": True,
         "hostname": os.uname().nodename,
         "process_running": _process is not None and _process.poll() is None,
+        "camera_recording": cam_rec,
         "disk_free_gb": round(disk.free / 1e9, 1),
         "disk_total_gb": round(disk.total / 1e9, 1),
         "python": sys.executable,
@@ -149,7 +158,16 @@ def list_files(session_id):
 
     # video_dir may coincide with the data dir — never list (= download) a file twice
     files = list(dict.fromkeys(files))
-    return jsonify({"files": files})
+    # Sizes let the controller verify each download landed whole. Returned as a SEPARATE map so
+    # `files` keeps its list-of-strings shape and an older controller still works unchanged.
+    sizes = {}
+    for rel in files:
+        try:
+            fp = Path(rel)
+            sizes[rel] = (fp if fp.is_absolute() else home / rel).stat().st_size
+        except OSError:
+            pass
+    return jsonify({"files": files, "sizes": sizes})
 
 
 @app.route("/api/consolidate/<session_id>", methods=["POST"])
@@ -866,7 +884,9 @@ def camera_preview_start():
         rig_cfg = {
             "resolution": data.get("resolution", [1280, 720]),
             "fps": data.get("fps", 50),
-            "bitrate_mbps": data.get("bitrate_mbps", 8),
+            "bitrate_mbps": data.get("bitrate_mbps", 4),
+            "h264_profile": data.get("h264_profile", "main"),
+            "gop_s": data.get("gop_s", 5.0),
             "auto_exposure": data.get("auto_exposure", True),
             "exposure_ms": data.get("exposure_ms", 10),
             "gain": data.get("gain", 1.0),

@@ -4,6 +4,28 @@ devices/camera.py
 Camera recording via picamera2 (CSI).
 H264 video + per-frame timestamps saved locally.
 MJPEG preview stream for UI livestream.
+
+Sensor on the cheddar rig: **IMX477** (Raspberry Pi HQ camera) — a 4056x3040 COLOUR (Bayer,
+RGGB) ROLLING-shutter sensor, mounted Rotation 180. Not the mono global-shutter IMX296 that
+earlier comments here claimed. Grayscale is produced by the ISP, not by the sensor: `Saturation:
+0.0` in the controls below plus taking the Y plane of the YUV420 output. That is format-driven,
+so the code is correct on either sensor.
+
+All offered resolutions select sensor mode 2028x1080 @ 12-bit (max 62.81 fps, crop_limits
+(0,440,4056,2160)) — full sensor width, vertically cropped to 71% of the array, 2x2 binned, then
+ISP-downscaled. Two ways that silently changes the FIELD OF VIEW rather than the resolution, so
+both are guarded: a 4:3 output size selects the 1332x990 mode (a hard centre crop losing ~35% in
+both axes), and fps above 62 does the same — hence the 16:9-only option list and the fps cap.
+
+`colour_space` is pinned to Rec709 rather than left to picamera2, which would otherwise choose it
+from the output size (picamera2.py: `Smpte170m` if width < 1280 OR height < 720, else `Rec709`).
+Since grayscale here IS the Y plane, that default would change the luma weighting — and so the
+recorded pixel values — when the resolution crosses 1280x720. Pinning keeps every session
+comparable regardless of resolution.
+
+Rolling shutter means rows are exposed progressively over the frame readout (>=15.9 ms in this
+mode), so a frame is not an instant. Stimulus timing does not depend on this — that comes from
+the photodiode sync channel — but per-frame video timing is only accurate to the readout skew.
 """
 
 from __future__ import annotations
@@ -33,14 +55,23 @@ class Camera(Device):
     @classmethod
     def task_params_schema(cls):
         return {
+            # IMX477: all three downscale from the 2028x1080 sensor mode and were measured on the
+            # Pi 5 holding 50.00 fps with zero dropped frames. 4:3 sizes are omitted on purpose —
+            # they select the 1332x990 mode, a hard centre crop losing ~35% of the frame in BOTH
+            # axes. 1014x540 is half of the sensor mode exactly: integer 2x downscale, and its
+            # 1.878 aspect matches, so it is the only option that keeps the full sensor width.
+            # See the module docstring.
             "resolution": {
-                "type": "list", "default": [1280, 720],
+                "type": "list", "default": [1014, 540],
                 "label": "Resolution",
-                "options": [[640, 480], [1280, 720], [1920, 1080]],
+                "options": [[854, 480], [1014, 540], [1920, 1080]],
             },
+            # Max 62, not 120: the 2028x1080 sensor mode ceilings at 62.81 fps @12-bit. Asking
+            # for more either silently under-delivers or pushes libcamera onto the 1332x990 mode
+            # — a field-of-view change with no resolution change, which is very hard to spot.
             "fps": {
                 "type": "int", "default": 50,
-                "label": "FPS", "min": 10, "max": 120,
+                "label": "FPS", "min": 10, "max": 62,
             },
         }
 
@@ -49,13 +80,28 @@ class Camera(Device):
                           rig_config.get("resolution", [1280, 720]))
         self.fps = task_params.get("fps",
                    rig_config.get("fps", 50))
-        # H.264 target bitrate (Mbit/s). Grayscale behavior video compresses well, so this can
-        # be dropped (e.g. 3) to fit limited storage such as the SD card. See rig config.
+        # H.264 target bitrate (Mbit/s). With h264_profile "main" (CABAC), 4 Mbit/s at 720p50
+        # measures better than 8 Mbit/s did on baseline — see the encoder settings below.
         self.bitrate_mbps = float(task_params.get("bitrate_mbps",
-                            rig_config.get("bitrate_mbps", 8)))
+                            rig_config.get("bitrate_mbps", 4)))
+        # H.264 profile. picamera2 defaults to no profile, which leaves libav on the "ultrafast"
+        # preset => BASELINE: no CABAC, no B-frames, and roughly HALF the compression efficiency.
+        # Naming a non-baseline profile moves it to "superfast" + CABAC. Measured on real
+        # behaviour video (720p50, head-fixed mouse): 2 Mbit/s main (SSIM 0.9765) beats 4 Mbit/s
+        # baseline (0.9717), and 8 Mbit/s main matches what 12 Mbit/s baseline used to give.
+        # Cost is CPU only, and the Pi 5 has room: 157 fps encode = 3.1x realtime at 720p50.
+        # "" / "none" / "auto" => let the encoder choose (i.e. baseline).
+        prof = str(task_params.get("h264_profile",
+                   rig_config.get("h264_profile", "main")) or "").strip()
+        self.h264_profile = None if prof.lower() in ("", "none", "auto") else prof
+        # Keyframe (IDR) interval in SECONDS — converted to frames against the real fps, so it
+        # stays 5 s whatever the fps. picamera2's default iperiod=30 means an IDR every 30 FRAMES,
+        # i.e. every 0.6 s at 50 fps: 3,024 IDRs in a 30 min session at ~126 KB each. Seeking in a
+        # raw .h264 is keyframe-granular, so this trades seek granularity for size.
+        self.gop_s = float(task_params.get("gop_s", rig_config.get("gop_s", 5.0)))
         # IR exposure/gain (rig-hardware calibration, set live from the setup UI). auto_exposure
         # True => libcamera AEC/AGC; False => fixed ExposureTime + AnalogueGain. Capping the sensor
-        # gain is what suppresses the rolling readout banding on the mono IMX296. Read like
+        # gain is what suppresses the rolling readout banding on the IMX477. Read like
         # bitrate_mbps (task_params first, then rig_config); not in task_params_schema.
         self.auto_exposure = bool(task_params.get("auto_exposure",
                              rig_config.get("auto_exposure", True)))
@@ -92,6 +138,7 @@ class Camera(Device):
 
     def start_recording(self, session_id: str, output_dir: str):
         from picamera2 import Picamera2
+        from libcamera import ColorSpace
         from picamera2.encoders import H264Encoder
         from picamera2.outputs import FileOutput
 
@@ -122,9 +169,20 @@ class Camera(Device):
                 main={"size": tuple(self.resolution), "format": "YUV420"},
                 lores={"size": lores_size, "format": "YUV420"},
                 controls=controls,
+                colour_space=ColorSpace.Rec709(),
             )
             self._cam.configure(cfg)
-            encoder = H264Encoder(bitrate=int(self.bitrate_mbps * 1_000_000))
+            # framerate= is NOT cosmetic: on the Pi 5 there is no hardware encoder, so this is
+            # libav/x264 in software, and x264 derives its per-frame bit budget from this value.
+            # Left at picamera2's default of 30 while the sensor runs at 50, every recording came
+            # out fps/30 too large (50 fps => 1.67x: a 12 Mbit/s session landed at 19.85 Mbit/s,
+            # 10.3 GB for 69 min) AND was tagged 30 fps in the SPS, so it played back at 0.6x
+            # speed. Both bugs are this one argument. Frame timestamps were always correct.
+            # Kwarg names match on the Pi 4 hardware H264Encoder too, so this stays portable.
+            encoder = H264Encoder(bitrate=int(self.bitrate_mbps * 1_000_000),
+                                  framerate=self.fps,
+                                  iperiod=max(1, int(round(self.fps * self.gop_s))),
+                                  profile=self.h264_profile)
             output = FileOutput(str(self._video_path))
             self._cam.pre_callback = self._on_frame
             self._recording = True
@@ -161,11 +219,12 @@ class Camera(Device):
         """Preview-only live view: configure + start the camera with NO encoder and write no file.
         BOTH modes preview from a small YUV420 `lores` stream (its Y-plane taken directly as
         grayscale) — the SAME light path the recording preview uses. capture_array('main') at full
-        resolution can't be JPEG-encoded in Python fast enough and comes back blank/stalled on the
-        mono IMX296, so the preview never reads `main`. downsample=False (setup 'Live') uses a
+        resolution can't be JPEG-encoded in Python fast enough and comes back blank/stalled, so
+        the preview never reads `main`. downsample=False (setup 'Live') uses a
         larger half-res lores for focus/framing at a capped fps; downsample=True (experiment 'Live')
         uses the live preset."""
         from picamera2 import Picamera2
+        from libcamera import ColorSpace
         if downsample:
             preset = PRESETS.get(self.live_preset, PRESETS["med"])
             lores_size = self._scaled_size(preset["scale"])
@@ -190,6 +249,7 @@ class Camera(Device):
                 main={"size": tuple(self.resolution), "format": "YUV420"},
                 lores={"size": lores_size, "format": "YUV420"},
                 controls=controls,
+                colour_space=ColorSpace.Rec709(),
             )
             self._cam.configure(cfg)
             self._cam.start()          # no encoder -> nothing is written

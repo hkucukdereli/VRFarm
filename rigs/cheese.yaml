@@ -4,15 +4,17 @@ data:
 devices:
   camera:
     auto_exposure: false
-    bitrate_mbps: 12
+    bitrate_mbps: 4
     enabled: true
     exposure_ms: 10
     fps: 50
     gain: 2.0
+    gop_s: 5.0
+    h264_profile: main
     live_preset: high
     resolution:
-    - 1280
-    - 720
+    - 1014
+    - 540
     type: camera
   display:
     apply_warp: true
@@ -43,9 +45,9 @@ devices:
     glitch_ms: 0.5
     gpio: 16
     pulse_every_n_frames: 5
+    sync_brightness: 1.0
     sync_corner: top-right
     sync_size_px: 150
-    sync_brightness: 1.0
     type: photodiode
   reward:
     calibration:
@@ -64,9 +66,6 @@ devices:
     type: reward
 grace_period_s: 10
 name: cheddar
-slack:
-  enabled: false
-  webhook_url: ''
 network:
   api_port: 5080
   camera_port: 5001
@@ -90,3 +89,6 @@ pis:
   name: mozzarella
   role: follower
   user: vruser
+slack:
+  enabled: false
+  webhook_url: ''

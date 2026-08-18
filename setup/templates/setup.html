@@ -2025,7 +2025,8 @@ function renderCameraControls(dev) {
   const maxMs = 1000 / fps;   // exposure (ms) is bounded by the frame period at this fps
   const expMs = Math.max(0.1, Math.min(dev.exposure_ms ?? 10, maxMs));
   const gainVal = dev.gain ?? 1.0;
-  const bitrate = dev.bitrate_mbps ?? 8;
+  const bitrate = dev.bitrate_mbps ?? 4;
+  const h264Profile = dev.h264_profile ?? 'main';
   const livePreset = dev.live_preset ?? 'med';
   const ds = deviceState.camera || {};
   const streaming = ds.streaming;
@@ -2040,22 +2041,38 @@ function renderCameraControls(dev) {
       <div class="device-field">
         <label>Resolution</label>
         <select ${lock} onchange="rig.devices.camera.resolution = this.value.split('x').map(Number)">
-          <option value="640x480" ${resStr === '640x480' ? 'selected' : ''}>640x480</option>
-          <option value="1280x720" ${resStr === '1280x720' ? 'selected' : ''}>1280x720</option>
-          <option value="1920x1080" ${resStr === '1920x1080' ? 'selected' : ''}>1920x1080</option>
+          <!-- IMX477: every option below downscales from the 2028x1080 sensor mode (max 62.8 fps
+               @12-bit), so all are safe at 50 fps. 4:3 sizes (e.g. 640x480) are deliberately NOT
+               offered: they make libcamera select the 1332x990 mode, a hard centre crop that
+               silently throws away ~35% of the frame in BOTH axes. 1014x540 matches the sensor
+               mode's 1.878 aspect exactly => full sensor width and an integer 2x downscale. -->
+          <option value="854x480" ${resStr === '854x480' ? 'selected' : ''}>Low (854x480)</option>
+          <option value="1014x540" ${resStr === '1014x540' ? 'selected' : ''}>High (1014x540)</option>
+          <option value="1920x1080" ${resStr === '1920x1080' ? 'selected' : ''}>Very high (1920x1080)</option>
         </select>
       </div>
       <div class="device-field">
         <label>FPS</label>
-        <input type="number" id="cam-fps" value="${fps}" min="10" max="120" style="width:55px"
+        <!-- max 62: the IMX477's 2028x1080 mode ceilings at 62.81 fps; above that libcamera
+             switches to the 1332x990 mode, silently cropping ~35% of the frame in both axes. -->
+        <input type="number" id="cam-fps" value="${fps}" min="10" max="62" style="width:55px"
                ${lock} onchange="onCamFpsChange()">
       </div>
       <div class="device-field">
         <label>Bitrate</label>
         <select ${lock} onchange="rig.devices.camera.bitrate_mbps = parseInt(this.value)">
-          <option value="12" ${bitrate === 12 ? 'selected' : ''}>High (12)</option>
-          <option value="8" ${bitrate === 8 ? 'selected' : ''}>Med (8)</option>
-          <option value="3" ${bitrate === 3 ? 'selected' : ''}>Low (3)</option>
+          <option value="8" ${bitrate === 8 ? 'selected' : ''}>High (8) &mdash; 3.6 GB/h</option>
+          <option value="4" ${bitrate === 4 ? 'selected' : ''}>Med (4) &mdash; 1.8 GB/h</option>
+        </select>
+      </div>
+      <div class="device-field">
+        <!-- "main" enables CABAC: ~2x the compression of baseline for CPU only. Only drop to
+             baseline for a player that cannot handle CABAC. -->
+        <label>Profile</label>
+        <select ${lock} onchange="rig.devices.camera.h264_profile = this.value">
+          <option value="main" ${h264Profile === 'main' ? 'selected' : ''}>main</option>
+          <option value="high" ${h264Profile === 'high' ? 'selected' : ''}>high</option>
+          <option value="baseline" ${h264Profile === 'baseline' ? 'selected' : ''}>baseline</option>
         </select>
       </div>
       <div class="device-field">

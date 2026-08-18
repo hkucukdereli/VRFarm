@@ -65,7 +65,7 @@ devices:
     reward_type: sucrose
     type: reward
 grace_period_s: 10
-name: cheddar
+name: cheese
 network:
   api_port: 5080
   camera_port: 5001

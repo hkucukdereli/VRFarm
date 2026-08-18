@@ -921,8 +921,11 @@ def main():
     args = parser.parse_args()
 
     import yaml
-    with open(args.rig) as f:
-        rig_config = yaml.safe_load(f)
+    # load_rig (not a bare safe_load): it makes the FILENAME the rig's identity, so the
+    # `rig_name` stamped into the HDF5 below matches the rig the user actually selected even if
+    # this yaml was copied from another rig and kept its old `name:` field.
+    from shared.config import load_rig
+    rig_config = load_rig(args.rig)
     with open(args.task) as f:
         task_config = yaml.safe_load(f)
 

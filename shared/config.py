@@ -20,9 +20,29 @@ from typing import Union
 # ── Loaders ──
 
 def load_rig(path: Union[str, Path]) -> dict:
-    """Load rig config YAML. Returns raw dict."""
+    """Load rig config YAML. Returns raw dict.
+
+    The FILENAME is the rig's identity. Everything that picks a rig does so by filename (the
+    experiment/setup UIs list `rigs/*.yaml` by stem), so the in-file `name:` is only a label —
+    and a rig yaml copied to a new filename silently keeps the OLD label. That is how Slack kept
+    announcing "cheese" for sessions run on `cheddar.yaml`, and how `rig_name` in the archived
+    HDF5s came out wrong.
+
+    So: the filename stem always wins. A disagreeing `name:` is overridden and reported rather
+    than silently honoured, because a silent mismatch is exactly the failure mode above.
+    """
+    path = Path(path)
     with open(path) as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f) or {}
+    stem = path.stem
+    declared = str(cfg.get("name") or "").strip()
+    if declared != stem:
+        if declared:
+            print(f"[config] rig '{path.name}' declares name: {declared!r}, which does not match "
+                  f"its filename — using {stem!r}. Fix the `name:` field to silence this.",
+                  flush=True)
+        cfg["name"] = stem
+    return cfg
 
 
 def load_task(path: Union[str, Path]) -> dict:

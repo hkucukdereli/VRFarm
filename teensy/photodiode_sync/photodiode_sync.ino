@@ -47,8 +47,8 @@ const bool  ACTIVE_HIGH = true;    // true: pulse = signal ABOVE threshold; fals
 // below LO). Tune both from the two-trace plot: HI between baseline and peak; LO just above baseline
 // but below the notch troughs. (baseline≈0, peak≈1.85 V -> HI 0.9, LO 0.5. If your baseline sits high —
 // the scope Mean read 1.18 V — raise both: HI just under the peak, LO just over the baseline.)
-const float THRESHOLD_HI_V = 0.8f;
-const float THRESHOLD_LO_V = 0.2f;
+const float THRESHOLD_HI_V = 1.2f;
+const float THRESHOLD_LO_V = 0.6f;
 
 // ── Filters ──────────────────────────────────────────────────────────────────
 const uint32_t STEADY_US  = 150;    // Filter 1: steady/glitch — MUST be << the pulse's time-above-

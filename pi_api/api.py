@@ -1039,6 +1039,33 @@ def camera_reset():
         return jsonify({"ok": True, "driver": os.path.basename(drv), "node": node})
 
 
+@app.route("/api/shepherd", methods=["POST"])
+def shepherd_control():
+    """Start or stop the shepherd health-monitor service live, so the setup-UI Monitor toggle takes
+    effect immediately without a reinstall. enabled=true -> enable+start; false -> stop+disable.
+    Needs root to drive systemd; pi_api runs as vruser with passwordless sudo (same as camera_reset).
+    Idempotent, and a no-op-safe if the unit was never installed (reports that instead of erroring)."""
+    enabled = bool((request.json or {}).get("enabled", True))
+    # unit presence check first, so an un-installed shepherd gives a clear message, not a systemd error
+    present = subprocess.run(["systemctl", "list-unit-files", "shepherd.service"],
+                             capture_output=True, text=True, timeout=10)
+    if "shepherd.service" not in present.stdout:
+        return jsonify({"ok": False, "running": False,
+                        "error": "shepherd.service not installed (run Install on the leader first)"}), 404
+    cmds = (["sudo systemctl enable shepherd", "sudo systemctl restart shepherd"] if enabled
+            else ["sudo systemctl disable shepherd", "sudo systemctl stop shepherd"])
+    try:
+        for c in cmds:
+            subprocess.run(c.split(), check=True, capture_output=True, text=True, timeout=15)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"ok": False, "error": (e.stderr or str(e)).strip()}), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    active = subprocess.run(["systemctl", "is-active", "shepherd"],
+                            capture_output=True, text=True, timeout=10)
+    return jsonify({"ok": True, "enabled": enabled, "running": active.stdout.strip() == "active"})
+
+
 @app.route("/api/monitor_photodiode", methods=["POST"])
 def monitor_photodiode():
     """Start photodiode pulse monitoring (rising edge detection)."""

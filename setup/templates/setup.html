@@ -105,6 +105,25 @@
               transition: opacity 0.2s; z-index: 999; line-height: 32px; text-align: center; }
   .quit-btn:hover:not(:disabled) { opacity: 1; }
   .quit-btn:disabled { opacity: 0.2; cursor: not-allowed; }
+
+  /* Toggle switch (ON=green / OFF=gray) — a styled checkbox, so .checked still works. */
+  .toggle { position: relative; display: inline-block; width: 44px; height: 18px;
+            flex: none; vertical-align: middle; }
+  .toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .toggle .track { position: absolute; inset: 0; cursor: pointer; border-radius: 9px;
+                   background: #b8b8b8; transition: background 0.15s; }
+  .toggle .track::before {          /* the sliding knob */
+    content: ""; position: absolute; width: 14px; height: 14px; left: 2px; top: 2px;
+    border-radius: 50%; background: #fff; transition: transform 0.15s;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.4); }
+  .toggle .track::after {           /* the ON/OFF label, on the side opposite the knob, v-centered */
+    content: "OFF"; position: absolute; right: 5px; top: 0; bottom: 0;
+    display: flex; align-items: center;
+    font-size: 11px; font-weight: 700; color: #fff; letter-spacing: 0.3px; }
+  .toggle input:checked + .track { background: #7ac142; }
+  .toggle input:checked + .track::before { transform: translateX(26px); }
+  .toggle input:checked + .track::after { content: "ON"; left: 6px; right: auto; }
+  .toggle input:disabled + .track { opacity: 0.45; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -129,13 +148,25 @@
       </div>
       <div style="margin-top:8px; border-top:1px solid #333; padding-top:6px">
         <div style="display:flex; align-items:center; gap:6px">
-          <label style="display:flex; align-items:center; gap:4px; font-size:12px; margin:0; white-space:nowrap">
-            <input type="checkbox" id="slack-enabled" onchange="onSlackChange()"> Slack
+          <span style="display:inline-block; flex:none; width:56px; font-size:12px; white-space:nowrap">Slack</span>
+          <label class="toggle">
+            <input type="checkbox" id="slack-enabled" onchange="onSlackChange()">
+            <span class="track"></span>
           </label>
           <input type="text" id="slack-webhook" placeholder="https://hooks.slack.com/services/..."
                  style="flex:1; min-width:0; font-size:11px" oninput="onSlackChange()">
         </div>
-        <div style="font-size:10px; color:#666; margin-top:2px">Saved in the rig (Save Rig); the experiment UI activates it on Load Rig.</div>
+        <div style="font-size:10px; color:#666; margin-top:2px">Saved in the rig config. Activates on Load Rig from experiment UI.</div>
+        <!-- Process monitoring (shepherd). Toggling starts/stops the shepherd service on the
+             leader live (via /api/shepherd); the setting is also saved and re-applied on Install. -->
+        <div style="display:flex; align-items:center; gap:6px; margin-top:8px">
+          <span style="display:inline-block; flex:none; width:56px; font-size:12px; white-space:nowrap">Monitor</span>
+          <label class="toggle">
+            <input type="checkbox" id="shepherd-enabled" onchange="onShepherdChange()">
+            <span class="track"></span>
+          </label>
+        </div>
+        <div style="font-size:10px; color:#666; margin-top:2px">Run resource monitor on the leader (applies now).</div>
         <div style="display:flex; align-items:center; gap:6px; margin-top:8px">
           <label style="font-size:12px; margin:0; white-space:nowrap; width:60px">Data Dir</label>
           <input type="text" id="data-leader-dir" placeholder="/home/vruser/data"
@@ -516,7 +547,8 @@ async function installPi(idx) {
   try {
     const r = await fetch('/api/install_pi', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(pi)
+      // shepherd_enabled rides along so Install brings the leader monitor up or takes it down.
+      body: JSON.stringify({...pi, shepherd_enabled: (rig.shepherd?.enabled ?? true)})
     });
     const data = await r.json();
     (data.steps || []).forEach(s => log('  ' + s));
@@ -1845,6 +1877,7 @@ function renderAll() {
   renderPiList();
   renderDeviceList();
   renderSlackSettings();
+  renderShepherdSettings();
   renderDataDirs();
   if (uiBusy) _applyLockState();   // a re-render during a lock must not re-enable controls
 }
@@ -1863,6 +1896,30 @@ function onSlackChange() {
   rig.slack = rig.slack || {};
   rig.slack.enabled = document.getElementById('slack-enabled').checked;
   rig.slack.webhook_url = document.getElementById('slack-webhook').value.trim();
+}
+
+// Shepherd process-monitor toggle, stored on the rig (rig.shepherd) and saved by saveRig.
+// Applied on Install: ON enables+starts the leader shepherd service, OFF stops+disables it.
+// Defaults to ON (shepherd has always shipped enabled).
+function renderShepherdSettings() {
+  if (!rig) return;
+  rig.shepherd = rig.shepherd || {};
+  if (rig.shepherd.enabled === undefined) rig.shepherd.enabled = true;
+  const cb = document.getElementById('shepherd-enabled');
+  if (cb) cb.checked = !!rig.shepherd.enabled;
+}
+async function onShepherdChange() {
+  if (!rig) return;
+  rig.shepherd = rig.shepherd || {};
+  const on = document.getElementById('shepherd-enabled').checked;
+  rig.shepherd.enabled = on;
+  // Apply live on the leader so no reinstall is needed. (Also persisted on Save Rig, and
+  // re-applied by Install as the fallback if the leader is offline right now.)
+  const leader = (rig.pis || []).find(p => p.role === 'leader');
+  if (!leader) { log('Monitor set to ' + (on ? 'ON' : 'OFF') + ' (no leader Pi in this rig yet).'); return; }
+  const r = await proxyPi(leader.ip, '/api/shepherd', {enabled: on});
+  if (r && r.ok) log('Monitor ' + (on ? 'ON — shepherd running' : 'OFF — shepherd stopped') + ' on ' + leader.name + '.');
+  else log('Monitor toggle saved, but not applied on ' + leader.name + ': ' + ((r && r.error) || 'unreachable') + ' (will apply on next Install).');
 }
 
 // Leader-Pi data + video directories, stored on the rig (rig.data) and saved by saveRig.
@@ -2168,6 +2225,15 @@ function renderCameraControls(dev) {
           <option value="baseline" ${h264Profile === 'baseline' ? 'selected' : ''}>baseline</option>
         </select>
       </div>
+    </div>
+    <!-- Row 2: live predictions (from CAM_MODES + arithmetic; file size depends on bitrate only) -->
+    <div style="font-size:11px; color:#aaa; margin-top:3px">
+      FoV ${mode.fov} &nbsp;·&nbsp; ~${sizeGB.toFixed(1)} GB / 60 min &nbsp;·&nbsp;
+      quality <b style="color:${band[1]}">${bpp.toFixed(3)} bit/px (${band[0]})</b>
+      ${encLimited ? `&nbsp;·&nbsp;<span style="color:#ffa64d">native output: encoder-limited to ${maxFps} fps</span>` : ''}
+    </div>
+    <!-- Row 3: exposure / gain -->
+    <div class="device-controls" style="margin-top:4px">
       <div class="device-field">
         <label>Auto exp</label>
         <input type="checkbox" id="cam-auto" ${autoExp ? 'checked' : ''}
@@ -2184,14 +2250,8 @@ function renderCameraControls(dev) {
                style="width:55px" ${autoExp ? 'disabled' : ''} onchange="onCamExpChange()">
       </div>
     </div>
-    <!-- Live predictions (from CAM_MODES + arithmetic; file size depends on bitrate only) -->
-    <div style="font-size:11px; color:#aaa; margin-top:3px">
-      FoV ${mode.fov} &nbsp;·&nbsp; ~${sizeGB.toFixed(1)} GB / 60 min &nbsp;·&nbsp;
-      quality <b style="color:${band[1]}">${bpp.toFixed(3)} bit/px (${band[0]})</b>
-      ${encLimited ? `&nbsp;·&nbsp;<span style="color:#ffa64d">native output: encoder-limited to ${maxFps} fps</span>` : ''}
-    </div>
     ${streaming ? '<div style="font-size:10px; color:#888; margin-top:2px">Stop the stream to change mode / bit-depth / resolution / FPS / bitrate.</div>' : ''}
-    <!-- Row 2: experiment live view preset -->
+    <!-- Row 4: experiment live view preset -->
     <div class="device-controls" style="margin-top:4px">
       <span style="font-size:11px; color:#888;">Experiment live view (saved video unaffected):</span>
       <div class="device-field">
@@ -2203,13 +2263,13 @@ function renderCameraControls(dev) {
         </select>
       </div>
     </div>
-    <!-- Row 3: Live / Stop -->
+    <!-- Row 5: Live / Stop -->
     <div class="device-controls" style="margin-top:6px">
       ${streaming
         ? `<button class="btn btn-red btn-sm" onclick="stopCameraStream()">Stop</button>`
         : `<button class="btn btn-blue btn-sm" onclick="startCameraStream()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
     </div>
-    <!-- Row 4: live-stream window (OFFLINE until Live is pressed) -->
+    <!-- Row 6: live-stream window (OFFLINE until Live is pressed) -->
     <div class="stream-container">
       ${streaming
         ? `<img src="${streamUrl}" alt="Camera stream" style="filter:grayscale(1)" onerror="cameraImgError(this)">`

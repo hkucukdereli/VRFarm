@@ -892,6 +892,8 @@ def camera_preview_start():
             "bitrate_mbps": data.get("bitrate_mbps", 4),
             "h264_profile": data.get("h264_profile", "main"),
             "gop_s": data.get("gop_s", 5.0),
+            "sensor_mode": data.get("sensor_mode"),   # pin FoV/mode (None => legacy auto-select)
+            "bit_depth": data.get("bit_depth"),       # pin raw depth (None => picamera2 default 12)
             "auto_exposure": data.get("auto_exposure", True),
             "exposure_ms": data.get("exposure_ms", 10),
             "gain": data.get("gain", 1.0),

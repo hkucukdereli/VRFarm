@@ -4,17 +4,21 @@ data:
 devices:
   camera:
     auto_exposure: false
-    bitrate_mbps: 4
+    bit_depth: 8
+    bitrate_mbps: 6
     enabled: true
     exposure_ms: 10
-    fps: 50
+    fps: 60
     gain: 2.0
     gop_s: 5.0
     h264_profile: main
     live_preset: high
     resolution:
     - 1014
-    - 540
+    - 760
+    sensor_mode:
+    - 2028
+    - 1520
     type: camera
   display:
     apply_warp: true

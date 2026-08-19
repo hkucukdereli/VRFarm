@@ -1158,6 +1158,8 @@ def _get_deploy_files(role: str) -> list[tuple[str, str]]:
             # shepherd health monitor code. Its config.yaml is NOT here on purpose — it is
             # seeded once at Install (cp -n) so thresholds edited on the Pi survive a re-Deploy.
             ("shepherd/shepherd.py", "shepherd/shepherd.py"),
+            # camera feasibility sweep (run by hand on the Pi to validate mode/fps/CPU combos)
+            ("tools/camera_sweep.py", "tools/camera_sweep.py"),
         ]
     elif role == "follower":
         files += [

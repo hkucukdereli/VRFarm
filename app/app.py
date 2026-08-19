@@ -793,6 +793,9 @@ def go():
             "bitrate_mbps": cam_cfg.get("bitrate_mbps", 4),
             "h264_profile": cam_cfg.get("h264_profile", "main"),
             "gop_s": cam_cfg.get("gop_s", 5.0),
+            "sensor_mode": cam_cfg.get("sensor_mode"),   # pin FoV/mode
+            "bit_depth": cam_cfg.get("bit_depth"),       # pin raw readout depth
+
             "live_preset": cam_cfg.get("live_preset", "med"),
             **_cam_exposure(cam_cfg),   # runtime exposure/gain override -> carried from the UI into the recording
         }

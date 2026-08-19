@@ -110,9 +110,10 @@ the NPZ to the Follower and downloads the trial table. Each step appears in the 
 On success the **Estimated** clock and **Session #** appear and the Stimulus canvas
 initializes with the correct rulers.
 
-> **Re-Deploy after editing any parameter.** The server drops the deployed flag when the
-> task changes, but the parameter inputs have no change listener, so **GO does not grey
-> out** — the session would silently run the previously deployed values.
+Editing any task parameter after a Deploy drops the phase back to **Connected**: GO greys
+out, Deploy re-arms, and the Log says *"Parameter changed after Deploy — re-Deploy before
+GO."* This is deliberate — the Pis still hold the previously deployed YAML and the
+pre-generated stimulus plan, so running without a re-Deploy would use the old values.
 
 ### 5. GO
 
@@ -244,7 +245,7 @@ exercise the global-timeout abort path. The camera stays blank — the mock serv
 | **GO** greyed | You are not in the Deployed phase. After a session, and after any Load Rig, you must re-Deploy |
 | Deploy refuses with an alert | Subject ID / Date / Session # is blank |
 | A Pi is red on Load Rig | `ping` it, then `curl http://<ip>:5080/api/status`, then `sudo systemctl status vrfarm` |
-| Parameter edits had no effect on the run | You did not re-Deploy. GO does not grey out on edits |
+| Phase dropped to Connected on its own | You edited a task parameter, which invalidates the deploy. Press **Deploy** again |
 | Rasters empty during a run | Press **Live**; if still empty, inbound UDP 5571 is blocked on the controller ([CONTROLLER_SETUP.md §1](CONTROLLER_SETUP.md#1-network--static-ip-on-the-wired-nic)) |
 | ⚠️ *CAMERA NOT RECORDING* in the log | The session runs without video. Check the SSD mount and `data.video_dir` |
 | 🐑 alerts in the log | shepherd health warnings from the Leader — temperature, disk, CPU or encode rate. See [shepherd/README.md](../shepherd/README.md) |

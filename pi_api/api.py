@@ -24,6 +24,9 @@ app = Flask(__name__)
 # Base directory for rig files on this Pi
 RIG_DIR = Path.home() / "rig"
 DATA_DIR = Path.home() / "data"
+# shepherd health-monitor logs (matches shepherd/config.yaml output_dir default). The controller
+# mirrors the latest of these to its data dir at transfer time and prunes old ones here.
+SHEPHERD_LOG_DIR = Path.home() / "shepherd_logs"
 
 # Currently running process (leader or follower)
 _process: subprocess.Popen | None = None
@@ -86,7 +89,7 @@ def upload():
     return jsonify({"ok": True, "path": str(dest)})
 
 
-ALLOWED_DOWNLOAD_DIRS = [RIG_DIR, DATA_DIR, Path("/media/vruser/ssd/video")]
+ALLOWED_DOWNLOAD_DIRS = [RIG_DIR, DATA_DIR, SHEPHERD_LOG_DIR, Path("/media/vruser/ssd/video")]
 # video_dir(s) announced at runtime (camera start / list_files ?video_dir=...) — the rig
 # yaml is the source of truth on the controller; the Pi learns it per-request.
 _EXTRA_DOWNLOAD_DIRS: set = set()
@@ -1064,6 +1067,59 @@ def shepherd_control():
     active = subprocess.run(["systemctl", "is-active", "shepherd"],
                             capture_output=True, text=True, timeout=10)
     return jsonify({"ok": True, "enabled": enabled, "running": active.stdout.strip() == "active"})
+
+
+def _latest_shepherd_pair():
+    """(jsonl_path, alerts_path|None) for the most recent shepherd run, or (None, None).
+    'Most recent' = newest shepherd_*.jsonl by mtime — that's the currently-running log."""
+    if not SHEPHERD_LOG_DIR.is_dir():
+        return None, None
+    jsonls = sorted(SHEPHERD_LOG_DIR.glob("shepherd_*.jsonl"), key=lambda p: p.stat().st_mtime)
+    if not jsonls:
+        return None, None
+    jsonl = jsonls[-1]
+    alerts = jsonl.with_name(jsonl.stem + ".alerts.log")        # shepherd_<stamp>.alerts.log
+    return jsonl, (alerts if alerts.exists() else None)
+
+
+@app.route("/api/shepherd_logs/latest")
+def shepherd_logs_latest():
+    """Home-relative paths + sizes of the newest shepherd jsonl (and its alerts log) so the
+    controller can pull them via /api/download. Returns files:[] when none exist yet."""
+    jsonl, alerts = _latest_shepherd_pair()
+    home = Path.home()
+    files, sizes = [], {}
+    for p in (jsonl, alerts):
+        if p is not None:
+            rel = str(p.relative_to(home)) if p.is_relative_to(home) else str(p)
+            files.append(rel)
+            sizes[rel] = p.stat().st_size
+    return jsonify({"ok": True, "files": files, "sizes": sizes})
+
+
+@app.route("/api/shepherd_logs/cleanup", methods=["POST"])
+def shepherd_logs_cleanup():
+    """Delete shepherd logs older than `days` (by mtime) to bound accumulation on the Pi. The
+    newest jsonl/alerts pair (the active run) is always kept, even if the check is generous."""
+    days = float((request.json or {}).get("days", 7))
+    if not SHEPHERD_LOG_DIR.is_dir():
+        return jsonify({"ok": True, "deleted": [], "kept": 0})
+    cutoff = time.time() - days * 86400
+    keep = {p for p in _latest_shepherd_pair() if p is not None}
+    deleted, kept = [], 0
+    for p in SHEPHERD_LOG_DIR.glob("shepherd_*"):
+        if p in keep or not p.is_file():
+            kept += 1
+            continue
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+                deleted.append(p.name)
+            else:
+                kept += 1
+        except OSError:
+            pass
+    return jsonify({"ok": True, "deleted": deleted, "kept": kept, "days": days})
 
 
 @app.route("/api/monitor_photodiode", methods=["POST"])

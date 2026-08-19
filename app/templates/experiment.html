@@ -2440,6 +2440,25 @@ async function quitApp() {
 }
 
 // ── Init ──
+
+// Editing a task parameter after a Deploy makes the deployed plan stale: the Pis still hold
+// the previously deployed YAML and the pre-generated stimulus NPZ, so GO would silently run
+// the OLD values. The server drops its deployed flag whenever the task is updated, but
+// nothing told it (or the user) that a field had changed, so GO stayed lit. Fall back to
+// 'connected' on the first edit — that greys GO and re-arms Deploy.
+//
+// 'change' rather than 'input': it fires on commit/blur for text and number fields and
+// immediately for selects and checkboxes, so a half-typed number can't invalidate the
+// deploy mid-keystroke. Programmatic writes (populateTaskFields, correctContrast,
+// _updateNTrials) assign .value directly and fire no event, so they can't trip this.
+document.getElementById('experiment-subsections')
+  .addEventListener('change', (e) => {
+    if (!e.target.classList || !e.target.classList.contains('task-param')) return;
+    if (phase !== 'deployed') return;
+    setPhase('connected');
+    log('Parameter changed after Deploy — re-Deploy before GO.');
+  });
+
 updateButtons();
 clearAllCanvases();
 </script>

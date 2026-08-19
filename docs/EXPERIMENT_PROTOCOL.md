@@ -201,10 +201,9 @@ Click **Deploy**. This:
 **GO enables only after a successful deploy**, and one GO is spent per Deploy — after a
 session you must Deploy again before you can start another.
 
-> **Re-Deploy after editing any parameter.** The server invalidates the deploy internally
-> when the task changes, but the parameter fields have no change listener, so **GO does
-> not grey out**. Pressing GO after an un-deployed edit runs the *previously deployed*
-> values. The one exception is **Correct**, which visibly drops the phase back.
+Editing any task parameter after a Deploy invalidates it: the phase drops back to
+**Connected**, GO greys out and Deploy re-arms, with a note in the Log. The Pis still hold
+the previously deployed YAML and stimulus plan, so a re-Deploy is required before GO.
 
 ### Step 7 — GO
 

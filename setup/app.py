@@ -304,20 +304,28 @@ def api_install_pi():
         #     re-Install/Deploy — to change them, edit ~/rig/shepherd/config.yaml on the leader and
         #     `sudo systemctl restart shepherd`. (A shepherd.py CODE change rides Deploy but needs a
         #     restart to take effect; Install restarts it.)
+        #     The Monitor toggle in the setup UI (rig.shepherd.enabled) decides whether Install
+        #     brings shepherd UP (enable+restart) or takes it DOWN (stop+disable) so it does not
+        #     run during experiments. The unit + config are still seeded either way, so flipping
+        #     the toggle back ON is just another Install.
         if role == "leader":
+            shepherd_on = data.get("shepherd_enabled", True)
             _scp(str(ROOT / "shepherd" / "shepherd.service"),
                  f"{ssh_prefix}:/tmp/shepherd.service")
             _scp(str(ROOT / "shepherd" / "config.yaml"),
                  f"{ssh_prefix}:/tmp/shepherd.config.yaml")
+            svc_cmd = ("sudo systemctl enable shepherd && sudo systemctl restart shepherd"
+                       if shepherd_on else
+                       "sudo systemctl disable shepherd 2>/dev/null; sudo systemctl stop shepherd 2>/dev/null || true")
             _ssh(ssh_prefix,
                  "mkdir -p ~/rig/shepherd; "
                  "cp -n /tmp/shepherd.config.yaml ~/rig/shepherd/config.yaml 2>/dev/null || true; "
                  "sudo cp /tmp/shepherd.service /etc/systemd/system/ && "
                  "sudo systemctl daemon-reload && "
-                 "sudo systemctl enable shepherd && "
-                 "sudo systemctl restart shepherd",
+                 f"{svc_cmd}",
                  timeout=20)
-            steps.append("Installed shepherd health monitor (separate service; config seeded)")
+            steps.append("Installed shepherd health monitor (running)" if shepherd_on
+                         else "Installed shepherd health monitor (stopped+disabled — Monitor OFF)")
 
         # (lgpio needs no daemon — it talks to /dev/gpiochip directly, so there's no pigpiod to enable.)
         return jsonify({"ok": True, "steps": steps})

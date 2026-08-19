@@ -1,5 +1,5 @@
 """
-temp_diode/pulse_test.py  (pygame)
+display_diagnostics/sync_square_flash.py  (pygame)
 
 Standalone photodiode bring-up test. Runs on mozzarella (the FOLLOWER / display Pi).
 
@@ -21,11 +21,11 @@ Timing modes:
   pulse (--pulse N): replicates the real per-frame sync (follower._show_synced):
                     vsync-locked, patch ON every Nth frame during the stim.
 
-Run on mozzarella (projector X must be up — see start_projector.sh), or use deploy.sh:
-  SDL_AUDIODRIVER=dummy DISPLAY=:0 ~/miniforge3/envs/rig/bin/python pulse_test.py
-  ...pulse_test.py --row 7              # bottom-row position sweep
-  ...pulse_test.py --row 7 --pulse 5    # sweep with the real per-frame cadence
-  ...pulse_test.py --color white        # compare red vs white edge on the scope
+Run on mozzarella (projector X must be up — see start_projector.sh), or use run_sync_flash.sh:
+  SDL_AUDIODRIVER=dummy DISPLAY=:0 ~/miniforge3/envs/rig/bin/python sync_square_flash.py
+  ...sync_square_flash.py --row 7              # bottom-row position sweep
+  ...sync_square_flash.py --row 7 --pulse 5    # sweep with the real per-frame cadence
+  ...sync_square_flash.py --color white        # compare red vs white edge on the scope
 
 Each stim ON/OFF edge prints a time.time() stamp. Ctrl-C / ESC / q quits.
 

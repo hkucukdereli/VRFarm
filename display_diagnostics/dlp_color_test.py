@@ -1,10 +1,10 @@
 """
-temp_diode/frame_sequence.py  (pygame)
+display_diagnostics/dlp_color_test.py  (pygame)
 
 Manually push a sequence of FULL-FRAME (or split) solid colors to the projector on
 mozzarella (the FOLLOWER / display Pi). Standalone: no UDP, no engine, no devices
 framework, writes no data. Same pygame fullscreen setup as devices/display.py /
-pulse_test.py (FULLSCREEN|DOUBLEBUF|HWSURFACE, vsync=1).
+sync_square_flash.py (FULLSCREEN|DOUBLEBUF|HWSURFACE, vsync=1).
 
 Sequence is a pipe-separated list of blocks; each block is "SPEC,SPEC,...:COUNT".
 Each SPEC is one of:
@@ -21,15 +21,15 @@ Default sequence (what was asked for):
     then half-RED 1s, half-GREEN 1s, half-BLUE 1s   (color left half, dark right half)
 
 Run on mozzarella (projector X must be up -- see start_projector.sh):
-    SDL_AUDIODRIVER=dummy DISPLAY=:0 ~/miniforge3/envs/rig/bin/python frame_sequence.py
-    ... frame_sequence.py --seq "red:1s | red/black:1s"   # full then split
-    ... frame_sequence.py --seq "red,green,blue:20"       # cycle per frame (20 frames)
-    ... frame_sequence.py --cycles 20                     # stop after 20 loops
-    ... frame_sequence.py --verbose                       # timestamp every frame
+    SDL_AUDIODRIVER=dummy DISPLAY=:0 ~/miniforge3/envs/rig/bin/python dlp_color_test.py
+    ... dlp_color_test.py --seq "red:1s | red/black:1s"   # full then split
+    ... dlp_color_test.py --seq "red,green,blue:20"       # cycle per frame (20 frames)
+    ... dlp_color_test.py --cycles 20                     # stop after 20 loops
+    ... dlp_color_test.py --verbose                       # timestamp every frame
 
 Block onsets print a time.time() stamp (first 2 loops, then quiet). ESC / q / Ctrl-C
 quits. The projector Pi is headless, so to stop a backgrounded run:
-    pkill -9 -f 'frame_sequence[.]py'
+    pkill -9 -f 'dlp_color_test[.]py'
 """
 
 import argparse
@@ -126,7 +126,7 @@ def main():
         dur = f"{val:g} s" if unit == "s" else f"{int(val)} frames"
         print(f"  block {bi}: {dur}, {specs}")
     print(f"{'loop until quit' if args.cycles == 0 else str(args.cycles) + ' loops'}")
-    print("ESC / q / Ctrl-C to quit  (headless projector -> pkill -9 -f 'frame_sequence[.]py')\n")
+    print("ESC / q / Ctrl-C to quit  (headless projector -> pkill -9 -f 'dlp_color_test[.]py')\n")
 
     running = True
     loops = 0
@@ -167,7 +167,7 @@ def main():
                 print(f"{time.time():.6f}  loop{loops - 1}: {nframes} frames in "
                       f"{dt * 1000:.0f} ms ({nframes / dt:.1f} fps)")
             if loops == 5 and not args.verbose and args.cycles == 0:
-                print("  (steady; looping silently -- pkill -9 -f 'frame_sequence[.]py' to stop)")
+                print("  (steady; looping silently -- pkill -9 -f 'dlp_color_test[.]py' to stop)")
             if args.cycles and loops >= args.cycles:
                 running = False
     except KeyboardInterrupt:

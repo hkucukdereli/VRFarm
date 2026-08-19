@@ -12,6 +12,8 @@ Merges (then deletes the source):
   metadata.yaml        -> root attributes (+ task_config as a JSON string)
   stimuli.npz          -> /stimulus group (planned params, de-duped vs /trials)
   frame_timestamps.npy -> /camera/frame_timestamps  (Nx3, with a `columns` attr)
+  camera_metadata.json -> /camera attrs (sensor mode, ScalerCrop, output size, colour space,
+                          exposure, encoder settings — the geometry the video was shot with)
   trials.yaml          -> dropped (redundant with stimuli.npz)
 
 Reorganizes the flat per-trial datasets the engine wrote into groups:
@@ -76,8 +78,9 @@ def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=Tru
     npz_path = session_dir / "stimuli.npz"
     trials_yaml = session_dir / "trials.yaml"
     tslog_path = Path(video_session_dir) / "frame_timestamps.npy" if video_session_dir else None
+    geom_path = Path(video_session_dir) / "camera_metadata.json" if video_session_dir else None
 
-    merged = {"metadata": False, "stimulus": False, "camera": False}
+    merged = {"metadata": False, "stimulus": False, "camera": False, "camera_geometry": False}
     tmp = h5_path.with_name(h5_path.name + ".consolidating")
     try:
         with h5py.File(h5_path, "r") as src, h5py.File(tmp, "w") as dst:
@@ -133,6 +136,31 @@ def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=Tru
                 d.attrs["columns"] = ["frame_idx", "wall_clock_s", "sensor_ts_ns"]
                 merged["camera"] = True
 
+            # 5) camera_metadata.json -> /camera attrs. Sensor mode, ScalerCrop, output size,
+            # colour space, exposure and encoder settings — i.e. which part of the scene each
+            # pixel is and at what scale. None of it is recoverable from video.h264, so without
+            # this a change of resolution or crop is invisible in the archive. require_group:
+            # the geometry is worth keeping even when frame_timestamps.npy is missing.
+            if geom_path and geom_path.exists():
+                try:
+                    geom = json.loads(geom_path.read_text())
+                    cg = dst.require_group("camera")
+                    for k, v in geom.items():
+                        # numeric lists (sizes, crop rects) -> native array attrs, so they read
+                        # back as arrays in h5py/HDFView/MATLAB rather than needing json.loads.
+                        # Anything else non-scalar -> JSON string.
+                        if isinstance(v, list) and v and all(isinstance(x, (int, float))
+                                                             and not isinstance(x, bool)
+                                                             for x in v):
+                            cg.attrs[k] = np.asarray(v)
+                        elif isinstance(v, (list, dict)):
+                            cg.attrs[k] = json.dumps(v)
+                        else:
+                            cg.attrs[k] = v
+                    merged["camera_geometry"] = True
+                except Exception as e:
+                    print(f"[consolidate] camera_metadata.json unreadable ({e}); skipping")
+
         os.replace(tmp, h5_path)   # atomic swap only on full success
     except Exception:
         if tmp.exists():
@@ -141,7 +169,7 @@ def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=Tru
 
     removed = []
     if delete_sidecars:
-        for p in (meta_path, npz_path, trials_yaml, tslog_path):
+        for p in (meta_path, npz_path, trials_yaml, tslog_path, geom_path):
             if p and Path(p).exists():
                 Path(p).unlink()
                 removed.append(Path(p).name)

@@ -297,6 +297,28 @@ def api_install_pi():
              timeout=20)
         steps.append("Installed systemd service")
 
+        # 6b. shepherd health monitor (leader only) — a SEPARATE process from pi_api by design, so
+        #     a pi_api stall can't take the watchdog down (and shepherd's API probe DETECTS that
+        #     stall). shepherd.py rode step 5; here we seed its config and install its own service.
+        #     config.yaml is seeded with `cp -n` so thresholds/messages edited on the Pi survive a
+        #     re-Install/Deploy — to change them, edit ~/rig/shepherd/config.yaml on the leader and
+        #     `sudo systemctl restart shepherd`. (A shepherd.py CODE change rides Deploy but needs a
+        #     restart to take effect; Install restarts it.)
+        if role == "leader":
+            _scp(str(ROOT / "shepherd" / "shepherd.service"),
+                 f"{ssh_prefix}:/tmp/shepherd.service")
+            _scp(str(ROOT / "shepherd" / "config.yaml"),
+                 f"{ssh_prefix}:/tmp/shepherd.config.yaml")
+            _ssh(ssh_prefix,
+                 "mkdir -p ~/rig/shepherd; "
+                 "cp -n /tmp/shepherd.config.yaml ~/rig/shepherd/config.yaml 2>/dev/null || true; "
+                 "sudo cp /tmp/shepherd.service /etc/systemd/system/ && "
+                 "sudo systemctl daemon-reload && "
+                 "sudo systemctl enable shepherd && "
+                 "sudo systemctl restart shepherd",
+                 timeout=20)
+            steps.append("Installed shepherd health monitor (separate service; config seeded)")
+
         # (lgpio needs no daemon — it talks to /dev/gpiochip directly, so there's no pigpiod to enable.)
         return jsonify({"ok": True, "steps": steps})
 
@@ -1133,6 +1155,9 @@ def _get_deploy_files(role: str) -> list[tuple[str, str]]:
         files += [
             ("engine/__init__.py", "engine/__init__.py"),
             ("engine/leader.py", "engine/leader.py"),
+            # shepherd health monitor code. Its config.yaml is NOT here on purpose — it is
+            # seeded once at Install (cp -n) so thresholds edited on the Pi survive a re-Deploy.
+            ("shepherd/shepherd.py", "shepherd/shepherd.py"),
         ]
     elif role == "follower":
         files += [

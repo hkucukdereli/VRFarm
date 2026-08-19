@@ -55,11 +55,16 @@ def status():
     cam_rec = bool(cam is not None
                    and getattr(cam, "_recording", False)
                    and not getattr(cam, "_is_preview", True))
+    # camera_frames = frames encoded so far this recording. shepherd (the health
+    # monitor) polls this to derive live encode fps and alert if the encoder falls
+    # behind (a thermal-throttle symptom). None when not recording.
+    cam_frames = getattr(cam, "_frame_idx", None) if cam_rec else None
     return jsonify({
         "ok": True,
         "hostname": os.uname().nodename,
         "process_running": _process is not None and _process.poll() is None,
         "camera_recording": cam_rec,
+        "camera_frames": cam_frames,
         "disk_free_gb": round(disk.free / 1e9, 1),
         "disk_total_gb": round(disk.total / 1e9, 1),
         "python": sys.executable,

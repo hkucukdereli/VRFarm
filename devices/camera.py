@@ -66,9 +66,11 @@ class Camera(Device):
                 "label": "Resolution",
                 "options": [[854, 480], [1014, 540], [1920, 1080]],
             },
-            # Max 62, not 120: the 2028x1080 sensor mode ceilings at 62.81 fps @12-bit. Asking
-            # for more either silently under-delivers or pushes libcamera onto the 1332x990 mode
-            # — a field-of-view change with no resolution change, which is very hard to spot.
+            # Max 62, not 120: the 2028x1080 sensor mode ceilings at 62.81 fps @12-bit.
+            # Measured: requesting 70 stays on this mode and clamps to 62.81 — but the encoder is
+            # still told framerate=70, so it budgets bits for 70 fps and delivers 62.81, and the
+            # file comes out UNDER target (3.58 vs 4.0 Mbit/s) and mis-tagged. Same class of bug
+            # as the original framerate default, just inverted. The mode does not change.
             "fps": {
                 "type": "int", "default": 50,
                 "label": "FPS", "min": 10, "max": 62,
@@ -135,6 +137,8 @@ class Camera(Device):
         self._frame_idx = 0
         self._tslog_path = None
         self._video_path = None
+        self._geom_path = None
+        self._geometry = {}
 
     def start_recording(self, session_id: str, output_dir: str):
         from picamera2 import Picamera2
@@ -149,6 +153,8 @@ class Camera(Device):
         out_dir.mkdir(parents=True, exist_ok=True)
         self._video_path = out_dir / "video.h264"
         self._tslog_path = out_dir / "frame_timestamps.npy"
+        self._geom_path = out_dir / "camera_metadata.json"
+        self._geometry = {}
         self._frame_log = []
         self._frame_idx = 0
 
@@ -196,6 +202,7 @@ class Camera(Device):
                 self._lores_size = tuple(self._cam.camera_configuration()["lores"]["size"])
             except Exception:
                 self._lores_size = lores_size
+            self._geometry = self._capture_geometry(encoder)
             self._encoding = True
             self._live = True
         except Exception:
@@ -276,6 +283,79 @@ class Camera(Device):
                 time.sleep(0.3)
             raise
 
+    @staticmethod
+    def _jsonable(v):
+        """Coerce a libcamera/numpy value into something json.dump can write."""
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            return v
+        if isinstance(v, (list, tuple)):
+            return [Camera._jsonable(x) for x in v]
+        if isinstance(v, dict):
+            return {str(k): Camera._jsonable(x) for k, x in v.items()}
+        for attr in ("tolist", "item"):
+            try:
+                return getattr(v, attr)()
+            except Exception:
+                pass
+        return str(v)
+
+    def _capture_geometry(self, encoder=None) -> dict:
+        """Snapshot everything that determines WHICH PART OF THE SCENE each pixel is, and at what
+        scale — sensor mode, ScalerCrop, output size, binning, orientation, colour space — plus the
+        exposure and encoder settings that produced this file.
+
+        None of it is recoverable from video.h264 afterwards: two recordings can be byte-identical
+        in format and cover completely different fields of view because the ScalerCrop differed.
+        Written next to frame_timestamps.npy and folded into the .h5 /camera attrs by
+        shared/consolidate.py, so a session is self-describing.
+
+        Never raises: a metadata problem must not abort a recording. Missing keys are simply absent.
+        """
+        g = {}
+
+        def put(key, fn):
+            try:
+                g[key] = self._jsonable(fn())
+            except Exception:
+                pass
+
+        cam = self._cam
+        if cam is not None:
+            props = getattr(cam, "camera_properties", {}) or {}
+            for k in ("Model", "PixelArraySize", "PixelArrayActiveAreas", "Rotation",
+                      "ColorFilterArrangement", "ScalerCropMaximum", "UnitCellSize"):
+                if k in props:
+                    put(f"sensor_{k}", lambda k=k: props[k])
+            cfg = {}
+            put("_cfg", lambda: cfg.update(cam.camera_configuration()) or None)
+            g.pop("_cfg", None)
+            for name in ("main", "lores", "raw"):
+                if cfg.get(name):
+                    put(f"{name}_size", lambda n=name: cfg[n].get("size"))
+                    put(f"{name}_format", lambda n=name: cfg[n].get("format"))
+            if cfg.get("sensor"):
+                put("sensor_mode_output_size", lambda: cfg["sensor"].get("output_size"))
+                put("sensor_mode_bit_depth", lambda: cfg["sensor"].get("bit_depth"))
+            put("colour_space", lambda: cfg.get("colour_space"))
+
+        # Requested (as opposed to negotiated) settings, straight from the rig config.
+        g["requested_resolution"] = list(self.resolution)
+        g["requested_fps"] = self.fps
+        g["auto_exposure"] = bool(self.auto_exposure)
+        g["exposure_ms"] = float(self.exposure_ms)
+        g["gain"] = float(self.gain)
+
+        if encoder is not None:
+            g["encoder_class"] = type(encoder).__name__
+            for attr, key in (("bitrate", "encoder_bitrate_bps"),
+                              ("framerate", "encoder_framerate"),
+                              ("iperiod", "encoder_iperiod_frames"),
+                              ("profile", "encoder_profile"),
+                              ("repeat", "encoder_repeat_headers")):
+                put(key, lambda a=attr: getattr(encoder, a))
+        g["gop_s"] = float(self.gop_s)
+        return g
+
     def _scaled_size(self, scale):
         """A (w,h) scaled from the recording resolution, clamped even and >=64 — the lores preview
         stream size (recording) and the downsampled preview-only size (experiment Live)."""
@@ -329,7 +409,17 @@ class Camera(Device):
             # frame spacing, no pipeline jitter; map to wall time via
             # offset = median(wall - sensor/1e9) over the session.
             try:
-                sens_ns = request.get_metadata().get("SensorTimestamp", 0)
+                md = request.get_metadata()
+                sens_ns = md.get("SensorTimestamp", 0)
+                # The APPLIED crop, once, from the first frame. libcamera may adjust the requested
+                # rect (ISP minimums, aspect matching), so only the request metadata is the truth
+                # about what field of view this file actually shows.
+                if self._frame_idx == 0 and "ScalerCrop" in md:
+                    self._geometry["scaler_crop_applied"] = self._jsonable(md["ScalerCrop"])
+                    for k in ("ExposureTime", "AnalogueGain", "DigitalGain",
+                              "FrameDuration", "ColourGains"):
+                        if k in md:
+                            self._geometry[f"applied_{k}"] = self._jsonable(md[k])
             except Exception:
                 sens_ns = 0
             self._frame_log.append((self._frame_idx, time.time(), sens_ns))
@@ -384,6 +474,19 @@ class Camera(Device):
                 result["avg_fps"] = len(self._frame_log) / max(dur, 1)
                 result["video_path"] = str(self._video_path)
                 result["timestamps_path"] = str(self._tslog_path)
+                # measured_fps is the only frame rate that is always true: the SPS tag depends on
+                # what the encoder was told, and the config is only a request.
+                self._geometry["measured_fps"] = result["avg_fps"]
+                self._geometry["frame_count"] = len(self._frame_log)
+            # Sidecar, even if no frames were logged — knowing the geometry of a failed or empty
+            # recording is still worth more than knowing nothing. Never let it break the stop.
+            if self._geom_path and self._geometry:
+                try:
+                    import json
+                    Path(self._geom_path).write_text(json.dumps(self._geometry, indent=1))
+                    result["geometry_path"] = str(self._geom_path)
+                except Exception as e:
+                    print(f"[camera] could not write {self._geom_path}: {e}", flush=True)
         self._release_camera()
         return result
 
@@ -465,6 +568,8 @@ class Camera(Device):
             files.append(str(self._video_path))
         if self._tslog_path and Path(self._tslog_path).exists():
             files.append(str(self._tslog_path))
+        if self._geom_path and Path(self._geom_path).exists():
+            files.append(str(self._geom_path))
         return files
 
     def close(self):

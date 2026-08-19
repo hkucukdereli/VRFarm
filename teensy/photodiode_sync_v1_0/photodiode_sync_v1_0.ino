@@ -80,7 +80,7 @@ static inline float countsToVolts(int c) { return c * ADC_VREF / ((1 << ADC_BITS
 
 void setup() {
   pinMode(OUT_PIN, OUTPUT);  digitalWriteFast(OUT_PIN, LOW);
-  pinMode(LED_PIN, OUTPUT);  digitalWriteFast(LED_PIN, LOW);
+  if (DEBUG) {pinMode(LED_PIN, OUTPUT);  digitalWriteFast(LED_PIN, LOW);}
   analogReadResolution(ADC_BITS);
   analogReadAveraging(8);                    // light averaging for a steadier threshold
   hiCounts = (int)(THRESHOLD_HI_V / ADC_VREF * ((1 << ADC_BITS) - 1));
@@ -124,7 +124,7 @@ void loop() {
       pulseCount++;
       outActive = true; outStartUs = now;
       digitalWriteFast(OUT_PIN, HIGH);
-      digitalWriteFast(LED_PIN, HIGH);
+      if (DEBUG) {digitalWriteFast(LED_PIN, HIGH);}
     }
   }
 
@@ -132,7 +132,7 @@ void loop() {
   if (outActive && (now - outStartUs) >= OUT_PULSE_US) {
     outActive = false;
     digitalWriteFast(OUT_PIN, LOW);
-    digitalWriteFast(LED_PIN, LOW);
+    if (DEBUG) {digitalWriteFast(LED_PIN, LOW);}
   }
 
 #if DEBUG

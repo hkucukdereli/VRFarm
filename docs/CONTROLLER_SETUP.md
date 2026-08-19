@@ -119,7 +119,7 @@ conda activate vrfarm
 pip install flask requests scipy matplotlib numpy h5py pyyaml
 ```
 
-Controller-only deps — `picamera2`/`pigpio` live on the Pis, not here. The setup UI builds
+Controller-only deps — `picamera2`/`lgpio` live on the Pis, not here. The setup UI builds
 the warp map with `sys.executable`, so it uses whatever `python` is running the UI (this env).
 
 ---
@@ -158,10 +158,16 @@ python setup/app.py       # setup UI      -> http://localhost:4999
 python app/app.py         # experiment UI -> http://localhost:5000
 ```
 
-1. Setup UI -> Load Rig -> **Connect**: both Pis answer on REST 5080.
+1. Setup UI -> **Load Rig**: this also checks every Pi, so both should show a green dot
+   (there is no separate Connect button). Then **Initialize** to bring the devices up.
 2. **Deploy** to push current engine/device code to the Pis.
-3. Experiment UI -> Connect -> Deploy -> run a short **5-trial** session; live events
-   appearing in the dashboard proves inbound UDP 5571 and the Leader's reply-to-sender work.
+3. Experiment UI -> **Load Rig** -> **Load Experiment** -> **Deploy** -> run a short
+   **5-trial** session; live events appearing in the dashboard proves inbound UDP 5571 and
+   the Leader's reply-to-sender work.
+
+Both UIs are walked through with screenshots in [SETUP_UI.md](SETUP_UI.md) and
+[EXPERIMENT_UI.md](EXPERIMENT_UI.md). To validate the controller with no rig attached, run
+`python tools/mock_pi.py` and use the `demo` rig.
 
 ---
 

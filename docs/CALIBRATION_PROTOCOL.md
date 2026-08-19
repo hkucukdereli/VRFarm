@@ -1,6 +1,6 @@
 # Rig Calibration Protocol
 
-**Rig:** cheese — display on the Follower (RPi4 + DLP **rear-projector**) + parabolic screen; reward valve on the Leader
+**Rig:** `rigs/cheese.yaml` (listed as `cheese` in the UI dropdowns) — display on the Follower (RPi4 + DLP **rear-projector**) + parabolic screen; reward valve on the Leader
 **Last updated:** 2026-08-03
 **Files:** `display_calibration/` in the repo (on the controller); `~/rig/calibration/` on the follower
 
@@ -200,7 +200,7 @@ The reward valve (`devices/reward.py`, on the Leader) maps **pulse duration (ms)
 
 ### Where it lives
 
-Setup UI → **reward card**. The calibration is an editable **ms / µL** table (per-pulse volume), stored in the rig JSON at `rig.devices.reward.calibration.main = [[ms, µL], …]`.
+Setup UI → **reward card** (see [SETUP_UI.md](SETUP_UI.md#reward-valve)). The calibration is an editable **ms / µL** table (per-pulse volume), stored in the rig YAML at `rig.devices.reward.calibration.main = [[ms, µL], …]`.
 
 ### Procedure
 

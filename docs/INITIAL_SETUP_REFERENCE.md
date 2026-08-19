@@ -2,7 +2,8 @@
 
 **Project:** VRFarm
 **Last updated:** 2026-08-11
-**Current rig:** cheese (Leader, Follower)
+**Current rig:** `rigs/cheese.yaml` — rig `cheese`, hosts `cheddar` (Leader) and
+`mozzarella` (Follower). The UI dropdowns list the filename, so it appears as `cheese`.
 
 This is the first-time **rig bring-up** reference: hardware, network/IPs, OS, conda
 Pi bring-up, envs, package installs, GPIO (lgpio), projector startup, systemd service, SSH keys, gotchas.
@@ -352,18 +353,19 @@ cd ~/VRFarm
 python setup/app.py    # opens localhost:4999
 ```
 
-1. **Load Rig** (`cheese`)
-2. **Connect** — checks SSH + REST API on each Pi (`/api/status`)
-3. **Install** (first time, via SSH): ensures the `rig` conda env matched to system
-   Python, installs the device-specific apt/pip packages, symlinks the camera bindings,
-   uploads the code, installs + enables the `vrfarm` systemd service (lgpio needs no daemon).
-4. **Deploy** (via REST API): re-uploads the code files and restarts `pi_api` so the new
-   code runs; the follower also gets `start_projector.sh`, the calibration tools, and
-   `~/dlp/` via scp.
-5. **Init Devices** — initializes each enabled device on its Pi (projector + display,
-   lick, reward, camera, photodiode, encoder).
+1. **Load Rig** (`cheese`) — also checks SSH + the REST API on each Pi (`/api/status`)
+   automatically. There is no separate Connect button; the per-Pi **Check** button re-runs it.
+2. **Install** (first time, via SSH): ensures the `rig` conda env matched to system
+   Python, installs the device-specific apt/pip packages, symlinks the camera and lgpio
+   bindings, uploads the code, pushes `~/dlp/` to the follower, and installs + enables the
+   `vrfarm` systemd service (lgpio needs no daemon). Reboot the follower afterwards.
+3. **Deploy** (via REST API): re-uploads the code files and restarts `pi_api` so the new
+   code runs; the follower also gets `start_projector.sh` and the calibration tools.
+4. **Initialize** — initializes each enabled device on its Pi (projector + display,
+   lick, reward, camera, photodiode, encoder). It is disabled until every Pi is green, and
+   **Deploy / Restart API reset it**, so re-press it after either.
 
-Any parameter change in the UI invalidates a deploy (Go grays out in the experiment UI).
+Full walkthrough with screenshots: [SETUP_UI.md](SETUP_UI.md).
 
 ### systemd service
 
@@ -389,9 +391,10 @@ cd ~/VRFarm
 python app/app.py      # experiment UI, localhost:5000
 ```
 
-Workflow: Load Rig -> Connect -> Deploy -> Go -> Stop -> Transfer.
+Workflow: **Load Rig -> Load Experiment -> Deploy -> GO -> (STOP) -> Transfer.**
 An optional `VRFARM_SLACK_WEBHOOK` env var enables Slack start/end/timeout notifications.
-See `docs/EXPERIMENT_PROTOCOL.md` for the full protocol.
+See [EXPERIMENT_PROTOCOL.md](EXPERIMENT_PROTOCOL.md) for the scientific protocol and
+[EXPERIMENT_UI.md](EXPERIMENT_UI.md) for the interface itself.
 
 ---
 

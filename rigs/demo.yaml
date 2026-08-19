@@ -1,7 +1,91 @@
+# demo — a hardware-free rig for dry runs and documentation screenshots.
+#
+# Both "Pis" point at 127.0.0.1, where tools/mock_pi.py answers every pi_api call
+# as OK and plays a scripted UDP session on GO. Nothing here touches real hardware:
+# the IPs are loopback, so a stray Deploy/Install can never reach the real rig.
+#
+#   python tools/mock_pi.py          # fake pi_api :5080 + fake leader UDP :5572
+#   python app/app.py                # experiment UI  -> rig = demo
+#   python setup/app.py              # setup UI       -> rig = demo
+#
+# Device values below mirror rigs/cheese.yaml so every card in the setup UI and
+# every panel in the experiment UI renders with realistic content.
 data:
   leader_dir: /home/vruser/data
   video_dir: /media/vruser/ssd/video
-devices: {}
+devices:
+  calibration_probe:
+    enabled: true
+    gpio: 22
+    type: calibration_probe
+  camera:
+    auto_exposure: false
+    bit_depth: 8
+    bitrate_mbps: 6
+    enabled: true
+    exposure_ms: 10
+    fps: 60
+    gain: 2.0
+    gop_s: 5.0
+    h264_profile: main
+    live_preset: high
+    resolution:
+    - 1014
+    - 760
+    sensor_mode:
+    - 2028
+    - 1520
+    type: camera
+  display:
+    apply_warp: true
+    contrast_metric: weber
+    enabled: true
+    geometry_file: rig_geometry.yaml
+    refresh_hz: 60
+    resolution:
+    - 1920
+    - 1080
+    type: display
+  encoder:
+    enabled: true
+    i2c_address: '0x36'
+    i2c_bus: 1
+    sample_hz: 500
+    type: encoder
+    wheel_diameter_cm: 14.4
+  lick_sensor:
+    electrode: 4
+    enabled: true
+    i2c_address: '0x5A'
+    type: lick_sensor
+  photodiode:
+    enabled: true
+    gpio: 16
+    pulse_every_n_frames: 5
+    sync_brightness: 1.0
+    sync_corner: top-right
+    sync_size_px: 150
+    type: photodiode
+  reward:
+    calibration:
+      main:
+      - - 10
+        - 4
+      - - 20
+        - 9.1
+      - - 40
+        - 19.4
+    enabled: true
+    pins:
+      home:
+        gpio: 24
+        label: home
+      main:
+        gpio: 23
+        label: reward
+    reward_type: sucrose
+    type: reward
+grace_period_s: 10
 name: demo
 network:
   api_port: 5080
@@ -10,7 +94,25 @@ network:
   display_port: 5575
   event_port: 5571
 pis:
-  - name: mock-leader
-    ip: 127.0.0.1
-    role: leader
-    devices: []
+- devices:
+  - lick_sensor
+  - reward
+  - photodiode
+  - camera
+  - encoder
+  - calibration_probe
+  ip: 127.0.0.1
+  name: mock-leader
+  role: leader
+  user: vruser
+- devices:
+  - display
+  ip: 127.0.0.1
+  name: mock-follower
+  role: follower
+  user: vruser
+shepherd:
+  enabled: false
+slack:
+  enabled: false
+  webhook_url: ''

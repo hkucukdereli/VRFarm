@@ -65,7 +65,7 @@ pip install flask requests scipy matplotlib numpy h5py pyyaml
 
 **Leader** (`conda activate rig`):
 ```bash
-pip install flask pyyaml numpy scipy h5py smbus2 pigpio
+pip install flask pyyaml numpy scipy h5py smbus2
 ```
 Optional: `picamera2` (camera, enable in rig config).
 
@@ -75,11 +75,15 @@ pip install flask pyyaml numpy pygame
 ```
 
 Both Pis run Debian trixie. The `rig` conda env's Python **must match the system
-Python** (3.13) — the camera bindings are apt-built for the system Python and symlinked
-into the env, so a version mismatch breaks `import picamera2`. On trixie the `pigpio`
-apt package is gone: `pigpiod` is built from source (installed at `/usr/local/bin/pigpiod`
-with a systemd unit at `/etc/systemd/system/pigpiod.service`, enabled); the Python client
-is `pip install pigpio`.
+Python** (3.13) — the camera and GPIO bindings are apt-built for the system Python and
+symlinked into the env, so a version mismatch breaks `import picamera2` / `import lgpio`.
+
+GPIO is **lgpio**, which talks to `/dev/gpiochip*` directly: there is **no daemon**, and
+nothing to start before a session. It works on both the Pi 4 (BCM) and the Pi 5 (RP1);
+`pigpio`/`pigpiod` are retired and do not work on the Pi 5 at all. `pip install lgpio`
+builds from source and needs `swig`, so Install uses `sudo apt install python3-lgpio` plus
+a symlink into the env — the same pattern as the camera bindings. See
+[INITIAL_SETUP_REFERENCE.md](INITIAL_SETUP_REFERENCE.md) for the details.
 
 ### 4. Deploy code and install systemd service
 
@@ -129,13 +133,17 @@ the front), which the geometry model accounts for.
 - [ ] Mouse weighed and recorded
 - [ ] Room lights set to experiment condition
 
-### 2. Confirm pigpiod on the leader
+### 2. Confirm the Pis are answering
 
-`pigpiod` runs as a systemd service. Check it:
+GPIO needs no daemon (lgpio talks to `/dev/gpiochip*` directly), so the only service that
+has to be up is the REST API:
 ```bash
-ssh vruser@192.168.10.101 "systemctl status pigpiod"
+curl http://192.168.10.101:5080/api/status    # leader
+curl http://192.168.10.102:5080/api/status    # follower
 ```
-Start it manually if needed: `ssh vruser@192.168.10.101 "sudo pigpiod"`.
+If either is silent: `ssh vruser@<ip> "sudo systemctl status vrfarm"`. **Load Rig** in the
+experiment UI does this check for you and initializes every device — a red dot there tells
+you the same thing.
 
 ---
 
@@ -190,8 +198,13 @@ Click **Deploy**. This:
 4. Leader pushes the stim NPZ to the Follower.
 5. Controller renders thumbnails for preview.
 
-**GO enables only after a successful deploy.** Any parameter change in the UI invalidates
-deploy (GO grays out again).
+**GO enables only after a successful deploy**, and one GO is spent per Deploy — after a
+session you must Deploy again before you can start another.
+
+> **Re-Deploy after editing any parameter.** The server invalidates the deploy internally
+> when the task changes, but the parameter fields have no change listener, so **GO does
+> not grey out**. Pressing GO after an un-deployed edit runs the *previously deployed*
+> values. The one exception is **Correct**, which visibly drops the phase back.
 
 ### Step 7 — GO
 
@@ -341,7 +354,7 @@ All timestamps are Unix time (`time.time()`) in seconds, NTP-synced.
 | Lick onset | MPR121 polling on Leader (200Hz) | ~5ms |
 | Reward delivery | `time.time()` on Leader after GPIO | <1ms |
 | Camera frames | picamera2 callback (`wall_clock_s`) | ~1ms |
-| Sync pulses | pigpio hardware tick, NTP-referenced | ~0.1ms |
+| Sync pulses | lgpio alert tick (CLOCK_MONOTONIC ns), NTP-referenced | ~0.1ms |
 
 Lick-to-reward is on the same Pi (Leader), so latency is <1ms (no network hop).
 
@@ -360,7 +373,9 @@ Lick-to-reward is on the same Pi (Leader), so latency is <1ms (no network hop).
 
 **Reward not firing:**
 - Check solenoid wiring to the reward GPIO (rig `devices.reward.pins`)
-- Check pigpiod is running: `ssh vruser@192.168.10.101 pgrep pigpiod`
+- Re-run **Load Rig** (or the setup UI's **Reinit** on the reward card) and read the error;
+  lgpio claims pins exclusively, so a stale handle from a previous process blocks the claim
+- Verify the pin from the Pi: `ssh vruser@192.168.10.101 "gpioinfo | grep -w GPIO23"`
 
 **Display not showing stimulus:**
 - Check the projector is on and connected to the follower

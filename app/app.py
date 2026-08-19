@@ -1449,6 +1449,12 @@ def _start_udp_listener(event_port: int):
                                     f.write(f"{rt:.1f}\n")
                             except Exception:
                                 pass
+                elif event.get("type") == "shepherd_alert":
+                    # Health alert from the shepherd monitor on a rig Pi. It flows to
+                    # the SSE queue (below) for the UI log like any event; a CRITICAL
+                    # also goes to Slack so it reaches you when the browser is closed.
+                    if event.get("level") == "critical":
+                        notify(f"🔴 {event.get('host', rig_name)} — {event.get('message', 'critical alert')}")
                 elif event.get("type") == "global_timeout":
                     notify(f"⏱️ {rig_name} — GLOBAL TIMEOUT: {event.get('n_dry', '?')} dry "
                            f"trials, aborting at trial {event.get('trial', '?')} "

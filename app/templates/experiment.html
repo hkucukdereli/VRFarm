@@ -1393,6 +1393,13 @@ function handleEvent(evt) {
       if (rasterLive) { timeoutEvents.push({t: evt.t}); updateRasterInfo(); }
       log((evt.type === 'prestim_restart' ? 'Pre-stim' : 'Post-stim') + ' restarted (excess licking)');
       break;
+    case 'shepherd_alert': {
+      // Health alert from the shepherd monitor on a rig Pi. Orange = warning,
+      // red = critical, default = recovery ('ok'). The 🐑 makes it scannable.
+      const host = evt.host ? `${evt.host}: ` : '';
+      log(`🐑 ${host}${evt.message}`, evt.level);
+      break;
+    }
     case 'global_timeout':
       log(`Global timeout: no licks in ${(evt.phases || []).join('/')} for ${evt.n_dry} trials — aborting.`);
       break;
@@ -2398,10 +2405,14 @@ function updateButtons() {
 
 // ── Log ──
 
-function log(msg) {
+function log(msg, level) {
   const el = document.getElementById('log');
   const ts = new Date().toLocaleTimeString();
-  const style = msg.includes('⚠️') ? ' style="color:#ff6b6b; font-weight:bold;"' : '';
+  // level: 'critical' -> red, 'warning' -> orange, else the legacy ⚠️-in-text red.
+  let color = null;
+  if (level === 'critical' || msg.includes('⚠️')) color = '#ff6b6b';
+  else if (level === 'warning') color = '#ffa64d';
+  const style = color ? ` style="color:${color}; font-weight:bold;"` : '';
   el.insertAdjacentHTML('afterbegin', `<div${style}>[${ts}] ${msg}</div>`);
   el.scrollTop = 0;
 }

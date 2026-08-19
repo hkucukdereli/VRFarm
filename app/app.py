@@ -1119,6 +1119,50 @@ def transfer():
                     pass
                 transferred.append(f"ERROR ({pi['name']}) {fname}: {e}")
 
+    # ── Mirror the latest shepherd health log to the controller, then prune the leader ──
+    # shepherd runs continuously on the leader and writes to ~/shepherd_logs (NOT the .h5). Copy the
+    # CURRENT (newest) jsonl+alerts into <data_dir>/shepherd_logs/, overwriting the same timestamped
+    # names so a still-growing file just refreshes; then delete leader logs older than 7 days (they
+    # accumulate on the controller side, so the Pi copy is disposable).
+    try:
+        sh_base = f"http://{leader['ip']}:{api_port}"
+        info = requests.get(f"{sh_base}/api/shepherd_logs/latest", timeout=10).json()
+        sh_files = info.get("files", []) if info.get("ok") else []
+        if sh_files:
+            sh_dir = dest_root / "shepherd_logs"
+            sh_dir.mkdir(parents=True, exist_ok=True)
+            for fpath in sh_files:
+                out = sh_dir / Path(fpath).name
+                part = out.parent / (out.name + ".part")
+                expect = info.get("sizes", {}).get(fpath)
+                try:
+                    with requests.get(f"{sh_base}/api/download/{fpath}",
+                                      timeout=60, stream=True) as r:
+                        r.raise_for_status()
+                        got = 0
+                        with open(part, "wb") as f:
+                            for chunk in r.iter_content(1 << 16):
+                                f.write(chunk)
+                                got += len(chunk)
+                    if expect is not None and got != expect:
+                        raise IOError(f"size mismatch: {got:,}/{expect:,}")
+                    os.replace(part, out)
+                    steps.append(f"Shepherd log → {out.name} ({got / 1e6:.2f} MB)")
+                except Exception as e:
+                    try:
+                        part.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    steps.append(f"⚠️  Shepherd log {Path(fpath).name}: {e}")
+        else:
+            steps.append("Shepherd log: none found on leader")
+        cj = requests.post(f"{sh_base}/api/shepherd_logs/cleanup",
+                           json={"days": 7}, timeout=15).json()
+        if cj.get("ok") and cj.get("deleted"):
+            steps.append(f"Shepherd cleanup: removed {len(cj['deleted'])} log(s) >7d on leader")
+    except Exception as e:
+        steps.append(f"⚠️  Shepherd log mirror/cleanup skipped: {e}")
+
     # Register in subject database — always at the controller-default location so the index
     # stays consistent even when session files are sent to an override destination.
     db_dir = default_data_dir / "subjects"

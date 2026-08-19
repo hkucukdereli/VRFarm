@@ -11,10 +11,13 @@
 # and a still-critical condition re-alerts every `realert_critical_s`.
 
 shepherd:
-  interval_s: 1.0                 # sampling period (seconds). 1 Hz is plenty and ~free.
+  interval_s: 30                  # sampling period (seconds). 30 s health polling is plenty and
+                                  # keeps the log tiny (~120 rows/hr). NOTE: fps/CPU are averaged
+                                  # over the interval, so sub-30 s transients (e.g. a brief encode
+                                  # dip) are smoothed out — raise to 1–5 s if you need fine timing.
   output_dir: ~/shepherd_logs     # metrics JSONL + alerts log land here (NOT in the .h5)
-  realert_critical_s: 30          # re-send a still-critical alert every N seconds
-  throttle_sample_every: 5        # sample `vcgencmd get_throttled` every Nth cycle (it forks)
+  realert_critical_s: 60          # re-send a still-critical alert every N seconds
+  throttle_sample_every: 1        # sample `vcgencmd get_throttled` every Nth cycle (cheap at 30 s)
 
   disk_mount: /home/vruser/video  # the mount whose free space / usage is watched
   disk_devices: [nvme, mmcblk, sd]  # block-device name prefixes for the write-rate meter

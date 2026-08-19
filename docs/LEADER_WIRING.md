@@ -183,10 +183,11 @@ Why the pins landed where they did — reuse these when adding hardware:
 - **GPIO library** (reward, photodiode — the only header-touching devices now):
   - **Pi 4B (`main` branch — the leader today)** — `pigpio` with the `pigpiod` daemon running
     (`sudo pigpiod` / the `pigpiod` service).
-  - **Pi 5 (`dev-pi5` branch — planned)** — `lgpio`, opening **`gpiochip0`** (the 40-pin
-    header). No daemon. Override the chip in `cheese.yaml` with `gpiochip:` if an early Pi 5
-    image enumerates the header as `gpiochip4`; confirm with `gpiodetect`. See
-    [`PI5_LEADER_FEASIBILITY.md`](PI5_LEADER_FEASIBILITY.md). The pin map is identical.
+  - **Pi 5 (`dev-pi5` branch)** — `lgpio`, opening **`gpiochip0`** (the 40-pin
+    header). No daemon; works on the Pi 4 too. Override the chip in `cheese.yaml` with
+    `gpiochip:` if an early Pi 5 image enumerates the header as `gpiochip4`; confirm with
+    `gpiodetect`. The pin map is identical. (Background: `PI5_LEADER_FEASIBILITY.md` in the
+    local-only `docs/assets/` stash.)
 - **Teensy firmware**: flash `teensy/photodiode_sync/photodiode_sync.ino` with
   Arduino + Teensyduino (`PD_PIN = A1`, `OUT_PIN = 1`, `DEBUG = 0`).
 

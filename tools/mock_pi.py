@@ -49,9 +49,11 @@ _running = threading.Event()    # a session is currently playing
 
 # A fake universal trial table (so the controller/UI get a real N-trial plan — the raster
 # y-axis then shows the full planned count and ITI/estimate timers match).
+# Keys must match the real table in shared/stim_generator.py ("az"/"alt", not "stim_az") —
+# the UI's go/no-go prediction reads trialTable[i].az, and a mismatch silently disables it.
 TRIALS = [{"trial": i, "block": 0, "iti_s": ITI_S, "prestim_s": 0.3, "poststim_s": 0.5,
-           "duration_s": max(0.5, TRIAL_S), "stim_az": 30 if (i % 3) else 90,
-           "contrast": 0.5, "level": 1}
+           "duration_s": max(0.5, TRIAL_S), "az": 30.0 if (i % 3) else 90.0, "alt": 0.0,
+           "contrast": 0.5, "corr_contrast": 0.5, "level": 1}
           for i in range(N)]
 
 
@@ -116,7 +118,7 @@ def play_session(session_id):
             if _stop.is_set():
                 break
             tr = TRIALS[i]
-            az = tr["stim_az"]
+            az = tr["az"]        # table key; the trial EVENT below still uses stim_az, like leader.py
             # ITI — send iti_start, then actually WAIT the ITI so the UI countdown runs (and the
             # approaching-stim preview slides in) instead of jumping straight to the trial.
             _send(out, {"type": "iti_start", "trial": i, "duration": ITI_S})

@@ -587,7 +587,16 @@ async function loadRig() {
     const data = await r.json();
     if (data.error) { log('Error: ' + data.error); return; }
 
-    config = {rig: data.rig, task: null};
+    // Keep any experiment that is already loaded. /api/load_rig deliberately leaves
+    // state["task_config"] alone on the server, so nulling it here only desynced the
+    // browser: the populated parameter form stayed on screen while Deploy/Save/Save As/
+    // Correct silently went dead, and the session estimate + reward prediction (which read
+    // config.task) lost their inputs. Deploy is still invalidated — the server clears the
+    // deployed flag and the phase drops to connected — so GO correctly needs a re-Deploy.
+    config = {rig: data.rig, task: (config && config.task) || null};
+    // A different rig may author contrast in a different metric (Weber/Michelson/
+    // Normalized), so re-derive the label and ceiling hint against the rig just loaded.
+    refreshContrastMetric();
     // Pre-fill the transfer destination with the rig default (only if the user hasn't set one)
     const _destField = document.getElementById('transfer-dest');
     if (_destField && !_destField.value && data.data_dir) {

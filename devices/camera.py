@@ -47,6 +47,27 @@ PRESETS = {
     "low":  {"fps": 10, "scale": 0.25, "quality": 45},
 }
 
+# IMX477 sensor readout modes we expose. `max_fps` is the sensor's DECLARED ceiling per raw bit
+# depth, read from Picamera2.sensor_modes on the actual rig — the sensor can deliver these; whether
+# the Pi 5's SOFTWARE encoder can sustain a given (mode, depth, output, fps) is a separate
+# feasibility question answered by tools/camera_sweep.py. Kept in sync with CAM_MODES in
+# setup/templates/setup.html.
+SENSOR_MODES = {
+    (2028, 1080): {"label": "fast (16:9)",  "fov": "100% x 71%",
+                   "outputs": [(2028, 1080), (1014, 540)],   # native, half
+                   "max_fps": {8: 92.27, 10: 74.74, 12: 62.81}},
+    (2028, 1520): {"label": "hires (4:3)",  "fov": "100% x 100%",
+                   "outputs": [(2028, 1520), (1014, 760)],
+                   "max_fps": {8: 66.38, 10: 53.77, 12: 45.19}},
+}
+
+# Native-output ENCODER ceilings, MEASURED on the Pi 5 (tools/camera_sweep.py): the software H.264
+# encoder saturates and drops frames above these when emitting the FULL-RESOLUTION stream — native
+# 2028x1080 is clean at 50 fps and drops at 55; native 2028x1520 is clean at 40 and drops at 45.
+# Half/downscaled outputs have NO such limit (verified clean to 66 fps @ 25% CPU). The setup UI
+# caps fps to min(sensor, encoder); this table backs a soft warning for a hand-edited rig yaml.
+ENCODER_MAX_FPS_NATIVE = {(2028, 1080): 50, (2028, 1520): 40}
+
 
 @register_device
 class Camera(Device):
@@ -55,25 +76,22 @@ class Camera(Device):
     @classmethod
     def task_params_schema(cls):
         return {
-            # IMX477: all three downscale from the 2028x1080 sensor mode and were measured on the
-            # Pi 5 holding 50.00 fps with zero dropped frames. 4:3 sizes are omitted on purpose —
-            # they select the 1332x990 mode, a hard centre crop losing ~35% of the frame in BOTH
-            # axes. 1014x540 is half of the sensor mode exactly: integer 2x downscale, and its
-            # 1.878 aspect matches, so it is the only option that keeps the full sensor width.
-            # See the module docstring.
+            # Output size. Since sensor_mode is now pinned (see init), the valid outputs are the
+            # native + half sizes of the chosen mode: 2028x1080 mode -> 2028x1080 or 1014x540;
+            # 2028x1520 mode -> 2028x1520 or 1014x760. The setup UI restricts the choice per mode.
             "resolution": {
                 "type": "list", "default": [1014, 540],
                 "label": "Resolution",
-                "options": [[854, 480], [1014, 540], [1920, 1080]],
+                "options": [[1014, 540], [2028, 1080], [1014, 760], [2028, 1520]],
             },
-            # Max 62, not 120: the 2028x1080 sensor mode ceilings at 62.81 fps @12-bit.
-            # Measured: requesting 70 stays on this mode and clamps to 62.81 — but the encoder is
-            # still told framerate=70, so it budgets bits for 70 fps and delivers 62.81, and the
-            # file comes out UNDER target (3.58 vs 4.0 Mbit/s) and mis-tagged. Same class of bug
-            # as the original framerate default, just inverted. The mode does not change.
+            # Max is the highest sensor ceiling across the exposed combos (2028x1080 @ 8-bit =
+            # 92 fps). The real per-(mode, bit_depth) ceiling is smaller and is enforced by the
+            # setup UI; libcamera clamps anything above the mode's ceiling, but then the encoder is
+            # still told the requested fps and the file lands under target and mis-tagged — so DON'T
+            # over-request. See SENSOR_MODES.
             "fps": {
                 "type": "int", "default": 50,
-                "label": "FPS", "min": 10, "max": 62,
+                "label": "FPS", "min": 10, "max": 92,
             },
         }
 
@@ -82,6 +100,16 @@ class Camera(Device):
                           rig_config.get("resolution", [1280, 720]))
         self.fps = task_params.get("fps",
                    rig_config.get("fps", 50))
+        # Sensor mode + raw bit depth. Pinning these makes a session's FIELD OF VIEW and readout
+        # depth DETERMINISTIC instead of inferred from the output size (which is how a 4:3 request
+        # used to fall onto a hidden centre-crop mode). sensor_mode = the mode's output_size, e.g.
+        # [2028,1080] (fast/16:9) or [2028,1520] (hires/full-sensor 4:3). bit_depth 8/10/12 sets the
+        # fps ceiling and the raw quantization (8-bit is plenty for well-lit motion — see the guide).
+        # Both optional: absent => legacy behaviour (no pin, picamera2's default 12-bit).
+        sm = task_params.get("sensor_mode", rig_config.get("sensor_mode"))
+        self.sensor_mode = tuple(sm) if sm else None
+        bd = task_params.get("bit_depth", rig_config.get("bit_depth"))
+        self.bit_depth = int(bd) if bd else None
         # H.264 target bitrate (Mbit/s). With h264_profile "main" (CABAC), 4 Mbit/s at 720p50
         # measures better than 8 Mbit/s did on baseline — see the encoder settings below.
         self.bitrate_mbps = float(task_params.get("bitrate_mbps",
@@ -149,6 +177,15 @@ class Camera(Device):
         # "preview" = a throwaway live preview (safe to stop anytime); anything else is a real
         # session recording that must not be stopped by a setup-UI action.
         self._is_preview = (session_id == "preview")
+        # Soft warning for a native-output combo the software encoder can't sustain (the UI caps
+        # this, but a hand-edited yaml could exceed it). Warn, don't block — a dropped-frame video
+        # is still a video, and frame_timestamps stays truthful.
+        if self.sensor_mode and tuple(self.resolution) == tuple(self.sensor_mode):
+            cap = ENCODER_MAX_FPS_NATIVE.get(tuple(self.sensor_mode))
+            if cap and self.fps > cap:
+                print(f"[camera] WARNING: native {tuple(self.resolution)} @ {self.fps} fps exceeds "
+                      f"the measured encoder ceiling ({cap} fps) — frames WILL drop. Use a half "
+                      f"output or fps <= {cap}.", flush=True)
         out_dir = Path(output_dir) / session_id
         out_dir.mkdir(parents=True, exist_ok=True)
         self._video_path = out_dir / "video.h264"
@@ -176,8 +213,10 @@ class Camera(Device):
                 lores={"size": lores_size, "format": "YUV420"},
                 controls=controls,
                 colour_space=ColorSpace.Rec709(),
+                **self._sensor_config_kwargs(self._cam),   # pin mode + bit depth (if configured)
             )
             self._cam.configure(cfg)
+            self._verify_sensor(self._cam)   # raise if the pin wasn't honoured (never record the wrong FoV)
             # framerate= is NOT cosmetic: on the Pi 5 there is no hardware encoder, so this is
             # libav/x264 in software, and x264 derives its per-frame bit budget from this value.
             # Left at picamera2's default of 30 while the sensor runs at 50, every recording came
@@ -257,8 +296,10 @@ class Camera(Device):
                 lores={"size": lores_size, "format": "YUV420"},
                 controls=controls,
                 colour_space=ColorSpace.Rec709(),
+                **self._sensor_config_kwargs(self._cam),   # pin mode + bit depth (if configured)
             )
             self._cam.configure(cfg)
+            self._verify_sensor(self._cam)   # raise if the pin wasn't honoured
             self._cam.start()          # no encoder -> nothing is written
             self._preview_source = "lores"
             self._preview_fps = fps
@@ -341,6 +382,10 @@ class Camera(Device):
         # Requested (as opposed to negotiated) settings, straight from the rig config.
         g["requested_resolution"] = list(self.resolution)
         g["requested_fps"] = self.fps
+        if self.sensor_mode:
+            g["requested_sensor_mode"] = list(self.sensor_mode)
+        if self.bit_depth:
+            g["requested_bit_depth"] = self.bit_depth
         g["auto_exposure"] = bool(self.auto_exposure)
         g["exposure_ms"] = float(self.exposure_ms)
         g["gain"] = float(self.gain)
@@ -363,6 +408,52 @@ class Camera(Device):
         lw = max(64, (int(mw * scale) // 2) * 2)
         lh = max(64, (int(mh * scale) // 2) * 2)
         return (lw, lh)
+
+    def _sensor_config_kwargs(self, cam) -> dict:
+        """Extra create_video_configuration kwargs that PIN the sensor mode + raw bit depth.
+        Empty dict = don't pin (legacy: libcamera infers the mode from the output size). Prefers
+        picamera2's modern `sensor=` API; falls back to `raw=` with a Bayer format that encodes the
+        bit depth on older builds. Which one the installed picamera2 takes is confirmed by the
+        signature check, so this works across versions without a live probe."""
+        if not (self.sensor_mode or self.bit_depth):
+            return {}
+        import inspect
+        try:
+            params = inspect.signature(cam.create_video_configuration).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "sensor" in params:
+            spec = {}
+            if self.sensor_mode:
+                spec["output_size"] = tuple(self.sensor_mode)
+            if self.bit_depth:
+                spec["bit_depth"] = int(self.bit_depth)
+            return {"sensor": spec}
+        # Older picamera2: pin via the raw stream. Size selects the mode; SRGGBn selects the depth.
+        if self.sensor_mode:
+            fmt = {8: "SRGGB8", 10: "SRGGB10_CSI2P", 12: "SRGGB12_CSI2P"}.get(
+                self.bit_depth or 12, "SRGGB12_CSI2P")
+            return {"raw": {"size": tuple(self.sensor_mode), "format": fmt}}
+        return {}
+
+    def _verify_sensor(self, cam):
+        """Fail LOUDLY if a requested pin was not honoured. Silently recording the wrong field of
+        view or depth is exactly the failure the pin exists to prevent, so a mismatch raises rather
+        than falling back — the caller's try/except then releases the camera cleanly."""
+        if not (self.sensor_mode or self.bit_depth):
+            return
+        try:
+            sensor = cam.camera_configuration().get("sensor", {})
+        except Exception:
+            return
+        got_size = tuple(sensor.get("output_size", ()) or ())
+        got_depth = sensor.get("bit_depth")
+        if self.sensor_mode and got_size and got_size != tuple(self.sensor_mode):
+            raise RuntimeError(f"sensor-mode pin failed: requested {tuple(self.sensor_mode)}, "
+                               f"got {got_size}")
+        if self.bit_depth and got_depth is not None and int(got_depth) != int(self.bit_depth):
+            raise RuntimeError(f"bit-depth pin failed: requested {self.bit_depth}-bit, "
+                               f"got {got_depth}-bit")
 
     def _exposure_controls(self) -> dict:
         """libcamera exposure/gain controls for the current settings. Auto => let AEC/AGC run;

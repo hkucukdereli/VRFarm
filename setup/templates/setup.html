@@ -746,8 +746,12 @@ function onCamExpChange() {
 function onCamFpsChange() {
   rig.devices.camera = rig.devices.camera || {};
   const el = document.getElementById('cam-fps');
-  if (el) rig.devices.camera.fps = parseInt(el.value) || 50;
-  renderDeviceList();   // re-render so the Exp ms max (1000/fps) re-syncs to the new fps
+  // Clamp to [10, sensor ceiling] so you can't over-request (which would silently under-deliver
+  // the bitrate and mis-tag the stream). The max also depends on mode + bit depth.
+  const max = camMaxFps(rig.devices.camera);
+  let v = parseInt(el && el.value) || 50;
+  rig.devices.camera.fps = Math.min(Math.max(v, 10), max);
+  renderDeviceList();   // re-render so the Exp-ms max (1000/fps) and predictions re-sync
 }
 
 async function startCameraStream() {
@@ -757,6 +761,8 @@ async function startCameraStream() {
   log('Starting camera stream...');
   const result = await proxyPi(pi.ip, '/api/camera_preview_start', {
     resolution: cam.resolution || [1280, 720], fps: cam.fps || 50,
+    sensor_mode: cam.sensor_mode,   // so the Live preview shows the SAME field of view as the recording
+    bit_depth: cam.bit_depth,
     auto_exposure: cam.auto_exposure ?? true,
     exposure_ms: cam.exposure_ms ?? 10,
     gain: cam.gain ?? 1.0,
@@ -2017,16 +2023,92 @@ function renderDeviceCard(name, dev, pisReady) {
     </div>`;
 }
 
+// ── Camera prediction lookup ── mirrors devices/camera.py SENSOR_MODES (measured off the rig's
+// IMX477). maxFps is the SENSOR ceiling per raw bit depth, rounded DOWN so the UI never lets you
+// over-request; whether the SOFTWARE encoder sustains a combo is a separate feasibility question
+// (tools/camera_sweep.py). File size and bit/px are pure arithmetic. Nothing fancy — this table
+// plus three formulas drive every prediction shown in the panel.
+const CAM_MODES = {
+  '2028x1520': { label: 'hires (full sensor 4:3)', size: [2028, 1520], fov: '100% × 100%',
+                 outputs: [[1014, 760], [2028, 1520]], maxFps: {8: 66, 10: 53, 12: 45} },
+  '2028x1080': { label: 'fast (16:9)',             size: [2028, 1080], fov: '100% × 71%',
+                 outputs: [[1014, 540], [2028, 1080]], maxFps: {8: 92, 10: 74, 12: 62} },
+};
+function camModeKey(dev) {
+  if (dev.sensor_mode) return dev.sensor_mode[0] + 'x' + dev.sensor_mode[1];
+  // legacy yaml without sensor_mode: infer the mode from the current output resolution
+  const r = dev.resolution || [1014, 540];
+  for (const [k, m] of Object.entries(CAM_MODES))
+    if (m.outputs.some(o => o[0] === r[0] && o[1] === r[1])) return k;
+  return '2028x1080';
+}
+function camMode(dev)   { return CAM_MODES[camModeKey(dev)] || CAM_MODES['2028x1080']; }
+// Native-output ENCODER ceilings (MEASURED on the Pi 5: the software H.264 encoder saturates and
+// drops frames above these when emitting the full-resolution stream — native 2028x1080 fails at
+// 55, native 2028x1520 at 45). Half/downscaled outputs have NO such limit — they run clean to the
+// sensor ceiling (verified to 66 fps @ 25% CPU). Effective max fps = min(sensor, encoder).
+const ENC_MAX_FPS = { '2028x1080': 50, '2028x1520': 40 };
+function camSensorMaxFps(dev) { const m = camMode(dev); return m.maxFps[dev.bit_depth || 12] || m.maxFps[12]; }
+function camEncoderCap(dev) {
+  const m = camMode(dev), r = dev.resolution || m.outputs[0];
+  const isNative = (r[0] === m.size[0] && r[1] === m.size[1]);
+  return isNative ? (ENC_MAX_FPS[camModeKey(dev)] || Infinity) : Infinity;
+}
+function camMaxFps(dev) { return Math.min(camSensorMaxFps(dev), camEncoderCap(dev)); }
+function camFileSizeGB(dev, minutes) { return (dev.bitrate_mbps || 4) * minutes * 60 / 8000; }
+function camBitpx(dev)  { const r = dev.resolution || [1014, 540]; return (dev.bitrate_mbps || 4) * 1e6 / (r[0] * r[1] * (dev.fps || 50)); }
+function camBand(bpp)   { return bpp >= 0.14 ? ['great', '#4caf50'] : bpp >= 0.11 ? ['good', '#8bc34a'] : bpp >= 0.08 ? ['ok', '#ffa64d'] : ['starved', '#ff6b6b']; }
+function camOutLabel(mode, o) { return (o[0] === mode.size[0] ? 'native ' : 'half ') + o[0] + '×' + o[1]; }
+
+function onCamModeChange(val) {
+  rig.devices.camera = rig.devices.camera || {};
+  const mode = CAM_MODES[val]; if (!mode) return;
+  rig.devices.camera.sensor_mode = mode.size.slice();
+  const cur = rig.devices.camera.resolution;
+  if (!cur || !mode.outputs.some(o => o[0] === cur[0] && o[1] === cur[1]))
+    rig.devices.camera.resolution = mode.outputs[0].slice();   // default to the 'half' output
+  _camClampFps();
+  renderDeviceList();
+}
+function onCamBitDepthChange(val) {
+  rig.devices.camera = rig.devices.camera || {};
+  rig.devices.camera.bit_depth = parseInt(val);
+  _camClampFps();
+  renderDeviceList();
+}
+function onCamResChange(val) {
+  rig.devices.camera = rig.devices.camera || {};
+  rig.devices.camera.resolution = val.split('x').map(Number);
+  renderDeviceList();
+}
+function onCamBitrateChange(val) {
+  rig.devices.camera = rig.devices.camera || {};
+  rig.devices.camera.bitrate_mbps = parseInt(val);
+  renderDeviceList();
+}
+function _camClampFps() {
+  const cam = rig.devices.camera, max = camMaxFps(cam);
+  if ((cam.fps || 50) > max) cam.fps = max;
+}
+
 function renderCameraControls(dev) {
-  const res = dev.resolution || [1280, 720];
+  const modeKey = camModeKey(dev);
+  const mode = camMode(dev);
+  const bitDepth = dev.bit_depth || 12;
+  const maxFps = camMaxFps(dev);
+  const res = dev.resolution || mode.outputs[0];
   const resStr = res[0] + 'x' + res[1];
-  const fps = dev.fps || 50;
+  const fps = Math.min(dev.fps || 50, maxFps);   // display the fps clamped to the sensor ceiling
   const autoExp = dev.auto_exposure ?? true;
   const maxMs = 1000 / fps;   // exposure (ms) is bounded by the frame period at this fps
   const expMs = Math.max(0.1, Math.min(dev.exposure_ms ?? 10, maxMs));
   const gainVal = dev.gain ?? 1.0;
   const bitrate = dev.bitrate_mbps ?? 4;
   const h264Profile = dev.h264_profile ?? 'main';
+  const sizeGB = camFileSizeGB(dev, 60);                         // 60-min estimate
+  const bpp = camBitpx({ ...dev, resolution: res, fps });        // quality proxy
+  const band = camBand(bpp);
+  const encLimited = camEncoderCap(dev) < camSensorMaxFps(dev);  // native output, encoder-capped
   const livePreset = dev.live_preset ?? 'med';
   const ds = deviceState.camera || {};
   const streaming = ds.streaming;
@@ -2039,30 +2121,41 @@ function renderCameraControls(dev) {
   return `
     <div class="device-controls">
       <div class="device-field">
-        <label>Resolution</label>
-        <select ${lock} onchange="rig.devices.camera.resolution = this.value.split('x').map(Number)">
-          <!-- IMX477: every option below downscales from the 2028x1080 sensor mode (max 62.8 fps
-               @12-bit), so all are safe at 50 fps. 4:3 sizes (e.g. 640x480) are deliberately NOT
-               offered: they make libcamera select the 1332x990 mode, a hard centre crop that
-               silently throws away ~35% of the frame in BOTH axes. 1014x540 matches the sensor
-               mode's 1.878 aspect exactly => full sensor width and an integer 2x downscale. -->
-          <option value="854x480" ${resStr === '854x480' ? 'selected' : ''}>Low (854x480)</option>
-          <option value="1014x540" ${resStr === '1014x540' ? 'selected' : ''}>High (1014x540)</option>
-          <option value="1920x1080" ${resStr === '1920x1080' ? 'selected' : ''}>Very high (1920x1080)</option>
+        <!-- Sensor mode = field of view. 'fast' 2028x1080 is 16:9 (100% width, 71% height);
+             'hires' 2028x1520 is the full 4:3 sensor. Pinned so the FoV is deterministic. -->
+        <label>Mode</label>
+        <select ${lock} onchange="onCamModeChange(this.value)">
+          <option value="2028x1080" ${modeKey === '2028x1080' ? 'selected' : ''}>fast &mdash; 16:9 (100%×71%)</option>
+          <option value="2028x1520" ${modeKey === '2028x1520' ? 'selected' : ''}>hires &mdash; 4:3 (full sensor)</option>
         </select>
       </div>
       <div class="device-field">
-        <label>FPS</label>
-        <!-- max 62: the IMX477's 2028x1080 mode ceilings at 62.81 fps; above that libcamera
-             switches to the 1332x990 mode, silently cropping ~35% of the frame in both axes. -->
-        <input type="number" id="cam-fps" value="${fps}" min="10" max="62" style="width:55px"
+        <!-- Raw readout depth. 8-bit is plenty for well-lit motion and raises the fps ceiling;
+             the saved video is 8-bit either way. Higher depth lowers the fps ceiling. -->
+        <label>Bit depth</label>
+        <select ${lock} onchange="onCamBitDepthChange(this.value)">
+          <option value="8"  ${bitDepth === 8  ? 'selected' : ''}>8</option>
+          <option value="10" ${bitDepth === 10 ? 'selected' : ''}>10</option>
+          <option value="12" ${bitDepth === 12 ? 'selected' : ''}>12</option>
+        </select>
+      </div>
+      <div class="device-field">
+        <!-- Output size: native (1:1 with the mode) or half (2x downscale — smaller px count,
+             so more bits/px at the same bitrate). Options depend on the chosen mode. -->
+        <label>Resolution</label>
+        <select ${lock} onchange="onCamResChange(this.value)">
+          ${mode.outputs.map(o => `<option value="${o[0]}x${o[1]}" ${resStr === o[0]+'x'+o[1] ? 'selected' : ''}>${camOutLabel(mode, o)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="device-field">
+        <label>FPS <span style="color:${encLimited ? '#ffa64d' : '#888'};font-weight:normal">(max ${maxFps}${encLimited ? ', encoder' : ''})</span></label>
+        <input type="number" id="cam-fps" value="${fps}" min="10" max="${maxFps}" style="width:55px"
                ${lock} onchange="onCamFpsChange()">
       </div>
       <div class="device-field">
         <label>Bitrate</label>
-        <select ${lock} onchange="rig.devices.camera.bitrate_mbps = parseInt(this.value)">
-          <option value="8" ${bitrate === 8 ? 'selected' : ''}>High (8) &mdash; 3.6 GB/h</option>
-          <option value="4" ${bitrate === 4 ? 'selected' : ''}>Med (4) &mdash; 1.8 GB/h</option>
+        <select ${lock} onchange="onCamBitrateChange(this.value)">
+          ${[4,8,10,12,24].map(b => `<option value="${b}" ${bitrate === b ? 'selected' : ''}>${b} Mbit</option>`).join('')}
         </select>
       </div>
       <div class="device-field">
@@ -2081,7 +2174,7 @@ function renderCameraControls(dev) {
                onchange="onCamAutoToggle(this.checked)">
       </div>
       <div class="device-field">
-        <label>Exp ms</label>
+        <label>Exp ms <span style="color:#888;font-weight:normal">(max ${maxMs.toFixed(1)})</span></label>
         <input type="number" id="cam-exp" value="${expMs}" min="0.1" max="${maxMs.toFixed(1)}" step="0.5"
                style="width:70px" ${autoExp ? 'disabled' : ''} onchange="onCamExpChange()">
       </div>
@@ -2091,7 +2184,13 @@ function renderCameraControls(dev) {
                style="width:55px" ${autoExp ? 'disabled' : ''} onchange="onCamExpChange()">
       </div>
     </div>
-    ${streaming ? '<div style="font-size:10px; color:#888; margin-top:2px">Stop the stream to change resolution / FPS / bitrate.</div>' : ''}
+    <!-- Live predictions (from CAM_MODES + arithmetic; file size depends on bitrate only) -->
+    <div style="font-size:11px; color:#aaa; margin-top:3px">
+      FoV ${mode.fov} &nbsp;·&nbsp; ~${sizeGB.toFixed(1)} GB / 60 min &nbsp;·&nbsp;
+      quality <b style="color:${band[1]}">${bpp.toFixed(3)} bit/px (${band[0]})</b>
+      ${encLimited ? `&nbsp;·&nbsp;<span style="color:#ffa64d">native output: encoder-limited to ${maxFps} fps</span>` : ''}
+    </div>
+    ${streaming ? '<div style="font-size:10px; color:#888; margin-top:2px">Stop the stream to change mode / bit-depth / resolution / FPS / bitrate.</div>' : ''}
     <!-- Row 2: experiment live view preset -->
     <div class="device-controls" style="margin-top:4px">
       <span style="font-size:11px; color:#888;">Experiment live view (saved video unaffected):</span>

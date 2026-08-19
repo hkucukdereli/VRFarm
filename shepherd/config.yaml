@@ -1,0 +1,131 @@
+# shepherd/config.yaml
+#
+# Health-monitor configuration. Edit the thresholds and messages freely — shepherd
+# reads this file once at startup, so restart shepherd after changing it.
+#
+# Every metric has two levels: `warn` (orange in the UI log) and `critical` (red).
+# `direction: high` fires when the value RISES to/above the threshold (temperature,
+# CPU, disk-used %). `direction: low` fires when it FALLS to/below it (free disk,
+# encode fps). Messages are format strings; the available placeholders are shown
+# per metric. Alerts are edge-triggered (fired on a level change, not every second)
+# and a still-critical condition re-alerts every `realert_critical_s`.
+
+shepherd:
+  interval_s: 1.0                 # sampling period (seconds). 1 Hz is plenty and ~free.
+  output_dir: ~/shepherd_logs     # metrics JSONL + alerts log land here (NOT in the .h5)
+  realert_critical_s: 30          # re-send a still-critical alert every N seconds
+  throttle_sample_every: 5        # sample `vcgencmd get_throttled` every Nth cycle (it forks)
+
+  disk_mount: /home/vruser/video  # the mount whose free space / usage is watched
+  disk_devices: [nvme, mmcblk, sd]  # block-device name prefixes for the write-rate meter
+
+  # Probe the local pi_api so shepherd can (a) know when a session is recording and
+  # (b) detect a WEDGED api — the failure a same-process monitor could never report.
+  api_probe:
+    enabled: true
+    url: http://127.0.0.1:5080/api/status
+    timeout_s: 2.0
+
+  # Where warnings/criticals are sent so they appear in the experiment-UI log.
+  # host = the controller; port = its UDP event port (network.event_port in the rig yaml).
+  alerts:
+    udp:
+      enabled: true
+      host: 192.168.10.1
+      port: 5571
+
+metrics:
+  # ── SoC temperature (°C) ── the headline: a hot, fanless Pi 5 throttles the
+  # software H.264 encoder, which then drops frames and corrupts frame timing.
+  soc_temp_c:
+    enabled: true
+    direction: high
+    warn: 50
+    critical: 70
+    unit: "°C"
+    warn_msg: "SoC temperature {value}°C — running warm; check ventilation/airflow"
+    critical_msg: "SoC temperature {value}°C — CRITICAL: thermal throttle imminent, encoder may drop frames"
+    recover_msg: "SoC temperature back to normal ({value}°C)"
+
+  # ── Disk usage (% full) of the video mount ──
+  disk_used_percent:
+    enabled: true
+    direction: high
+    warn: 80
+    critical: 90
+    unit: "%"
+    warn_msg: "Disk {value}% full on {mount}"
+    critical_msg: "Disk {value}% full on {mount} — CRITICAL: recording may fail (ENOSPC)"
+    recover_msg: "Disk usage back under threshold ({value}%)"
+
+  # ── Free disk (GB) of the video mount ── a low-side early warning ──
+  disk_free_gb:
+    enabled: true
+    direction: low
+    warn: 40
+    critical: 15
+    unit: "GB"
+    warn_msg: "Only {value} GB free on {mount}"
+    critical_msg: "Only {value} GB free on {mount} — CRITICAL: stop soon or lose data"
+    recover_msg: "Free space recovered ({value} GB)"
+
+  # ── Total CPU (% of all cores) ──
+  cpu_percent:
+    enabled: true
+    direction: high
+    warn: 85
+    critical: 95
+    unit: "%"
+    warn_msg: "CPU load {value}% (all cores)"
+    critical_msg: "CPU {value}% — CRITICAL: the software encoder may not keep up"
+    recover_msg: "CPU load back to normal ({value}%)"
+
+  # ── Memory (% used) ──
+  mem_percent:
+    enabled: true
+    direction: high
+    warn: 85
+    critical: 95
+    unit: "%"
+    warn_msg: "Memory {value}% used"
+    critical_msg: "Memory {value}% used — CRITICAL: risk of OOM"
+    recover_msg: "Memory back to normal ({value}%)"
+
+  # ── Disk write rate (MB/s) ── mostly informational; set a high critical so a
+  # genuinely runaway writer still trips it. Disable if the number is noisy on your rig.
+  disk_write_mbs:
+    enabled: false
+    direction: high
+    warn: 80
+    critical: 150
+    unit: "MB/s"
+    warn_msg: "Disk write {value} MB/s"
+    critical_msg: "Disk write {value} MB/s — sustained; check for a runaway writer"
+
+  # ── Achieved camera encode fps ── only evaluated while a session is recording.
+  # Set these to a bit under your target fps; a drop means the encoder is falling
+  # behind (usually thermal). direction: low.
+  camera_fps:
+    enabled: true
+    direction: low
+    warn: 45
+    critical: 30
+    unit: "fps"
+    warn_msg: "Camera encode {value} fps — below target (encoder falling behind?)"
+    critical_msg: "Camera encode {value} fps — CRITICAL: dropping frames"
+    recover_msg: "Camera encode fps recovered ({value})"
+
+  # ── SoC throttle flags ── level is set directly from vcgencmd bits, so warn/
+  # critical thresholds are ignored here; only the messages are used.
+  throttled:
+    enabled: true
+    warn_msg: "SoC soft temperature limit active (mild throttle)"
+    critical_msg: "SoC THROTTLING NOW (thermal or under-voltage) — frames at risk"
+    recover_msg: "SoC throttle cleared"
+
+  # ── API health ── critical when the local pi_api stops answering. This is the
+  # wedge an in-process monitor could never report.
+  api_health:
+    enabled: true
+    critical_msg: "pi_api not responding ({error}) — session control/telemetry is down"
+    recover_msg: "pi_api responding again"

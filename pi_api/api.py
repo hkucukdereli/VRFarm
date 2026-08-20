@@ -892,16 +892,20 @@ def init_photodiode():
         verify = None
         follower = data.get("follower_ip")
         if getattr(dev, "verify_enabled", True) and follower:
-            import requests as req
+            import urllib.request      # stdlib — pi_api's rig env has no `requests`
             fport = data.get("follower_api_port", 5080)
+            furl = f"http://{follower}:{fport}/api/photodiode_sync_burst"
 
             def sync_burst(duration_s):
                 body = {"every_n": data.get("pulse_every_n_frames", 5), "duration_s": duration_s}
                 for k in ("sync_corner", "sync_size_px", "sync_brightness"):
                     if k in data:
                         body[k] = data[k]
-                r = req.post(f"http://{follower}:{fport}/api/photodiode_sync_burst",
-                             json=body, timeout=duration_s + 10).json()
+                rq = urllib.request.Request(
+                    furl, data=json.dumps(body).encode(),
+                    headers={"Content-Type": "application/json"}, method="POST")
+                with urllib.request.urlopen(rq, timeout=duration_s + 10) as resp:
+                    r = json.loads(resp.read().decode())
                 if not r.get("ok"):
                     raise RuntimeError(r.get("error", "display flash failed"))
                 return int(r.get("flashes", 0))

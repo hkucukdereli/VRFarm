@@ -1,4 +1,4 @@
-last_saved: '2026-08-19'
+last_saved: '2026-08-20'
 stimulus:
   background_gray: 0.075
   size_deg: 4
@@ -36,8 +36,8 @@ session:
   - 40
   - -80
   iti:
-  - 5
-  - 10
+  - 2
+  - 4
   prestim_duration: 0
   poststim_duration: 0
   global_delay: 0

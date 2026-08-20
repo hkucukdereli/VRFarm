@@ -27,7 +27,7 @@ reward:
   timeout_phases:
   - iti
 session:
-  grace_period_s: 10
+  grace_period_s: 5
   n_blocks: 30
   block_size: 2
   block_sequence:

@@ -7,10 +7,12 @@ stim generation, and calibration.
 """
 
 from __future__ import annotations
+import itertools
 import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -229,6 +231,11 @@ def start():
     if script == "follower":
         env.setdefault("DISPLAY", ":0")
         env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        # A session's follower.py owns pygame/:0 itself — make sure the setup display worker isn't
+        # still holding it. The leader's Go path calls /api/shutdown_display first, but that is
+        # best-effort; this guard closes the gap so the two never contend for :0.
+        with _display_worker_lock:
+            _kill_display_worker()
     _process = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1, env=env)
@@ -451,116 +458,152 @@ def _ensure_rig_path():
     sys.path.insert(0, str(RIG_DIR))
 
 
-# Display command queue — pygame requires all calls on a single thread
-import queue
+# ── Setup-time display worker (out-of-process) ──────────────────────────────────
+# pygame/SDL is NOT run inside pi_api: a crash there would take the whole management API down. The
+# follower's setup-time display therefore runs as a separate subprocess (engine/display_worker.py)
+# that we spawn/kill/respawn — exactly like /api/start spawns follower.py for a session — and talk
+# to over a localhost-only UDP socket. _display_command() keeps its old (cmd, timeout) signature so
+# the display endpoints below are unchanged.
+_DISPLAY_WORKER_PORT = 5578
+_DISPLAY_ADDR = ("127.0.0.1", _DISPLAY_WORKER_PORT)
+_display_worker: subprocess.Popen | None = None
+_display_worker_log: list[str] = []
+_display_worker_lock = threading.Lock()   # one outstanding request at a time (no result desync)
+_display_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+_display_sock.settimeout(0.5)
+_display_req_id = itertools.count(1)
 
-_display_cmd_q: queue.Queue = queue.Queue()
-_display_result_q: queue.Queue = queue.Queue()
-_display_thread: threading.Thread | None = None
-_sync_test_stop = threading.Event()   # set to stop the photodiode sync-square flash test
+
+def _display_worker_alive() -> bool:
+    return _display_worker is not None and _display_worker.poll() is None
 
 
-def _display_thread_fn():
-    """Dedicated thread for all pygame/display operations."""
-    _ensure_rig_path()
-    from devices.display import Display
-    dev = None
+def _ping_display_worker() -> bool:
+    """One ping/pong round-trip (the worker's receiver answers even during a blocking sync test)."""
+    try:
+        rid = next(_display_req_id)
+        _display_sock.sendto(json.dumps({"id": rid, "action": "ping"}).encode(), _DISPLAY_ADDR)
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            try:
+                data, _ = _display_sock.recvfrom(65535)
+            except (socket.timeout, OSError):
+                break
+            try:
+                r = json.loads(data.decode())
+            except Exception:
+                continue
+            if r.get("id") == rid and r.get("pong"):
+                return True
+    except OSError:
+        pass
+    return False
 
-    while True:
-        cmd = _display_cmd_q.get()
-        if cmd is None:
-            break
-        action = cmd.get("action")
+
+def _spawn_display_worker() -> None:
+    """Start engine/display_worker.py as a child, mirroring /api/start's follower launch."""
+    global _display_worker, _display_worker_log
+    # reap any orphan from a prior pi_api crash that could still hold :0 / the UDP port
+    subprocess.run(["pkill", "-f", "engine/display_worker.py"], capture_output=True, check=False)
+    time.sleep(0.1)
+    python = str(Path.home() / "miniforge3" / "envs" / "rig" / "bin" / "python")
+    cmd = [python, str(RIG_DIR / "engine" / "display_worker.py"),
+           "--port", str(_DISPLAY_WORKER_PORT)]
+    env = os.environ.copy()
+    env.setdefault("DISPLAY", ":0")
+    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+    _display_worker_log = []
+    _display_worker = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                       text=True, bufsize=1, env=env)
+
+    def _read():
+        for line in _display_worker.stdout:
+            _display_worker_log.append(line.rstrip())
+            if len(_display_worker_log) > 200:
+                _display_worker_log.pop(0)
+    threading.Thread(target=_read, daemon=True).start()
+    # bounded wait for the worker to bind + answer, so a bad :0/bind surfaces now, not later
+    for _ in range(40):    # ~4 s
+        if not _display_worker_alive():
+            return
+        if _ping_display_worker():
+            return
+        time.sleep(0.1)
+
+
+def _ensure_display_worker() -> bool:
+    if _display_worker_alive():
+        return True
+    _spawn_display_worker()
+    return _display_worker_alive()
+
+
+def _kill_display_worker() -> None:
+    """Terminate the worker so it releases pygame/:0 for follower.py — process death, not just a
+    quit() on a lingering thread. The worker's SIGTERM handler runs pygame.quit() first."""
+    global _display_worker
+    if _display_worker is not None:
         try:
-            if action == "init":
-                os.environ["DISPLAY"] = ":0"
-                dev = Display()
-                dev.init(rig_config=cmd.get("rig_config", {}), task_params={})
-                dev.start_display()
-                # Load warp map if available
-                warp_path = Path.home() / "rig" / "calibration" / "warp_map.npz"
-                warp_loaded = dev.load_warp(str(warp_path))
-                with _devices_lock:
-                    _devices["display"] = dev
-                msg = "Display initialized"
-                if warp_loaded:
-                    msg += " (warp map loaded)"
-                _display_result_q.put({"ok": True, "message": msg})
-            elif action == "blank":
-                if not dev:
-                    _display_result_q.put({"ok": False, "error": "Display not initialized"})
-                else:
-                    dev.blank_with_gray(cmd.get("gray_value", 0.0))
-                    _display_result_q.put({"ok": True})
-            elif action == "checkers":
-                if not dev:
-                    _display_result_q.put({"ok": False, "error": "Display not initialized"})
-                else:
-                    use_warp = cmd.get("apply_warp", True)
-                    dev.show_checkers(use_warp=use_warp)
-                    _display_result_q.put({"ok": True})
-            elif action == "stimulus":
-                if not dev:
-                    _display_result_q.put({"ok": False, "error": "Display not initialized"})
-                else:
-                    dev.show_patch_spherical(
-                        cmd.get("az_deg", 0.0), cmd.get("alt_deg", 0.0),
-                        cmd.get("size_deg", 8.0), cmd.get("corr_contrast", 0.5),
-                        cmd.get("bg_gray", 0.0), shape=cmd.get("shape", "square"),
-                        apply_lum=cmd.get("apply_lum", True))
-                    _display_result_q.put({"ok": True})
-            elif action == "reload_warp":
-                # Re-read warp_map.npz into the running Display so a freshly Generated warp
-                # takes effect WITHOUT a full re-init (load_warp caches self._warp in memory
-                # and never re-reads the file on its own).
-                warp_path = Path.home() / "rig" / "calibration" / "warp_map.npz"
-                if not dev:
-                    _display_result_q.put({"ok": True, "reloaded": False,
-                                           "message": "display not active"})
-                else:
-                    loaded = dev.load_warp(str(warp_path))
-                    _display_result_q.put({"ok": True, "reloaded": bool(loaded),
-                                           "message": ("warp reloaded" if loaded
-                                                       else "warp_map.npz not found")})
-            elif action == "shutdown":
-                if dev:
-                    dev.shutdown()
-                    dev = None
-                    with _devices_lock:
-                        _devices.pop("display", None)
-                _display_result_q.put({"ok": True})
-            elif action == "sync_test":
-                if not dev or getattr(dev, "_screen", None) is None:
-                    _display_result_q.put({"ok": False, "error": "Display not initialized"})
-                else:
-                    # Ack BEFORE the (blocking) flash loop so the HTTP start returns immediately;
-                    # the loop then owns this thread until _sync_test_stop is set out-of-band.
-                    _sync_test_stop.clear()
-                    if hasattr(dev, "set_sync_layout"):   # move the square to the current corner/size live
-                        dev.set_sync_layout(cmd.get("sync_corner"), cmd.get("sync_size_px"), cmd.get("sync_brightness"))
-                    _display_result_q.put({"ok": True, "message": "sync test running"})
-                    try:
-                        dev.run_sync_test(int(cmd.get("every_n", 5)), _sync_test_stop)
-                    except Exception as e:
-                        print("[display] sync_test error:", e, flush=True)
-                    # result already sent; do NOT put again (would desync the result queue)
-            else:
-                _display_result_q.put({"ok": False, "error": f"Unknown action: {action}"})
-        except Exception as e:
-            _display_result_q.put({"ok": False, "error": str(e)})
+            _display_worker.terminate()
+            _display_worker.wait(timeout=2)
+        except Exception:
+            try:
+                _display_worker.kill()
+            except Exception:
+                pass
+    _display_worker = None
+
+
+def _stop_sync_worker() -> None:
+    """Fire-and-forget: unblock a running sync-test flash loop (out-of-band, like the old Event)."""
+    if _display_worker_alive():
+        try:
+            _display_sock.sendto(
+                json.dumps({"id": next(_display_req_id), "action": "stop_sync"}).encode(),
+                _DISPLAY_ADDR)
+        except OSError:
+            pass
 
 
 def _display_command(cmd: dict, timeout: float = 10.0) -> dict:
-    """Send a command to the display thread and wait for result."""
-    global _display_thread
-    if _display_thread is None or not _display_thread.is_alive():
-        _display_thread = threading.Thread(target=_display_thread_fn, daemon=True)
-        _display_thread.start()
-    _display_cmd_q.put(cmd)
-    try:
-        return _display_result_q.get(timeout=timeout)
-    except queue.Empty:
-        return {"ok": False, "error": "Display command timed out"}
+    """Send one command to the display worker and wait for its reply. Same signature as the old
+    in-process version, so the display endpoints are unchanged. Spawns the worker on 'init'; for
+    other actions when the worker is down, returns the same messages the old thread did."""
+    action = cmd.get("action")
+    with _display_worker_lock:
+        if action == "init":
+            _ensure_display_worker()
+        if not _display_worker_alive():
+            if action == "shutdown":
+                return {"ok": True}                                  # already released
+            if action == "reload_warp":
+                return {"ok": True, "reloaded": False, "message": "display not active"}
+            return {"ok": False, "error": "Display not initialized"}
+        rid = next(_display_req_id)
+        payload = dict(cmd)
+        payload["id"] = rid
+        try:
+            _display_sock.sendto(json.dumps(payload).encode(), _DISPLAY_ADDR)
+        except OSError as e:
+            return {"ok": False, "error": f"display worker unreachable: {e}", "worker_down": True}
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not _display_worker_alive():
+                break
+            try:
+                data, _ = _display_sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                r = json.loads(data.decode())
+            except Exception:
+                continue
+            if r.get("id") == rid:                                   # drain any stale reply
+                return r
+        _kill_display_worker()                                       # clean respawn next time
+        return {"ok": False, "error": "display worker crashed; restarting", "worker_down": True}
 
 
 @app.route("/api/init_projector", methods=["POST"])
@@ -659,10 +702,11 @@ def reload_warp():
 
 @app.route("/api/shutdown_display", methods=["POST"])
 def shutdown_display():
-    """Shut down pygame display (release for follower.py)."""
-    result = _display_command({"action": "shutdown"})
-    code = 200 if result.get("ok") else 500
-    return jsonify(result), code
+    """Shut down the setup display worker (release pygame/:0 for follower.py). Killing the process
+    is what guarantees the SDL/X grab on :0 is released; its SIGTERM handler quits pygame first."""
+    with _display_worker_lock:
+        _kill_display_worker()
+    return jsonify({"ok": True})
 
 
 @app.route("/api/init_lick", methods=["POST"])
@@ -1271,14 +1315,11 @@ def photodiode_raw_stop():
 def photodiode_test_start():
     """Flash the red photodiode sync square every N frames on THIS Pi's display (the follower),
     simulating a session's sync pulses so the photodiode/scope can be exercised from the setup UI.
-    Runs in the display thread; stop via /api/photodiode_test_stop."""
+    Runs in the display worker; stop via /api/photodiode_test_stop. If the display isn't up the
+    worker replies "Display not initialized"."""
     data = request.json or {}
     every_n = int(data.get("every_n", 5))
-    with _devices_lock:
-        dev = _devices.get("display")
-    if not dev or getattr(dev, "_screen", None) is None:
-        return jsonify({"ok": False, "error": "Display not initialized on this Pi"}), 400
-    _sync_test_stop.set()      # stop any prior run and let the display thread return to the queue
+    _stop_sync_worker()        # unblock any prior flash loop so the worker can accept the new one
     time.sleep(0.05)
     cmd = {"action": "sync_test", "every_n": every_n}
     for k in ("sync_corner", "sync_size_px", "sync_brightness"):   # apply the current controls live, no re-deploy needed
@@ -1289,8 +1330,8 @@ def photodiode_test_start():
 
 @app.route("/api/photodiode_test_stop", methods=["POST"])
 def photodiode_test_stop():
-    """Stop the sync-square flash test (sets the stop Event out-of-band from the command queue)."""
-    _sync_test_stop.set()
+    """Stop the sync-square flash test (out-of-band stop_sync to the display worker)."""
+    _stop_sync_worker()
     return jsonify({"ok": True})
 
 

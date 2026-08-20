@@ -416,6 +416,7 @@ def deploy():
             ],
             "follower": [
                 "engine/follower.py",
+                "engine/display_worker.py",
                 "devices/base.py",
                 "devices/display.py",
                 "pi_api/api.py",

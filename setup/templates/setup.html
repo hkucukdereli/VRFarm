@@ -293,6 +293,22 @@ async function proxyPi(ip, endpoint, payload = {}, method = 'POST') {
   }
 }
 
+// Retry a proxied display call across a TRANSIENT follower blip: the display now runs in a separate
+// worker process, so a display crash returns {ok:false, worker_down:true} (pi_api stays up), and the
+// rare pi_api restart shows a connection error. Both are worth a short retry; a real error like
+// "Display not initialized" is NOT retried.
+async function retryProxy(ip, endpoint, payload = {}, {tries = 3, delay = 750} = {}) {
+  let r;
+  for (let i = 0; i < tries; i++) {
+    r = await proxyPi(ip, endpoint, payload);
+    const transient = r && r.ok === false &&
+      (r.worker_down || /refused|timed ?out|unreachable|Proxy error|Failed to establish/i.test(String(r.error || '')));
+    if (!transient) return r;
+    if (i < tries - 1) { log('Display worker restarting, retrying…'); await new Promise(res => setTimeout(res, delay)); }
+  }
+  return r;
+}
+
 function interpolateCalMs(calTable, volumeUl) {
   if (!calTable || calTable.length === 0) return 0;
   if (calTable.length === 1) {
@@ -830,7 +846,7 @@ async function testCheckers() {
   const pi = getPiForDevice('display');
   if (!pi) { log('Display not assigned to a Pi'); return; }
   const applyWarp = rig.devices.display.apply_warp || false;
-  const result = await proxyPi(pi.ip, '/api/test_checkers', {apply_warp: applyWarp});
+  const result = await retryProxy(pi.ip, '/api/test_checkers', {apply_warp: applyWarp});
   log(result.ok ? 'Checkerboard shown.' : 'Failed: ' + (result.error || ''));
 }
 
@@ -840,7 +856,7 @@ async function blankDisplay() {
   const grayInput = document.getElementById('blank-gray-value');
   // Blank gray is a plain 0..1 value (0 = darkest, 1 = brightest); clamp to the range.
   const gray = Math.max(0, Math.min(1, grayInput ? parseFloat(grayInput.value) : 0.0));
-  const result = await proxyPi(pi.ip, '/api/blank_display', {gray_value: gray});
+  const result = await retryProxy(pi.ip, '/api/blank_display', {gray_value: gray});
   log(result.ok ? `Display blanked (gray=${gray}).` : 'Failed: ' + (result.error || ''));
 }
 
@@ -859,7 +875,7 @@ async function testStimulus() {
   const bg = Math.max(0, Math.min(1, bgInput ? parseFloat(bgInput.value) : 0.0));
   const metric = (rig.devices.display && rig.devices.display.contrast_metric) || 'weber';
   log(`Drawing ${shape} @ az ${az}° alt ${alt}° (size ${size}°, contrast ${contrast}, bg ${bg})...`);
-  const result = await proxyPi(pi.ip, '/api/test_stimulus', {
+  const result = await retryProxy(pi.ip, '/api/test_stimulus', {
     shape, az_deg: az, alt_deg: alt, size_deg: size,
     contrast, bg_gray: bg, contrast_metric: metric,
   });
@@ -1167,7 +1183,7 @@ async function showLumPatch() {
   const az = lumMeasure.azs[lumMeasure.idx];
   // White square (contrast 1 on a black bg, normalized) = max drive. apply_lum:false renders RAW
   // drive (no luminance correction) so the meter reads the true delivered luminance the fit needs.
-  await proxyPi(pi.ip, '/api/test_stimulus', {
+  await retryProxy(pi.ip, '/api/test_stimulus', {
     shape: 'square', az_deg: az, alt_deg: lumMeasure.alt, size_deg: lumMeasure.size,
     contrast: 1, bg_gray: 0, contrast_metric: 'normalized', apply_lum: false,
   });
@@ -1658,7 +1674,7 @@ async function startPhotodiodeTest() {
   if (!dpi) { log('Display not assigned to a Pi'); return; }
   const pd = rig.devices.photodiode || {};
   const everyN = pd.pulse_every_n_frames || 5;
-  const r = await proxyPi(dpi.ip, '/api/photodiode_test_start', {
+  const r = await retryProxy(dpi.ip, '/api/photodiode_test_start', {
     every_n: everyN,
     sync_corner: pd.sync_corner || 'top-left',   // carry the controls so Test reflects them live
     sync_size_px: pd.sync_size_px || 0,

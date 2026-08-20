@@ -400,6 +400,39 @@ class Display(Device):
         self._screen.fill((0, 0, 0))
         pygame.display.flip()
 
+    def run_sync_burst(self, every_n: int, duration_s: float = 1.0) -> int:
+        """Bounded variant of run_sync_test for the photodiode INIT verify: flash the red sync square
+        ON for one frame every `every_n` frames (black otherwise) for `duration_s` seconds, then
+        blank, and RETURN the number of flashes (red-on frames) actually emitted. That count is the
+        ground truth the photodiode compares its detected pulses against (±1). Runs on the pygame
+        thread (blocking ~duration_s). `every_n` is floored at 2 so the flashes are always separated
+        by a black frame (every_n=1 = continuous red = a single edge, not countable pulses)."""
+        import pygame
+        import time as _t
+        if self._screen is None:
+            return 0
+        every_n = max(2, int(every_n))
+        rect = pygame.Rect(*self._sync_test_rect())
+        clock = pygame.time.Clock()
+        t_end = _t.monotonic() + max(0.05, float(duration_s))
+        frame = 0
+        flashes = 0
+        while _t.monotonic() < t_end:
+            self._screen.fill((0, 0, 0))
+            if frame % every_n == 0:
+                self._screen.fill(self._sync_rgb(), rect)   # one red frame = one detectable pulse
+                flashes += 1
+            pygame.display.flip()
+            try:
+                pygame.event.pump()
+            except Exception:
+                pass
+            clock.tick(120)
+            frame += 1
+        self._screen.fill((0, 0, 0))
+        pygame.display.flip()
+        return flashes
+
     def _sync_rgb(self):
         """Sync-patch colour: (R, 0, 0) with R scaled by sync_brightness (0..1). Green/blue stay 0
         so the pulse is pure red and never enters the mouse's visual field; brightness 0 = off (black)."""

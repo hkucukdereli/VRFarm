@@ -782,6 +782,32 @@ def go():
     except Exception as e:
         return jsonify({"ok": False, "error": f"Failed to start leader: {e}", "steps": steps})
 
+    # Wait for the leader to finish device init before starting the camera / sending START. The
+    # leader prints "Waiting for START command..." once all devices (incl. the photodiode sync
+    # verify) are up; if it EXITS during init instead (e.g. the verify failed), surface its error —
+    # e.g. "Photodiode cannot init: ... Deactivate photodiode sync ..." — rather than a silent
+    # no-start. The verify itself waits for the follower display, so allow a generous window.
+    print("[go] Waiting for leader devices to init...")
+    leader_ready = False
+    for _ in range(60):        # up to ~30 s
+        time.sleep(0.5)
+        try:
+            st = requests.get(f"http://{leader['ip']}:{api_port}/api/status", timeout=3).json()
+            lines = requests.get(f"http://{leader['ip']}:{api_port}/api/logs",
+                                 params={"n": 80}, timeout=3).json().get("lines", [])
+        except Exception:
+            continue
+        if any("Waiting for START" in ln for ln in lines):
+            leader_ready = True
+            break
+        if not st.get("process_running"):
+            err = next((ln for ln in reversed(lines)
+                        if "cannot init" in ln.lower() or "Error" in ln or "Traceback" in ln),
+                       (lines[-1] if lines else "leader exited during device init"))
+            return jsonify({"ok": False, "error": f"Leader init failed — {err}", "steps": steps})
+    if not leader_ready:
+        steps.append("⚠️  Leader readiness not confirmed after 30 s — proceeding")
+
     # Start the camera: RECORD to disk if 'camera' is checked, else PREVIEW-only (livestream, no file).
     cam_cfg = rig.get("devices", {}).get("camera", {})
     save_camera = bool(save.get("camera", True))

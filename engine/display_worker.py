@@ -12,7 +12,7 @@ us. The session path (follower.py, UDP :5575) is unchanged; this worker only ser
 
 PROTOCOL. pi_api sends one JSON request per UDP datagram to 127.0.0.1:<port> (default 5578):
     {"id": N, "action": "init"|"blank"|"checkers"|"stimulus"|"reload_warp"|"shutdown"|"sync_test"
-                        |"stop_sync"|"ping", ...}
+                        |"sync_burst"|"stop_sync"|"ping", ...}
 We reply with one JSON datagram that ECHOES "id" so pi_api can drain stale replies. The action set is
 identical to the old pi_api display thread; `stop_sync` (unblock the flash loop) and `ping` (liveness)
 are answered inline by the receiver thread so they work even while the pygame thread is mid sync-test.
@@ -169,6 +169,21 @@ def main():
                         except Exception as e:
                             print("[display_worker] sync_test error:", e, flush=True)
                         # result already sent; do NOT reply again (would desync)
+                elif action == "sync_burst":
+                    if not dev or getattr(dev, "_screen", None) is None:
+                        R({"ok": False, "error": "Display not initialized"})
+                    else:
+                        # Bounded flash for the photodiode INIT verify: run to completion, then reply
+                        # with the emitted flash count (NOT ack-first — the caller needs the number).
+                        if hasattr(dev, "set_sync_layout"):
+                            dev.set_sync_layout(cmd.get("sync_corner"), cmd.get("sync_size_px"),
+                                                cmd.get("sync_brightness"))
+                        try:
+                            flashes = dev.run_sync_burst(int(cmd.get("every_n", 5)),
+                                                         float(cmd.get("duration_s", 1.0)))
+                            R({"ok": True, "flashes": int(flashes)})
+                        except Exception as e:
+                            R({"ok": False, "error": str(e)})
                 else:
                     R({"ok": False, "error": f"Unknown action: {action}"})
             except Exception as e:

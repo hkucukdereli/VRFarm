@@ -49,10 +49,17 @@ devices:
     glitch_ms: 0.5
     gpio: 16
     pulse_every_n_frames: 5
+    serial_port: /dev/ttyACM0
     sync_brightness: 1.0
     sync_corner: top-right
     sync_size_px: 150
     type: photodiode
+    v_high: 3.0
+    v_low: 0.3
+    v_realert_s: 30.0
+    v_window_s: 10.0
+    verify_duration_s: 1.0
+    verify_enabled: true
   reward:
     calibration:
       main:

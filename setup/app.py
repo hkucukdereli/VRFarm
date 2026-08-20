@@ -1176,6 +1176,7 @@ def _get_deploy_files(role: str) -> list[tuple[str, str]]:
         files += [
             ("engine/__init__.py", "engine/__init__.py"),
             ("engine/follower.py", "engine/follower.py"),
+            ("engine/display_worker.py", "engine/display_worker.py"),   # setup-time display (out-of-proc)
             # The display Pi (follower) also gets projector bring-up + the calibration tools:
             # start_projector.sh -> ~/rig/; the rest -> ~/rig/calibration/ (same place the
             # Calibrate button uses). NOTE: start_projector.sh calls ~/dlp/init_parallel_mode.py.

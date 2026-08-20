@@ -86,6 +86,7 @@ then [INITIAL_SETUP_REFERENCE.md](docs/INITIAL_SETUP_REFERENCE.md).
 | [Calibration protocol](docs/CALIBRATION_PROTOCOL.md) | Warp map, luminance, reward valve |
 | [Data format](docs/DATA_FORMAT.md) | HDF5 layout and the analysis loaders |
 | [Leader wiring](docs/LEADER_WIRING.md) | Pins, 40-pin header map, GPIO rules |
+| [Teensy instructions](docs/TEENSY_INSTRUCTIONS.md) | Photodiode sync firmware: build, flash, tune |
 | [Rig health monitor](shepherd/README.md) | shepherd: what it watches, thresholds, alerts |
 
 ---
@@ -101,6 +102,7 @@ pi_api/        REST API deployed to each Pi (port 5080) + systemd unit
 shared/        config loaders, stimulus generator, HDF5 consolidation, notifications
 rigs/          rig hardware configs (demo.yaml runs with no hardware)
 experiments/   task/paradigm YAMLs
+teensy/        photodiode sync firmware (.ino) flashed with arduino-cli
 display_calibration/   projector geometry, warp map, luminance fitting
 display_diagnostics/   bench tools for the sync square and projector colour
 shepherd/      rig health watchdog that runs on a Pi (temperature, disk, CPU, encode rate)

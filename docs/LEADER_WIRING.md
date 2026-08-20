@@ -40,15 +40,20 @@ all the conditioning — the leader just timestamps the resulting clean edges.
 | Teensy pin      | Signal                         | Notes |
 |-----------------|--------------------------------|-------|
 | **A1** (analog in) | ← photodiode                | **Divide/clamp to ≤ 3.3 V before this pin** — Teensy 4 analog pins are 3.3 V max, not 5 V-tolerant. |
-| **pin 1** (OUT) | → Leader **GPIO16**           | Clean **2 ms**, 3.3 V square pulse per sync frame; idles LOW, pulses HIGH. Drives the Pi input directly (no level shift). |
-| **pin 13** (LED)| onboard LED mirrors OUT        | Quick visual check that pulses are firing. |
+| **pin 1** (OUT) | → Leader **GPIO16**           | Clean **5 ms** (`OUT_PULSE_US`), 3.3 V square pulse per sync frame; idles LOW, pulses HIGH. Drives the Pi input directly (no level shift). |
+| **pin 13** (LED)| onboard LED mirrors OUT        | Quick visual check that pulses are firing — **`DEBUG` builds only**. |
 | **GND**         | ↔ Leader GND                  | Common ground is essential — tie Teensy GND to a Pi GND pin. |
 | USB             | power                          | Bench supply or a Pi USB port. |
 
-Firmware: [`teensy/photodiode_sync/photodiode_sync.ino`](../teensy/photodiode_sync/photodiode_sync.ino)
-— a Schmitt trigger (HI 0.8 V / LO 0.2 V) plus the same two filters the old on-Pi model used
-(`STEADY_US = 150` glitch reject, `HOLDOFF_US = 5000` → one pulse per frame). Flash with
-`DEBUG = 0` for production. This **replaces the old on-Pi debounce/glitch model**: the
+Firmware: [`teensy/photodiode_sync_v2_0/`](../teensy/photodiode_sync_v2_0/) — build, flash
+and tuning instructions in **[TEENSY_INSTRUCTIONS.md](TEENSY_INSTRUCTIONS.md)**. It is a
+Schmitt trigger plus the same two filters the old on-Pi model used (`STEADY_US = 150` glitch
+reject, `HOLDOFF_US = 5000` → one pulse per frame). Since v2_0 the two thresholds are
+**adaptive** by default (`ADAPTIVE = true`): they ride a live baseline/peak estimate so they
+follow the diode's drifting idle level. Set `ADAPTIVE = false` for the fixed pair
+(`THRESHOLD_HI_V = 1.8` / `THRESHOLD_LO_V = 0.6`). Flash with `DEBUG = 0` for production.
+
+This **replaces the old on-Pi debounce/glitch model**: the
 `debounce_*` / `glitch_*` keys still present in `cheese.yaml` are now **inert**, and
 `photodiode.py` explicitly clears the Pi glitch filter so the Teensy edges pass untouched.
 

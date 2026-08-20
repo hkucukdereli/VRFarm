@@ -28,6 +28,7 @@ Project overview and repo layout are in the [root README](../README.md).
 | Calibrate the reward valve, projector geometry, or luminance | [CALIBRATION_PROTOCOL.md](CALIBRATION_PROTOCOL.md) |
 | Look up geometry parameters | [display_calibration/geometry_params.md](../display_calibration/geometry_params.md) |
 | Check wiring, pins and the 40-pin header map | [LEADER_WIRING.md](LEADER_WIRING.md) |
+| Build, flash or tune the **Teensy** photodiode sync firmware | [TEENSY_INSTRUCTIONS.md](TEENSY_INSTRUCTIONS.md) |
 | Watch rig health during a session (temperature, disk, encode rate) | [shepherd/README.md](../shepherd/README.md) |
 
 ## Map of the system

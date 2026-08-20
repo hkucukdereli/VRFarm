@@ -901,14 +901,33 @@ def init_photodiode():
                 for k in ("sync_corner", "sync_size_px", "sync_brightness"):
                     if k in data:
                         body[k] = data[k]
-                rq = urllib.request.Request(
-                    furl, data=json.dumps(body).encode(),
-                    headers={"Content-Type": "application/json"}, method="POST")
-                with urllib.request.urlopen(rq, timeout=duration_s + 10) as resp:
-                    r = json.loads(resp.read().decode())
-                if not r.get("ok"):
-                    raise RuntimeError(r.get("error", "display flash failed"))
-                return int(r.get("flashes", 0))
+                payload = json.dumps(body).encode()
+                # WAIT for the follower display to be up before the real flash. A fresh display worker
+                # (or one being respawned after a crash) may not be ready the instant the photodiode
+                # inits, so retry while it reports "not initialized" or is unreachable — instead of
+                # failing on the first miss. A down-display burst returns immediately (no flash), so
+                # retrying is cheap; the actual 1 s flash only runs once the display answers.
+                deadline = time.time() + 10.0
+                last = "no response"
+                while time.time() < deadline:
+                    try:
+                        rq = urllib.request.Request(
+                            furl, data=payload,
+                            headers={"Content-Type": "application/json"}, method="POST")
+                        with urllib.request.urlopen(rq, timeout=duration_s + 10) as resp:
+                            r = json.loads(resp.read().decode())
+                    except Exception as e:                 # display Pi/API not reachable yet
+                        last = str(e)[:80]
+                        time.sleep(1.0)
+                        continue
+                    if r.get("ok"):
+                        return int(r.get("flashes", 0))
+                    last = r.get("error", "display flash failed")
+                    if "not initialized" in last.lower():  # display coming up — wait and retry
+                        time.sleep(1.0)
+                        continue
+                    raise RuntimeError(last)               # a real flash failure, not a readiness issue
+                raise RuntimeError(f"display not ready ({last}) — initialize the display first")
 
             verify = dev.verify_sync(sync_burst)
             if not verify.get("ok"):

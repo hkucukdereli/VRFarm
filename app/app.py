@@ -1046,9 +1046,11 @@ def transfer():
     steps = []
     leader = next((p for p in rig["pis"] if p.get("role") == "leader"), rig["pis"][0])
     try:
+        # timeout is generous: consolidation now also copy-remuxes video.h264 -> video.mp4 on the
+        # leader, which reads+writes the whole video (~a minute for a few GB, more for a big one).
         cj = requests.post(
             f"http://{leader['ip']}:{api_port}/api/consolidate/{session_id}",
-            json={"video_dir": rig.get("data", {}).get("video_dir", "")}, timeout=120).json()
+            json={"video_dir": rig.get("data", {}).get("video_dir", "")}, timeout=900).json()
         if cj.get("ok") and cj.get("skipped"):
             steps.append(f"Consolidate: {cj['skipped']}")
         elif cj.get("ok"):
@@ -1056,6 +1058,15 @@ def transfer():
             steps.append(f"Consolidated .h5 (merged {got}; removed {', '.join(cj.get('removed', [])) or 'none'})")
         else:
             steps.append(f"⚠️  Consolidate failed: {cj.get('error', '?')}")
+        # Report the video remux (video.h264 -> video.mp4). The mp4 is then what the file list
+        # below picks up, so the raw is never transferred.
+        v = (cj or {}).get("video") or {}
+        if v.get("remuxed"):
+            steps.append(f"Video: remuxed -> video.mp4 @ {v.get('fps')} fps, raw .h264 deleted")
+        elif v.get("error"):
+            steps.append(f"⚠️  Video remux: {v['error']} (raw .h264 will transfer instead)")
+        elif v.get("skipped") and v["skipped"] not in ("already mp4",):
+            steps.append(f"Video remux skipped: {v['skipped']}")
     except Exception as e:
         steps.append(f"⚠️  Consolidate error (transferring raw files): {e}")
 
@@ -1096,7 +1107,7 @@ def transfer():
             try:
                 # Video files can be large — use longer timeout. Note this is a per-read stall
                 # timeout, not a deadline for the whole transfer.
-                dl_timeout = 300 if fname.endswith(".h264") else 60
+                dl_timeout = 300 if fname.endswith((".h264", ".mp4", ".mkv")) else 60
                 with requests.get(f"{base}/api/download/{fpath}",
                                   timeout=dl_timeout, stream=True) as r:
                     r.raise_for_status()

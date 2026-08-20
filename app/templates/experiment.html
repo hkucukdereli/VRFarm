@@ -1409,6 +1409,11 @@ function handleEvent(evt) {
       log(`🐑 ${host}${evt.message}`, evt.level);
       break;
     }
+    case 'photodiode_warning':
+      // V-range warning from the photodiode device (top/bottom 1% of the Teensy V stream out of
+      // range). 'warning' = orange, 'ok' = recovery. Same log channel as shepherd.
+      log(`📉 ${evt.message}`, evt.level);
+      break;
     case 'global_timeout':
       log(`Global timeout: no licks in ${(evt.phases || []).join('/')} for ${evt.n_dry} trials — aborting.`);
       break;

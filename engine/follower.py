@@ -178,6 +178,8 @@ class Follower:
                 self._handle_blank()
             elif cmd == "LOAD_STIMS":
                 self.load_stims(msg["path"])
+            elif cmd == "SYNC_TEST":
+                self._handle_sync_test(msg, addr)
             elif cmd == "QUIT":
                 print("Received QUIT")
                 break
@@ -276,6 +278,27 @@ class Follower:
         display = self.devices.get("display")
         if display:
             display.blank()
+
+    def _handle_sync_test(self, msg: dict, addr):
+        """Photodiode INIT verify (experiment path): run a bounded red-sync flash burst and reply to
+        the SENDER (the leader's ephemeral socket) with the number of flashes emitted, so the leader
+        can compare its GPIO-detected pulse count (±1). A reply also signals the display is up."""
+        display = self.devices.get("display")
+        flashes = 0
+        try:
+            if display is not None:
+                if hasattr(display, "set_sync_layout"):
+                    display.set_sync_layout(msg.get("sync_corner"), msg.get("sync_size_px"),
+                                            msg.get("sync_brightness"))
+                flashes = int(display.run_sync_burst(int(msg.get("every_n", 5)),
+                                                     float(msg.get("duration_s", 1.0))))
+        except Exception as e:
+            print(f"SYNC_TEST error: {e}")
+        try:
+            self._cmd_sock.sendto(
+                json.dumps({"cmd": "SYNC_TEST_DONE", "flashes": flashes}).encode(), addr)
+        except OSError:
+            pass
 
     # ── Shutdown ──
 

@@ -867,25 +867,52 @@ def init_reward():
 
 @app.route("/api/init_photodiode", methods=["POST"])
 def init_photodiode():
-    """Initialize photodiode: create persistent device instance."""
+    """Initialize the photodiode (leader) and run the UNIVERSAL sync verify: flash the FOLLOWER's
+    display ~1 s while sampling GPIO pulses + the Teensy V stream, and fail init if the pulses aren't
+    detected (±1) or V is out of range. The setup orchestrator passes `follower_ip` so we can POST
+    the flash; without it (or with verify disabled) we skip the flash half and just report the level."""
     _ensure_rig_path()
     from devices.photodiode import Photodiode
     data = request.json or {}
-    gpio = data.get("gpio", 24)
     _release_one("photodiode")   # free the old line so this (re)init can re-claim it (lgpio is exclusive)
     try:
+        # Pass through everything the device needs (gpio + the new serial/V/verify fields). The
+        # legacy glitch/debounce keys are ignored by the lgpio device, so they're dropped.
+        rig_cfg = {k: data[k] for k in (
+            "gpio", "gpiochip", "pulse_every_n_frames", "serial_port",
+            "v_high", "v_low", "v_window_s", "v_realert_s",
+            "verify_duration_s", "verify_enabled",
+            "sync_corner", "sync_size_px", "sync_brightness") if k in data}
+        rig_cfg.setdefault("gpio", data.get("gpio", 24))
         dev = Photodiode()
-        dev.init(rig_config={
-            "gpio": gpio,
-            "glitch_enabled": data.get("glitch_enabled", True),
-            "glitch_ms": data.get("glitch_ms", 0.5),
-            "debounce_enabled": data.get("debounce_enabled", True),
-            "debounce_ms": data.get("debounce_ms", 5),
-        }, task_params={})
+        dev.init(rig_config=rig_cfg, task_params={})
         with _devices_lock:
             _devices["photodiode"] = dev
+
+        verify = None
+        follower = data.get("follower_ip")
+        if getattr(dev, "verify_enabled", True) and follower:
+            import requests as req
+            fport = data.get("follower_api_port", 5080)
+
+            def sync_burst(duration_s):
+                body = {"every_n": data.get("pulse_every_n_frames", 5), "duration_s": duration_s}
+                for k in ("sync_corner", "sync_size_px", "sync_brightness"):
+                    if k in data:
+                        body[k] = data[k]
+                r = req.post(f"http://{follower}:{fport}/api/photodiode_sync_burst",
+                             json=body, timeout=duration_s + 10).json()
+                if not r.get("ok"):
+                    raise RuntimeError(r.get("error", "display flash failed"))
+                return int(r.get("flashes", 0))
+
+            verify = dev.verify_sync(sync_burst)
+            if not verify.get("ok"):
+                return jsonify({"ok": False, "verify": verify,
+                                "error": (f"Photodiode cannot init: {verify.get('reason')}. "
+                                          "Untick 'Photodiode stim sync' to run without it.")}), 500
         check = dev.check()
-        return jsonify({"ok": True, "message": check.get("message", "OK")})
+        return jsonify({"ok": True, "message": check.get("message", "OK"), "verify": verify})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -1333,6 +1360,20 @@ def photodiode_test_stop():
     """Stop the sync-square flash test (out-of-band stop_sync to the display worker)."""
     _stop_sync_worker()
     return jsonify({"ok": True})
+
+
+@app.route("/api/photodiode_sync_burst", methods=["POST"])
+def photodiode_sync_burst():
+    """Follower: run a BOUNDED red-sync flash burst on the display for the leader's photodiode init
+    verify, and return how many flashes it actually emitted. Blocks ~duration_s (the worker runs the
+    burst to completion, then replies with the count) — unlike the ack-first interactive test."""
+    data = request.json or {}
+    dur = float(data.get("duration_s", 1.0))
+    cmd = {"action": "sync_burst", "every_n": int(data.get("every_n", 5)), "duration_s": dur}
+    for k in ("sync_corner", "sync_size_px", "sync_brightness"):
+        if k in data:
+            cmd[k] = data[k]
+    return jsonify(_display_command(cmd, timeout=dur + 5))
 
 
 @app.route("/api/deliver_reward", methods=["POST"])

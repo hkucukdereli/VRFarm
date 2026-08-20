@@ -111,6 +111,24 @@ class Leader:
                 dev.load_calibration(dev_config["calibration"])
             self.devices[dev_name] = dev
             print(f"  {dev.info.label}: OK")
+            # Photodiode sync verify — ONLY when the "Photodiode stim sync" checkbox is on for this
+            # experiment (stimulus.photodiode_sync_enabled). Default OFF, matching self._sync_enabled
+            # below and shared/stim_generator, so a task without the flag doesn't demand flashes the
+            # session never draws. If it's on but the check fails, ABORT with an actionable message so
+            # the operator can untick it and run without sync. every_n is the SAME cadence the session
+            # flashes at (the checkbox's "every N frames"). The burst request/reply waits for the
+            # follower display (a reply == display ready).
+            stim = self.task.get("stimulus", {})
+            if (dev_name == "photodiode" and stim.get("photodiode_sync_enabled", False)
+                    and getattr(dev, "verify_enabled", True) and self._follower_addrs):
+                every_n = stim.get("photodiode_sync_every_n", dev_config.get("pulse_every_n_frames", 5))
+                res = dev.verify_sync(lambda d: self._sync_burst_follower(d, every_n, dev_config))
+                if not res.get("ok"):
+                    raise RuntimeError(
+                        f"Photodiode cannot init: {res.get('reason')}. "
+                        f"Untick 'Photodiode stim sync' to run without it.")
+                print(f"  photodiode sync verify: OK "
+                      f"(detected {res['detected']} vs emitted {res['emitted']})")
 
     # ── Go / No-Go classification ──
 
@@ -716,6 +734,34 @@ class Leader:
         data = json.dumps(msg).encode()
         for addr in self._follower_addrs.values():
             self._event_sock.sendto(data, addr)
+
+    def _sync_burst_follower(self, duration_s, every_n, dev_config):
+        """Photodiode-verify flash trigger (experiment path): ask the follower to flash the red sync
+        square for `duration_s` and return the emitted flash count. Request/reply on a short-lived
+        socket; retries until the follower answers (a reply means follower.py has opened its display),
+        so the verify waits for display init. Raises if the display never comes up within the wait."""
+        body = {"cmd": "SYNC_TEST", "every_n": int(every_n), "duration_s": float(duration_s)}
+        for k in ("sync_corner", "sync_size_px", "sync_brightness"):
+            if k in dev_config:
+                body[k] = dev_config[k]
+        addr = next(iter(self._follower_addrs.values()))
+        data = json.dumps(body).encode()
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.settimeout(float(duration_s) + 3.0)      # long enough for one burst to run + reply
+            deadline = time.monotonic() + 20.0         # wait up to ~20 s for the follower display
+            while time.monotonic() < deadline:
+                s.sendto(data, addr)
+                try:
+                    reply, _ = s.recvfrom(4096)
+                except socket.timeout:
+                    continue                           # follower not listening yet -> retry
+                r = json.loads(reply.decode())
+                if r.get("cmd") == "SYNC_TEST_DONE":
+                    return int(r.get("flashes", 0))
+            raise RuntimeError("display not ready (no SYNC_TEST reply from follower)")
+        finally:
+            s.close()
 
     def _publish(self, event: dict):
         """Send event to Mac via UDP."""

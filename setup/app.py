@@ -224,7 +224,7 @@ def api_install_pi():
             "lick_sensor": ["smbus2"],
             "reward": ["scipy"],        # lgpio comes from apt + symlink (step 2/3), not pip
             "camera": ["h5py", "pillow", "simplejpeg", "piexif", "av"],
-            "photodiode": [],           # lgpio via apt + symlink; the DLPC needs no pip pkg (raw ioctl)
+            "photodiode": ["pyserial"], # lgpio via apt+symlink; pyserial reads the Teensy V stream (USB)
             "display": ["pygame"],
         }
         for dev in devices:
@@ -557,13 +557,28 @@ def _init_one_device(dev_name, devices, post):
         return post("/api/init_reward",
                     {"pins": cfg.get("pins", {"main": {"gpio": 18}})}, "Reward", 10)
     if dev_name == "photodiode":
-        return post("/api/init_photodiode", {
+        payload = {
             "gpio": cfg.get("gpio", 24),
-            "glitch_enabled": cfg.get("glitch_enabled", True),
-            "glitch_ms": cfg.get("glitch_ms", 0.5),
-            "debounce_enabled": cfg.get("debounce_enabled", True),
-            "debounce_ms": cfg.get("debounce_ms", 5),
-        }, "Photodiode", 10)
+            "gpiochip": cfg.get("gpiochip", 0),
+            "pulse_every_n_frames": cfg.get("pulse_every_n_frames", 5),
+            "serial_port": cfg.get("serial_port"),          # Teensy USB (leader) for the V stream
+            "v_high": cfg.get("v_high", 3.0),
+            "v_low": cfg.get("v_low", 0.3),
+            "v_window_s": cfg.get("v_window_s", 10.0),
+            "v_realert_s": cfg.get("v_realert_s", 30.0),
+            "verify_duration_s": cfg.get("verify_duration_s", 1.0),
+            "verify_enabled": cfg.get("verify_enabled", True),
+            "sync_corner": cfg.get("sync_corner"),
+            "sync_size_px": cfg.get("sync_size_px"),
+            "sync_brightness": cfg.get("sync_brightness"),
+        }
+        # The sync verify flashes the FOLLOWER's display, so tell the leader which Pi that is.
+        # (_INIT_ORDER runs display before photodiode, so the follower display worker is already up.)
+        fol = next((p for p in (_rig_config or {}).get("pis", []) if p.get("role") == "follower"), None)
+        if fol:
+            payload["follower_ip"] = fol["ip"]
+            payload["follower_api_port"] = (_rig_config.get("network", {}) or {}).get("api_port", 5080)
+        return post("/api/init_photodiode", payload, "Photodiode", 25)   # 25s: verify does a ~1s flash round-trip
     if dev_name == "encoder":
         return post("/api/init_encoder", {
             "i2c_address": cfg.get("i2c_address", "0x36"),

@@ -72,7 +72,7 @@ const bool  ADAPTIVE    = true;    // true: thresholds track the live baseline/p
                                    // false: use the fixed THRESHOLD_*_V pair (original behaviour).
 
 // Fixed thresholds — used ONLY when ADAPTIVE == false.
-const float THRESHOLD_HI_V = 1.2f;
+const float THRESHOLD_HI_V = 1.8f;
 const float THRESHOLD_LO_V = 0.6f;
 
 // ── Adaptive tracker tuning (used when ADAPTIVE == true) ─────────────────────
@@ -86,7 +86,7 @@ const float PEAK_RISE_TC_S     = 0.01f;  // peak jumps to a new TIP this fast.
 const float PEAK_FALL_TC_S     = 2.0f;   // peak relaxes back this slow -> survives missed pulses.
 const float START_FRAC = 0.60f;          // begin a pulse at 60% of the baseline->peak span.
 const float END_FRAC   = 0.30f;          // end it back at 30%   (END < START = hysteresis band).
-const float MIN_PULSE_V = 0.20f;         // guard: a real pulse must rise at least this far above the
+const float MIN_PULSE_V = 0.30f;         // guard: a real pulse must rise at least this far above the
                                          // baseline. Smaller excursions are ignored, and this is the
                                          // floor (on the START offset) that stops the thresholds
                                          // collapsing into the noise when the flashes pause.

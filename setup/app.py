@@ -158,7 +158,10 @@ def api_install_pi():
         #    apt-built binding and symlink it into the env like the camera bindings; no daemon).
         apt_packages = []
         if needs_camera:
-            apt_packages.extend(["python3-libcamera", "python3-picamera2"])
+            # camera bindings + ffmpeg: consolidation copy-remuxes video.h264 -> video.mp4 on the
+            # leader (the Pi with the camera), so ffmpeg must be present there. /usr/bin/ffmpeg is on
+            # the systemd service's default PATH, so pi_api finds it with no unit change.
+            apt_packages.extend(["python3-libcamera", "python3-picamera2", "ffmpeg"])
         if needs_gpio:
             apt_packages.append("python3-lgpio")
         if needs_display:

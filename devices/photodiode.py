@@ -177,6 +177,21 @@ class Photodiode(Device):
                 pass
         print(f"[photodiode] {level}: {message}", flush=True)
 
+    def get_v_status(self) -> dict:
+        """Live photodiode-voltage readout for the setup-UI card: latest V, the rolling 1%/99% band,
+        a short recent trace, and the warn thresholds. available=False when no serial (pyserial
+        missing / port not opened)."""
+        if getattr(self, "_serial", None) is None:
+            return {"available": False}
+        with self._v_lock:
+            n = len(self._v)
+            latest = self._v[-1][1] if n else None
+            recent = [round(v, 3) for (_, v) in list(self._v)[-120:]]   # ~last 1.2 s @ 100 Hz
+        pr = self._v_percentiles()
+        return {"available": True, "n": n, "v": latest,
+                "p1": (pr[0] if pr else None), "p99": (pr[1] if pr else None),
+                "recent": recent, "v_high": self.v_high, "v_low": self.v_low}
+
     def verify_sync(self, sync_burst, duration_s=None):
         """Universal init check: flash the display for ~duration_s while counting our own rising edges
         and sampling V, then pass/fail. `sync_burst(duration_s) -> emitted_flash_count` is supplied by
@@ -209,10 +224,14 @@ class Photodiode(Device):
             if pr is not None:
                 p1, p99 = pr
                 v_ok = (p99 > self.v_low) and (p1 < self.v_high)
-        count_ok = abs(detected - emitted) <= 1
+        # "Missing-only": a colour-sequential DLP renders each flash as several brief sub-pulses, so
+        # the photodiode legitimately detects MORE pulses than flashes emitted. Only MISSING flashes
+        # (detected below emitted) indicate a broken display->diode path; extra edges are expected.
+        # (±1 missing tolerated, per spec.)
+        count_ok = detected >= emitted - 1
         ok = bool(count_ok and v_ok)
         if not count_ok:
-            reason = f"pulse mismatch: detected {detected} vs emitted {emitted} (±1 allowed)"
+            reason = f"missed flashes: detected {detected} of {emitted} emitted"
         elif not v_ok and p99 is not None and p99 <= self.v_low:
             reason = f"no flash detected: peak V (99% = {p99:.2f}) <= {self.v_low}"
         elif not v_ok:

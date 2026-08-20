@@ -1369,6 +1369,7 @@ let photodidePollInterval = null;
 let photodiodeAnimFrame = null;
 let photodiodeRaw = [];         // rolling raw transitions {t, level} (~last 2s) for the scope
 let photodiodeTrigger = null;   // latest raw rising-edge time = scope trigger
+let photodiodeVData = null;     // latest {available, v, p1, p99, v_high, v_low} from the Teensy V stream
 let photodiodeEdgeCount = 0;    // total raw rising edges since monitor start
 let _pdPolling = false;         // in-flight guard so overlapping polls can't race the raw buffer
 
@@ -1722,6 +1723,25 @@ async function pollPhotodiodeRaw(ip) {
     }
     const countEl = document.getElementById('pulse-count');
     if (countEl) countEl.textContent = photodiodeEdgeCount;
+
+    // Live V from the Teensy serial stream (n/a if pyserial / Teensy absent — degrades quietly).
+    const vr = await proxyPi(ip, '/api/photodiode_v', {}, 'GET');
+    photodiodeVData = vr;
+    const vEl = document.getElementById('pd-v');
+    const e1 = document.getElementById('pd-v1'), e99 = document.getElementById('pd-v99');
+    if (vEl) {
+      if (vr && vr.available && vr.v != null) {
+        const bad = (vr.p99 != null && vr.p99 >= (vr.v_high ?? 3.0)) ||
+                    (vr.p1  != null && vr.p1  <= (vr.v_low  ?? 0.3));
+        vEl.textContent = vr.v.toFixed(2) + 'V';
+        vEl.style.color = bad ? '#ffa64d' : '#66bb6a';
+        if (e1)  e1.textContent  = vr.p1  != null ? vr.p1.toFixed(2)  : '--';
+        if (e99) e99.textContent = vr.p99 != null ? vr.p99.toFixed(2) : '--';
+      } else {
+        vEl.textContent = 'n/a'; vEl.style.color = '#556';
+        if (e1) e1.textContent = '--'; if (e99) e99.textContent = '--';
+      }
+    }
   } finally {
     _pdPolling = false;
   }
@@ -1786,6 +1806,19 @@ function drawPhotodiodeScope() {
   const ctx = canvas.getContext('2d');
   const w = canvas.width, h = canvas.height;
   ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
+
+  // live V overlay (Teensy serial), top-right — shown even before any edges arrive
+  const vd = photodiodeVData;
+  if (vd && vd.available && vd.v != null) {
+    const badV = (vd.p99 != null && vd.p99 >= (vd.v_high ?? 3.0)) ||
+                 (vd.p1  != null && vd.p1  <= (vd.v_low  ?? 0.3));
+    ctx.textAlign = 'right';
+    ctx.font = 'bold 13px monospace'; ctx.fillStyle = badV ? '#ffa64d' : '#66bb6a';
+    ctx.fillText(`V ${vd.v.toFixed(2)}`, w - 6, 13);
+    ctx.font = '9px monospace'; ctx.fillStyle = '#889';
+    ctx.fillText(`1% ${vd.p1 != null ? vd.p1.toFixed(2) : '--'} · 99% ${vd.p99 != null ? vd.p99.toFixed(2) : '--'}`, w - 6, 25);
+    ctx.textAlign = 'left';
+  }
 
   const preMs = 2, postMs = 14;
   const totalS = (preMs + postMs) / 1000;
@@ -2573,6 +2606,7 @@ function renderPhotodiodeControls(dev) {
         ? `<button class="btn btn-red btn-sm" onclick="stopPhotodiodeTest()">Stop test</button>`
         : `<button class="btn btn-sm" onclick="startPhotodiodeTest()" ${ds.initialized !== true ? 'disabled' : ''} title="Flash the red sync square every N frames on the display (simulates the stimulus sync pulse) and open the scope">Test</button>`}
       ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">Edges: <span id="pulse-count">0</span> | Last: <span id="last-pulse-time">--</span></span>` : ''}
+      ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">| V <span id="pd-v" style="font-weight:600">--</span> <span style="color:#556">[1% <span id="pd-v1">--</span> · 99% <span id="pd-v99">--</span>]</span></span>` : ''}
     </div>
     ${monitoring ? `<canvas id="photodiode-canvas" class="lick-canvas" width="460" height="120" style="width:460px;height:120px;max-width:100%"></canvas>` : ''}
     <div style="font-size:10px; color:#666; margin-top:2px">Rising edge detection on GPIO${gpio} (clean pulses from the Teensy — filtering runs on the Teensy) — red sync square at ${corner}, ${sizePx ? sizePx + 'px' : 'auto (' + sizeCap + 'px = dead-band width)'}, brightness ${brightness}</div>`;

@@ -1329,6 +1329,20 @@ def photodiode_raw_data():
     return jsonify({"ok": True, "transitions": buf})
 
 
+@app.route("/api/photodiode_v")
+def photodiode_v():
+    """Live photodiode VOLTAGE (from the Teensy USB serial stream) for the setup-UI card readout.
+    available=False if the photodiode isn't initialized or has no serial (pyserial/Teensy absent)."""
+    with _devices_lock:
+        dev = _devices.get("photodiode")
+    if dev is None or not hasattr(dev, "get_v_status"):
+        return jsonify({"available": False})
+    try:
+        return jsonify(dev.get_v_status())
+    except Exception as e:
+        return jsonify({"available": False, "error": str(e)[:120]})
+
+
 @app.route("/api/photodiode_raw_stop", methods=["POST"])
 def photodiode_raw_stop():
     """Stop raw capture and restore the device's configured glitch filter."""

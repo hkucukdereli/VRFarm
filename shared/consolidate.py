@@ -54,11 +54,84 @@ _NPZ_SKIP = {"trial_idx", "block_num", "stim_az_deg", "contrast", "corr_contrast
              "bg_gray", "n_trials"}
 
 
-def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=True):
+def _remux_and_prune_video(video_session_dir, h5_path):
+    """Copy-remux video.h264 -> video.mp4 (container only, NO re-encode) and delete the raw once
+    the mp4 is verified. Runs on the Leader at consolidation, after recording has stopped.
+
+    Why here: raw .h264 is what the encoder writes (crash-safe, append-only), but it has no
+    container/timing — players and DeepLabCut read the wrong fps and can't seek. A stream copy
+    into MP4 is near-free (no re-encode, ~disk-speed) and fixes that. We force the frame rate from
+    the h5 because the raw stream's embedded rate is unreliable.
+
+    Never raises: on ANY problem it leaves the raw .h264 in place and reports why, so a bad remux
+    can never cost a recording. Idempotent — skips cleanly if the mp4 already exists or ffmpeg is
+    absent."""
+    import shutil
+    import subprocess
+    import h5py
+
+    if not video_session_dir:
+        return {"skipped": "no video dir"}
+    vdir = Path(video_session_dir)
+    raw = vdir / "video.h264"
+    mp4 = vdir / "video.mp4"
+    if mp4.exists() and not raw.exists():
+        return {"skipped": "already mp4"}
+    if not raw.exists():
+        return {"skipped": "no raw video"}
+    if shutil.which("ffmpeg") is None:
+        return {"error": "ffmpeg not found; kept raw .h264"}
+
+    # The raw stream's frame rate is unreliable (ffprobe reads 120/25 on our files), so force a
+    # constant rate from the h5 — requested_fps preferred, else measured, rounded to an int.
+    fps = 30
+    try:
+        with h5py.File(h5_path, "r") as f:
+            cam = dict(f["camera"].attrs) if "camera" in f else {}
+        fps = int(round(float(cam.get("requested_fps") or cam.get("measured_fps") or 30)))
+    except Exception:
+        pass
+    if fps <= 0:
+        fps = 30
+
+    tmp = vdir / "video.mp4.part"
+    raw_size = raw.stat().st_size
+    # -r before -i forces the input rate; -c:v copy = stream copy (no re-encode); -f mp4 names the
+    # muxer explicitly (the temp file's .part extension can't be auto-detected); no +faststart (it
+    # would rewrite the whole file — pointless for local/DLC use); -an = no audio.
+    cmd = ["ffmpeg", "-y", "-v", "error", "-fflags", "+genpts", "-r", str(fps),
+           "-i", str(raw), "-c:v", "copy", "-an", "-f", "mp4", str(tmp)]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=3600)
+    except Exception as e:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        err = getattr(e, "stderr", "") or str(e)
+        return {"error": f"remux failed ({str(err)[:120]}); kept raw .h264", "fps": fps}
+
+    # A stream copy must land ~the same size; a much smaller file = a truncated/failed remux, and
+    # we must NOT delete the raw in that case.
+    got = tmp.stat().st_size if tmp.exists() else 0
+    if got < raw_size * 0.95:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return {"error": f"remux output too small ({got}/{raw_size} bytes); kept raw .h264",
+                "fps": fps}
+    os.replace(tmp, mp4)
+    raw.unlink()
+    return {"remuxed": "video.mp4", "fps": fps, "removed_raw": True, "mp4_bytes": got}
+
+
+def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=True, remux_video=True):
     """Build the final self-contained HDF5 for a session and remove sidecars.
 
     session_dir: dir holding <session_id>.h5, metadata.yaml, stimuli.npz, trials.yaml.
     video_session_dir: dir holding frame_timestamps.npy (+ video.h264); optional.
+    remux_video: copy-remux video.h264 -> video.mp4 and delete the raw (default True).
     Returns a summary dict. Idempotent: a file already at FORMAT_VERSION is left alone.
     """
     import h5py
@@ -71,8 +144,13 @@ def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=Tru
     h5_path = h5s[0]
 
     with h5py.File(h5_path, "r") as f:
-        if f.attrs.get("format_version", 0) == FORMAT_VERSION or "trials" in f:
-            return {"ok": True, "skipped": "already consolidated", "h5": str(h5_path)}
+        already = f.attrs.get("format_version", 0) == FORMAT_VERSION or "trials" in f
+    if already:
+        # h5 is already consolidated, but still (re)try the video remux — a prior run may have
+        # been unable to (ffmpeg missing, interrupted), and we'd rather finish it on a re-transfer
+        # than leave the raw .h264 stranded.
+        vres = _remux_and_prune_video(video_session_dir, h5_path) if remux_video else {"skipped": "disabled"}
+        return {"ok": True, "skipped": "already consolidated", "h5": str(h5_path), "video": vres}
 
     meta_path = session_dir / "metadata.yaml"
     npz_path = session_dir / "stimuli.npz"
@@ -174,4 +252,6 @@ def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=Tru
                 Path(p).unlink()
                 removed.append(Path(p).name)
 
-    return {"ok": True, "h5": str(h5_path), "merged": merged, "removed": removed}
+    # Turn the raw .h264 into a playable/DLC-ready video.mp4 (stream copy) and drop the raw.
+    vres = _remux_and_prune_video(video_session_dir, h5_path) if remux_video else {"skipped": "disabled"}
+    return {"ok": True, "h5": str(h5_path), "merged": merged, "removed": removed, "video": vres}

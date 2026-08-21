@@ -42,7 +42,6 @@
   .pi-header strong { font-size: 14px; color: #fff; }
   .pi-header .role-badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 700; }
   .pi-header .role-badge.leader { background: #000; color: #fff; }
-  .pi-header .role-badge.follower { background: #fff; color: #000; }
 
   .device-chip { display: inline-block; padding: 2px 8px; border-radius: 10px;
                  font-size: 11px; margin: 2px; background: #333; color: #ccc; }
@@ -71,26 +70,14 @@
   .device-fieldset:disabled { opacity: 0.55; }
   .device-field { display: inline-flex; align-items: center; gap: 4px; }
   .device-field label { margin: 0; font-size: 10px; white-space: nowrap; }
-  .device-field input, .device-field select { width: auto; min-width: 60px; max-width: 120px;
+  .device-field input, .device-field select { width: auto; min-width: 60px; max-width: 140px;
     padding: 3px 6px; font-size: 12px; }
-  /* Geometry param rows (SCREEN/VISUAL SPACE/PROJECTOR): tighter so each fits on one line */
-  .geo-row { gap: 6px; }
-  .geo-row .device-field input { min-width: 0; width: 76px; }
-  .geo-label { font-size: 10px; color: #888; min-width: 42px; }
-  /* Display-card sub-sections (RENDERING / TESTS / CALIBRATION / GEOMETRY) */
-  .disp-section { margin-top: 8px; padding-top: 6px; border-top: 1px solid #333; }
-  .disp-section:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
-  .disp-label { display: block; font-size: 10px; color: #7aa2d0; letter-spacing: 1px; margin-bottom: 2px; }
 
-  .cal-table { margin-top: 6px; border-collapse: collapse; font-size: 11px; }
-  .cal-table th { color: #888; text-align: left; padding: 2px 6px; font-weight: 500; }
-  .cal-table td { padding: 2px 4px; }
-  .cal-table input { width: 60px; padding: 2px 4px; font-size: 11px; background: #0f3460;
-    border: 1px solid #333; color: #e0e0e0; border-radius: 3px; }
-
-  .lick-canvas { background: #0a0a1a; border-radius: 4px; margin-top: 6px; }
+  .mon-box { background: #0a0a1a; border-radius: 4px; margin-top: 6px; padding: 6px 8px;
+             font-family: monospace; font-size: 11px; color: #9ac; max-height: 120px;
+             overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
   .stream-container { margin-top: 6px; }
-  .stream-container img { max-width: 320px; border-radius: 4px; display: block; }
+  .stream-container img { max-width: 360px; border-radius: 4px; display: block; }
   /* Placeholder shown in the live-stream window before Live is pressed. */
   .stream-offline { width: 320px; height: 180px; border-radius: 4px; background: #2a2a2a;
                     display: flex; align-items: center; justify-content: center;
@@ -169,15 +156,15 @@
         <div style="font-size:10px; color:#666; margin-top:2px">Run resource monitor on the leader (applies now).</div>
         <div style="display:flex; align-items:center; gap:6px; margin-top:8px">
           <label style="font-size:12px; margin:0; white-space:nowrap; width:60px">Data Dir</label>
-          <input type="text" id="data-leader-dir" placeholder="/home/vruser/data"
+          <input type="text" id="data-leader-dir" placeholder="/home/pi/data"
                  style="flex:1; min-width:0; font-size:11px" oninput="onDataDirChange()">
         </div>
         <div style="display:flex; align-items:center; gap:6px; margin-top:4px">
           <label style="font-size:12px; margin:0; white-space:nowrap; width:60px">Video Dir</label>
-          <input type="text" id="data-video-dir" placeholder="/media/vruser/ssd/video"
+          <input type="text" id="data-video-dir" placeholder="/home/pi/video"
                  style="flex:1; min-width:0; font-size:11px" oninput="onDataDirChange()">
         </div>
-        <div style="font-size:10px; color:#666; margin-top:2px">Leader-Pi paths, saved in the rig. Put Video Dir on the SSD (e.g. /media/vruser/ssd/video).</div>
+        <div style="font-size:10px; color:#666; margin-top:2px">Leader-Pi paths, saved in the rig.</div>
       </div>
     </div>
 
@@ -186,15 +173,14 @@
 
       <div style="font-size:12px; color:#ccc; font-weight:700; margin-bottom:4px">Add a Pi</div>
       <label>Name</label>
-      <input type="text" id="add-pi-name" placeholder="e.g. cheddar">
+      <input type="text" id="add-pi-name" placeholder="e.g. rpi-demo0">
       <label>IP</label>
-      <input type="text" id="add-pi-ip" placeholder="192.168.10.101">
+      <input type="text" id="add-pi-ip" placeholder="192.168.10.103">
       <label>User</label>
-      <input type="text" id="add-pi-user" value="vruser">
+      <input type="text" id="add-pi-user" value="pi">
       <label>Role</label>
       <select id="add-pi-role">
         <option value="leader">Leader</option>
-        <option value="follower">Follower</option>
       </select>
       <div class="btn-row">
         <button class="btn btn-green" onclick="addPi()">Add Pi</button>
@@ -203,7 +189,7 @@
       <div style="border-top:1px solid #333; margin:12px 0 8px"></div>
       <div style="font-size:12px; color:#ccc; font-weight:700; margin-bottom:4px">Update / remove an existing Pi</div>
       <label>Target Pi (name or IP)</label>
-      <input type="text" id="manage-pi-id" placeholder="cheddar or 192.168.10.101" oninput="syncUpdatePiValue()">
+      <input type="text" id="manage-pi-id" placeholder="rpi-demo0 or 192.168.10.103" oninput="syncUpdatePiValue()">
       <label>Field to update</label>
       <select id="update-pi-field" onchange="syncUpdatePiValue()">
         <option value="name">Name</option>
@@ -211,7 +197,7 @@
         <option value="user">User</option>
         <option value="role">Role</option>
       </select>
-      <input type="text" id="update-pi-value" placeholder="e.g. cheddar">
+      <input type="text" id="update-pi-value" placeholder="e.g. rpi-demo0">
       <div class="btn-row">
         <button class="btn btn-blue" onclick="updatePi()">Update Pi</button>
         <button class="btn btn-red" onclick="removePi()">Remove Pi</button>
@@ -256,14 +242,10 @@ let rig = null;
 let deviceSchemas = {};
 let catalogSel = '';        // remembered Device Catalog dropdown selection
 let deviceState = {};
-let warpExists = false;
 let piState = {};       // ip -> {checked: bool}
-let lickPollInterval = null;
 let devicesInitialized = false;
-let geoFiles = [];          // available geometry YAML filenames
-let geoData = null;         // loaded geometry object
-let geoCurrentName = '';    // currently loaded filename
-let derivedAz = { min: null, max: null };  // az range the warp fills (server ray-trace)
+let monPolls = {};      // device name -> monitor poll interval
+let uiBusy = false;
 
 fetch('/api/device_schemas').then(r => r.json()).then(schemas => {
   deviceSchemas = schemas;
@@ -293,51 +275,6 @@ async function proxyPi(ip, endpoint, payload = {}, method = 'POST') {
   }
 }
 
-// Retry a proxied display call across a TRANSIENT follower blip: the display now runs in a separate
-// worker process, so a display crash returns {ok:false, worker_down:true} (pi_api stays up), and the
-// rare pi_api restart shows a connection error. Both are worth a short retry; a real error like
-// "Display not initialized" is NOT retried.
-async function retryProxy(ip, endpoint, payload = {}, {tries = 3, delay = 750} = {}) {
-  let r;
-  for (let i = 0; i < tries; i++) {
-    r = await proxyPi(ip, endpoint, payload);
-    const transient = r && r.ok === false &&
-      (r.worker_down || /refused|timed ?out|unreachable|Proxy error|Failed to establish/i.test(String(r.error || '')));
-    if (!transient) return r;
-    if (i < tries - 1) { log('Display worker restarting, retrying…'); await new Promise(res => setTimeout(res, delay)); }
-  }
-  return r;
-}
-
-function interpolateCalMs(calTable, volumeUl) {
-  if (!calTable || calTable.length === 0) return 0;
-  if (calTable.length === 1) {
-    // Single point: linear through origin
-    const ms = calTable[0][0], ul = calTable[0][1];
-    return ul > 0 ? (volumeUl / ul) * ms : 0;
-  }
-  const sorted = [...calTable].sort((a, b) => a[1] - b[1]);
-  if (volumeUl <= sorted[0][1]) {
-    // Extrapolate below
-    const frac = sorted[1][1] !== sorted[0][1]
-      ? (volumeUl - sorted[0][1]) / (sorted[1][1] - sorted[0][1]) : 0;
-    return sorted[0][0] + frac * (sorted[1][0] - sorted[0][0]);
-  }
-  if (volumeUl >= sorted[sorted.length - 1][1]) {
-    const n = sorted.length;
-    const frac = sorted[n-1][1] !== sorted[n-2][1]
-      ? (volumeUl - sorted[n-2][1]) / (sorted[n-1][1] - sorted[n-2][1]) : 0;
-    return sorted[n-2][0] + frac * (sorted[n-1][0] - sorted[n-2][0]);
-  }
-  for (let i = 0; i < sorted.length - 1; i++) {
-    if (volumeUl >= sorted[i][1] && volumeUl <= sorted[i + 1][1]) {
-      const frac = (volumeUl - sorted[i][1]) / (sorted[i + 1][1] - sorted[i][1]);
-      return sorted[i][0] + frac * (sorted[i + 1][0] - sorted[i][0]);
-    }
-  }
-  return sorted[0][0];
-}
-
 // ── Rig management ──
 
 function allPisOk() {
@@ -348,7 +285,6 @@ function allPisOk() {
   });
 }
 
-let uiBusy = false;
 // Freeze everything a lock should hold: all buttons, the (non-.btn) Quit button, and the raw
 // device-fieldset inputs/selects that _lockUI's .btn sweep would otherwise miss. Re-applied
 // after any re-render during a lock so a mid-operation renderAll() can't silently re-arm the UI.
@@ -376,9 +312,11 @@ async function checkAllPis() {
   log('Checking all Pis...');
   const promises = rig.pis.map(async (pi) => {
     try {
+      // `user` matters: the SSH probe runs as this user, and Install stays disabled
+      // until SSH succeeds — a rig with a non-default user must probe as that user.
       const r = await fetch('/api/check_pi', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ip: pi.ip, api_port: rig.network.api_port})
+        body: JSON.stringify({ip: pi.ip, user: pi.user || 'vruser', api_port: rig.network.api_port})
       });
       const data = await r.json();
       piState[pi.ip] = {checked: true, ok: data.api, ssh: data.ssh, api: data.api};
@@ -413,8 +351,8 @@ async function loadRig() {
     deviceState = {};
     piState = {};
     devicesInitialized = false;
+    _stopAllMonitors();
     renderAll();
-    checkWarp();
     log('Loaded rig: ' + rig.name);
     await checkAllPis();
   } finally {
@@ -435,29 +373,17 @@ async function createRig() {
   devicesInitialized = false;
   document.getElementById('init-btn').disabled = true;
   renderAll();
-  checkWarp();
   log('Created rig: ' + name);
   checkAllPis();
 }
 
 async function saveRig() {
   if (!rig) return;
-  // Save rig hardware config (cheese.yaml) ...
   await fetch('/api/save_rig', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(rig)
   });
-  // ... and any edited geometry to its own file (rig_geometry.yaml), one unified Save.
-  if (geoData && geoCurrentName) {
-    const r = await fetch('/api/save_geometry', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name: geoCurrentName, geometry: geoData})
-    });
-    const d = await r.json();
-    log('Saved rig: ' + rig.name + (d.ok ? ' + ' + geoCurrentName : ''));
-  } else {
-    log('Saved rig: ' + rig.name);
-  }
+  log('Saved rig: ' + rig.name);
 }
 
 // ── Pi management ──
@@ -493,9 +419,9 @@ function syncUpdatePiValue() {
   const field = document.getElementById('update-pi-field').value;
   const idx = _findPiIndex(document.getElementById('manage-pi-id').value);
   valEl.value = idx >= 0 ? (rig.pis[idx][field] ?? '') : '';
-  valEl.placeholder = field === 'role' ? 'leader / follower'
-    : field === 'ip' ? 'e.g. 192.168.10.101'
-    : field === 'user' ? 'e.g. vruser' : 'e.g. cheddar';
+  valEl.placeholder = field === 'role' ? 'leader'
+    : field === 'ip' ? 'e.g. 192.168.10.103'
+    : field === 'user' ? 'e.g. pi' : 'e.g. rpi-demo0';
 }
 
 function removePi() {
@@ -523,7 +449,7 @@ function updatePi() {
   if (!val) { log('Enter a new value for ' + field); return; }
   if (field === 'role') {
     val = val.toLowerCase();
-    if (val !== 'leader' && val !== 'follower') { log('Role must be leader or follower'); return; }
+    if (val !== 'leader') { log('Role must be leader'); return; }
   }
   if ((field === 'name' || field === 'ip')) {
     // guard against colliding with another Pi
@@ -543,9 +469,10 @@ function updatePi() {
 
 async function checkPi(ip) {
   log('Checking ' + ip + '...');
+  const pi = rig.pis.find(p => p.ip === ip) || {};
   const r = await fetch('/api/check_pi', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ip, api_port: rig.network.api_port})
+    body: JSON.stringify({ip, user: pi.user || 'vruser', api_port: rig.network.api_port})
   });
   const data = await r.json();
   const ok = data.api;
@@ -638,16 +565,17 @@ async function deployPi(idx) {
 // Initialize button back from "Reinitialize" to "Initialize".
 function _revertDevicesToUninitialized() {
   devicesInitialized = false;
-  deviceState = {};   // all dots back to gray (pristine, not red/"failed"); clears camera streaming too
+  _stopAllMonitors();
+  deviceState = {};   // all dots back to gray (pristine, not red/"failed"); clears streaming too
   const ib = document.getElementById('init-btn');
   if (ib) { ib.textContent = 'Initialize'; ib.className = 'btn btn-green btn-sm'; }
 }
 
 // Restart pi_api on one Pi (reloads deployed code without a full reboot). Drops that Pi's
-// initialized devices — re-init projector/display after.
+// initialized devices.
 async function restartPiApi(idx) {
   const pi = rig.pis[idx];
-  if (!confirm(`Restart pi_api on ${pi.name}?\nReloads deployed code and drops its initialized devices (re-init projector + display after).`)) return;
+  if (!confirm(`Restart pi_api on ${pi.name}?\nReloads deployed code and drops its initialized devices.`)) return;
   _lockUI();
   log(`Restarting pi_api on ${pi.name}...`);
   try {
@@ -724,6 +652,7 @@ async function reinitDevice(name) {
   _lockUI();
   log('Reinitializing ' + name + '...');
   try {
+    _stopMonitorState(name);
     const r = await fetch('/api/reinit_device', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({device: name})
@@ -732,1199 +661,103 @@ async function reinitDevice(name) {
     (data.steps || []).forEach(s => log('  ' + s));
     deviceState[name] = deviceState[name] || {};
     deviceState[name].initialized = !!data.ok;
-    // Camera reinit releases the camera server-side (the MJPEG stream closes), so clear the
-    // streaming flag and re-render — otherwise the card keeps a dead, frozen preview <img>.
-    if (name === 'camera') {
-      deviceState.camera.streaming = false;
-      renderDeviceList();
-    }
+    deviceState[name].streaming = false;   // a reinit closes any live stream server-side
+    renderDeviceList();
     log(data.ok ? (name + ' reinitialized.') : (name + ' reinit failed: ' + (data.error || '')));
   } catch (e) { log('Reinit error: ' + e); }
   finally { _unlockUI(); }
 }
 
-// ── Device-specific actions ──
+// ── Generic device monitor (any device: /api/monitor_device + /api/device_data) ──
 
-function _camApply() {
-  // Push exposure/gain to the running camera. Only meaningful while streaming; otherwise the
-  // values are just held on rig.devices.camera and applied at the next Live (camera_preview_start).
-  if (uiBusy) return;   // don't hit the Pi during a lock (fieldset is disabled too, belt-and-suspenders)
-  if (!(deviceState.camera && deviceState.camera.streaming)) return;
-  const pi = getPiForDevice('camera');
-  if (!pi) return;
-  const cam = rig.devices.camera || {};
-  proxyPi(pi.ip, '/api/camera_controls', {
-    auto_exposure: cam.auto_exposure ?? true,
-    exposure_ms: cam.exposure_ms ?? 10,
-    gain: cam.gain ?? 1.0,
-  });
+function _stopMonitorState(name) {
+  if (monPolls[name]) { clearInterval(monPolls[name]); delete monPolls[name]; }
+  if (deviceState[name]) deviceState[name].monitoring = false;
 }
 
-function onCamAutoToggle(checked) {
-  rig.devices.camera = rig.devices.camera || {};
-  rig.devices.camera.auto_exposure = checked;
-  const exp = document.getElementById('cam-exp');
-  const g = document.getElementById('cam-gain');
-  if (exp) exp.disabled = checked;
-  if (g) g.disabled = checked;
-  _camApply();
+function _stopAllMonitors() {
+  Object.keys(monPolls).forEach(_stopMonitorState);
 }
 
-function onCamExpChange() {
-  rig.devices.camera = rig.devices.camera || {};
-  const exp = document.getElementById('cam-exp');
-  const g = document.getElementById('cam-gain');
-  // Exposure (ms) can't exceed the frame period (1000/fps) or libcamera silently clamps it; bound
-  // the model to the honorable range so it matches what the sensor runs and what's saved.
-  const maxMs = 1000 / (rig.devices.camera.fps || 50);
-  if (exp) {
-    const raw = parseFloat(exp.value);   // a typed 0 must clamp to the 0.1 floor, not reset to 10
-    const v = Math.min(Math.max(isNaN(raw) ? 10 : raw, 0.1), maxMs);
-    exp.value = v;
-    rig.devices.camera.exposure_ms = v;
+async function startDeviceMonitor(name) {
+  const pi = getPiForDevice(name);
+  if (!pi) { log(name + ' not assigned to a Pi'); return; }
+  const result = await proxyPi(pi.ip, '/api/monitor_device', {name});
+  if (!result.ok) { log('Monitor failed: ' + (result.error || '')); return; }
+  const ds = deviceState[name] = deviceState[name] || {};
+  ds.monitoring = true;
+  ds.monCount = 0;
+  ds.monLast = null;
+  renderDeviceList();
+  monPolls[name] = setInterval(() => pollDeviceData(name, pi.ip), 300);
+  log(name + ' monitoring started.');
+}
+
+async function stopDeviceMonitor(name) {
+  const pi = getPiForDevice(name);
+  if (pi) await proxyPi(pi.ip, '/api/stop_monitor_device', {name});
+  _stopMonitorState(name);
+  renderDeviceList();
+  log(name + ' monitoring stopped.');
+}
+
+async function pollDeviceData(name, ip) {
+  const ds = deviceState[name];
+  if (!ds || !ds.monitoring) return;
+  const r = await proxyPi(ip, '/api/device_data?name=' + encodeURIComponent(name), {}, 'GET');
+  const events = (r && r.events) || [];
+  if (events.length) {
+    ds.monCount = (ds.monCount || 0) + events.length;
+    ds.monLast = events[events.length - 1];
   }
-  if (g) {
-    const v = Math.min(Math.max(parseFloat(g.value) || 1.0, 1), 16);
-    g.value = v;
-    rig.devices.camera.gain = v;
-  }
-  _camApply();
+  const cntEl = document.getElementById('mon-count-' + name);
+  const boxEl = document.getElementById('mon-box-' + name);
+  if (cntEl) cntEl.textContent = String(ds.monCount || 0);
+  if (boxEl && ds.monLast) boxEl.textContent = JSON.stringify(ds.monLast, null, 1);
 }
 
-function onCamFpsChange() {
-  rig.devices.camera = rig.devices.camera || {};
-  const el = document.getElementById('cam-fps');
-  // Clamp to [10, sensor ceiling] so you can't over-request (which would silently under-deliver
-  // the bitrate and mis-tag the stream). The max also depends on mode + bit depth.
-  const max = camMaxFps(rig.devices.camera);
-  let v = parseInt(el && el.value) || 50;
-  rig.devices.camera.fps = Math.min(Math.max(v, 10), max);
-  renderDeviceList();   // re-render so the Exp-ms max (1000/fps) and predictions re-sync
+// ── Video devices (rig config `video: true`): preview via the camera endpoints ──
+
+let _videoImgRetries = {};
+function videoImgError(name, img) {
+  clearTimeout(_videoImgRetries[name]);
+  _videoImgRetries[name] = setTimeout(() => {
+    img.src = '/api/camera_feed?device=' + encodeURIComponent(name) + '&ts=' + Date.now();
+  }, 1500);
 }
 
-async function startCameraStream() {
-  const pi = getPiForDevice('camera');
-  if (!pi) { log('Camera not assigned to a Pi'); return; }
-  const cam = rig.devices.camera || {};
-  log('Starting camera stream...');
+async function startVideoStream(name) {
+  const pi = getPiForDevice(name);
+  if (!pi) { log(name + ' not assigned to a Pi'); return; }
+  const cfg = rig.devices[name] || {};
+  log('Starting ' + name + ' stream...');
   const result = await proxyPi(pi.ip, '/api/camera_preview_start', {
-    resolution: cam.resolution || [1280, 720], fps: cam.fps || 50,
-    sensor_mode: cam.sensor_mode,   // so the Live preview shows the SAME field of view as the recording
-    bit_depth: cam.bit_depth,
-    auto_exposure: cam.auto_exposure ?? true,
-    exposure_ms: cam.exposure_ms ?? 10,
-    gain: cam.gain ?? 1.0,
-  });
+    device: name, type: cfg.type || name, config: cfg,
+  }, 'POST');
   if (result.ok) {
-    deviceState.camera = deviceState.camera || {};
-    deviceState.camera.streaming = true;
+    const ds = deviceState[name] = deviceState[name] || {};
+    ds.streaming = true;
     renderDeviceList();
-    log('Camera stream started.');
-  } else { log('Camera stream failed: ' + (result.error || '')); }
+    log(name + ' stream started.');
+  } else { log(name + ' stream failed: ' + (result.error || '')); }
 }
 
-async function stopCameraStream() {
-  const pi = getPiForDevice('camera');
-  if (!pi) return;
-  await proxyPi(pi.ip, '/api/camera_preview_stop');
-  deviceState.camera = deviceState.camera || {};
-  deviceState.camera.streaming = false;
+async function stopVideoStream(name) {
+  const pi = getPiForDevice(name);
+  if (pi) await proxyPi(pi.ip, '/api/camera_preview_stop', {device: name});
+  clearTimeout(_videoImgRetries[name]);
+  const ds = deviceState[name] = deviceState[name] || {};
+  ds.streaming = false;
   renderDeviceList();
-  log('Camera stream stopped.');
+  log(name + ' stream stopped.');
 }
 
-// Self-heal the preview on a hard <img> error (proxy/Pi down, non-200): re-point at a fresh,
-// cache-busted feed after a short delay. The reconnecting proxy (shared/mjpeg_relay.py) rides through
-// transient gaps without erroring; this covers the hard failures the setup UI otherwise couldn't recover.
-let _cameraImgRetry = null;
-function cameraImgError(img) {
-  clearTimeout(_cameraImgRetry);
-  _cameraImgRetry = setTimeout(() => { img.src = '/api/camera_feed?ts=' + Date.now(); }, 1500);
-}
-
-async function testCheckers() {
-  const pi = getPiForDevice('display');
-  if (!pi) { log('Display not assigned to a Pi'); return; }
-  const applyWarp = rig.devices.display.apply_warp || false;
-  const result = await retryProxy(pi.ip, '/api/test_checkers', {apply_warp: applyWarp});
-  log(result.ok ? 'Checkerboard shown.' : 'Failed: ' + (result.error || ''));
-}
-
-async function blankDisplay() {
-  const pi = getPiForDevice('display');
-  if (!pi) { log('Display not assigned to a Pi'); return; }
-  const grayInput = document.getElementById('blank-gray-value');
-  // Blank gray is a plain 0..1 value (0 = darkest, 1 = brightest); clamp to the range.
-  const gray = Math.max(0, Math.min(1, grayInput ? parseFloat(grayInput.value) : 0.0));
-  const result = await retryProxy(pi.ip, '/api/blank_display', {gray_value: gray});
-  log(result.ok ? `Display blanked (gray=${gray}).` : 'Failed: ' + (result.error || ''));
-}
-
-// Draw a single test patch (square/circle) at an az/alt with a given contrast on the Bg value.
-// Contrast is interpreted in the rig's active metric (Pi converts metric -> render fraction),
-// so the number here means the same thing as in the experiment card. Bg is the Blank field.
-async function testStimulus() {
-  const pi = getPiForDevice('display');
-  if (!pi) { log('Display not assigned to a Pi'); return; }
-  const shape = document.getElementById('test-stim-shape').value;
-  const az = parseFloat(document.getElementById('test-stim-az').value) || 0;
-  const alt = parseFloat(document.getElementById('test-stim-alt').value) || 0;
-  const size = parseFloat(document.getElementById('test-stim-size').value) || 8;
-  const contrast = Math.max(0, Math.min(1, parseFloat(document.getElementById('test-stim-contrast').value) || 0));
-  const bgInput = document.getElementById('blank-gray-value');
-  const bg = Math.max(0, Math.min(1, bgInput ? parseFloat(bgInput.value) : 0.0));
-  const metric = (rig.devices.display && rig.devices.display.contrast_metric) || 'weber';
-  log(`Drawing ${shape} @ az ${az}° alt ${alt}° (size ${size}°, contrast ${contrast}, bg ${bg})...`);
-  const result = await retryProxy(pi.ip, '/api/test_stimulus', {
-    shape, az_deg: az, alt_deg: alt, size_deg: size,
-    contrast, bg_gray: bg, contrast_metric: metric,
-  });
-  log(result.ok ? 'Stimulus drawn.' : 'Stimulus test failed: ' + (result.error || ''));
-}
-
-// Clamp the Stimulus-test contrast to the display ceiling at the current Bg, in the active metric
-// (fraction_to_metric at full headroom f=1), so it can't silently clip to white. Client-side only —
-// mirrors the experiment-UI Correct button's ceiling. Weber:(1-bg)/bg, Michelson:(1-bg)/(1+bg), Normalized:1.
-function correctTestContrast() {
-  const cEl = document.getElementById('test-stim-contrast');
-  if (!cEl) return;
-  const bgEl = document.getElementById('blank-gray-value');
-  const bg = Math.max(0, Math.min(1, parseFloat(bgEl ? bgEl.value : 0) || 0));
-  const metric = (rig.devices.display && rig.devices.display.contrast_metric) || 'weber';
-  const entered = Math.max(0, parseFloat(cEl.value) || 0);
-  let ceil;
-  if (metric === 'weber')          ceil = bg > 0 ? (1 - bg) / bg : Infinity;
-  else if (metric === 'michelson') ceil = (1 - bg) / (1 + bg);
-  else                             ceil = 1;   // normalized
-  const corrected = Math.max(0, Math.min(entered, ceil));
-  cEl.value = (+corrected).toFixed(3);
-  log(`Contrast corrected: ${entered.toFixed(3)} → ${corrected.toFixed(3)} `
-    + `(max ${isFinite(ceil) ? ceil.toFixed(3) : '∞'} @ bg ${bg}, ${metric})`);
-}
-
-async function checkWarp() {
-  try {
-    const r = await fetch('/api/check_warp');
-    const data = await r.json();
-    warpExists = data.exists;
-  } catch (e) { warpExists = false; }
-  await loadGeoList();
-  // Load the geometry file this rig points to (cheese.yaml -> display.geometry_file).
-  const want = (rig && rig.devices && rig.devices.display
-                && rig.devices.display.geometry_file) || 'rig_geometry.yaml';
-  const name = geoFiles.includes(want) ? want : (geoFiles[0] || 'rig_geometry.yaml');
-  if (geoFiles.length) await loadGeometry(name);
-  else renderDeviceList();
-}
-
-// Dropdown: pick which geometry file this rig uses; persisted on Save Rig.
-function selectGeometry(name) {
-  if (rig && rig.devices && rig.devices.display) {
-    rig.devices.display.geometry_file = name;
-  }
-  loadGeometry(name);
-}
-
-async function generateWarp() {
-  _lockUI();   // long outward op — ray-traces + deploys warp_map.npz to the Leader; gate Quit + Pi ops
-  try {
-    // Save current geometry first if modified
-    if (geoData && geoCurrentName) await saveGeometry();
-    log('Generating warp map...');
-    const btn = document.querySelector('.warp-btn');
-    if (btn) btn.textContent = 'Generating...';   // already disabled by _lockUI
-    const r = await fetch('/api/generate_warp', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({geometry: geoCurrentName || undefined})
-    });
-    const data = await r.json();
-    (data.steps || []).forEach(s => log('  ' + s));
-    if (data.ok) {
-      warpExists = true;
-      log('Warp map generated and deployed.');
-    } else {
-      log('Warp generation failed: ' + (data.error || ''));
-    }
-  } catch (e) { log('Warp generation error: ' + e); }
-  finally { _unlockUI(); }   // _unlockUI re-renders the device list
-}
-
-// ── Geometry params ──
-
-async function loadGeoList() {
-  try {
-    const r = await fetch('/api/list_geometries');
-    geoFiles = await r.json();
-  } catch (e) { geoFiles = []; }
-}
-
-async function loadGeometry(name) {
-  name = name || 'rig_geometry.yaml';
-  try {
-    const r = await fetch('/api/load_geometry', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name})
-    });
-    const data = await r.json();
-    if (data.error) { log('Geometry load failed: ' + data.error); return; }
-    geoData = data.geometry;
-    geoCurrentName = data.name;
-    renderDeviceList();
-    refreshDerivedAz();
-  } catch (e) { log('Geometry load error: ' + e); }
-}
-
-// Azimuth range the warp fills is not analytic (it's where the frame edges land on the
-// parabola, incl. the wrap past ±90°), so compute it server-side (debounced) and drop it
-// into the disabled Az min/max fields.
-let _derivedAzTimer = null;
-function refreshDerivedAz() {
-  clearTimeout(_derivedAzTimer);
-  _derivedAzTimer = setTimeout(async () => {
-    if (!geoData) return;
-    try {
-      const r = await fetch('/api/derived_geometry', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({geometry_data: geoData})
-      });
-      const d = await r.json();
-      if (d.ok) {
-        derivedAz = {min: d.az_min_deg, max: d.az_max_deg};
-        const a = document.getElementById('az-min-derived');
-        const b = document.getElementById('az-max-derived');
-        if (a) a.value = derivedAz.min ?? '';
-        if (b) b.value = derivedAz.max ?? '';
-      }
-    } catch (e) { /* keep last value */ }
-  }, 400);
-}
-
-async function saveGeometry(name) {
-  if (!geoData) return;
-  name = name || geoCurrentName || 'rig_geometry.yaml';
-  try {
-    const r = await fetch('/api/save_geometry', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name, geometry: geoData})
-    });
-    const data = await r.json();
-    if (data.ok) {
-      geoCurrentName = data.name;
-      log('Saved geometry: ' + data.name);
-      await loadGeoList();
-      renderDeviceList();
-    } else { log('Save failed: ' + (data.error || '')); }
-  } catch (e) { log('Save error: ' + e); }
-}
-
-// Reload the geometry file list (picks up calibrations just saved from the projector).
-async function refreshGeoList() {
-  await loadGeoList();
-  renderDeviceList();
-  log('Geometry list reloaded (' + geoFiles.length + ' files).');
-}
-
-// Send the geometry selected in the dropdown to the projector Pi as its rig_geometry.yaml.
-async function sendGeometry() {
-  const sel = document.getElementById('warp-geometry-select');
-  const name = (sel && sel.value) || geoCurrentName;
-  if (!name) { log('No geometry selected'); return; }
-  log('Sending ' + name + ' to projector...');
-  try {
-    const r = await fetch('/api/send_geometry', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name})
-    });
-    const data = await r.json();
-    log(data.ok ? ('Sent ' + data.sent + ' → ' + data.to + ' (as rig_geometry.yaml).')
-                : ('Send failed: ' + (data.error || '')));
-  } catch (e) { log('Send error: ' + e); }
-}
-
-function updateGeoField(section, key, value) {
-  if (!geoData) return;
-  if (!geoData[section]) geoData[section] = {};
-  geoData[section][key] = value;
-  // re-derive the altitudes when their inputs (azimuth_height, parabola_A, height_cm) change
-  if (section === 'screen' && (key === 'parabola_A' || key === 'height_cm' ||
-                               key === 'azimuth_height')) {
-    deriveAltitudes();
-    renderDeviceList();
-  }
-  refreshDerivedAz();   // any screen/projector param can shift the filled azimuth range
-}
-
-// azimuth_height (eye/az-line above screen bottom) DRIVES the visual field:
-//   altitude_min = atan(-h / A),  altitude_max = atan((height - h) / A)
-function deriveAltitudes() {
-  const s = geoData && geoData.screen;
-  if (!s || !s.parabola_A || s.azimuth_height == null) return;
-  const A = s.parabola_A, h = s.azimuth_height, hc = s.height_cm ?? 20;
-  s.altitude_min_deg = +(Math.atan2(-h, A) * 180 / Math.PI).toFixed(2);
-  s.altitude_max_deg = +(Math.atan2(hc - h, A) * 180 / Math.PI).toFixed(2);
-}
-function updateAzimuthHeight(h) {
-  if (!geoData || !geoData.screen || isNaN(h)) return;
-  geoData.screen.azimuth_height = h;
-  deriveAltitudes();
-  renderDeviceList();
-  refreshDerivedAz();
-}
-
-// ── Intensity (luminance) calibration ──
-// The "Intensity" dropdown chooses what the Intensity Cal button does:
-//   auto/manual  = measure per-azimuth luminance with the PM100D (auto- vs manual-advance),
-//   theoretical  = apply the corrected theoretical model, none = no correction.
-// auto/manual both produce the stored mode 'empirical'; theoretical/none store themselves.
-// The stored mode lives in rig.devices.display.luminance_correction (persisted by Save Rig).
-let lumMethod = 'auto';   // UI-only: which measurement advance style auto/manual maps to
-let lumMeasure = null;    // active measurement session, or null
-
-function lumStoredMode() {
-  return (rig && rig.devices && rig.devices.display &&
-          rig.devices.display.luminance_correction) || 'theoretical';
-}
-function lumSelectValue() {
-  const m = lumStoredMode();
-  return m === 'empirical' ? lumMethod : m;   // auto/manual | theoretical | none
-}
-function lumStatusText() {
-  const m = lumStoredMode();
-  if (m === 'none') return 'active: none';
-  if (m === 'theoretical') return 'active: theoretical';
-  return 'active: empirical';
-}
-function onLumModeChange(val) {
-  if (uiBusy || !rig.devices.display) return;
-  if (val === 'auto' || val === 'manual') {
-    lumMethod = val;
-    rig.devices.display.luminance_correction = 'empirical';
-  } else {
-    rig.devices.display.luminance_correction = val;   // theoretical | none
-    closeLumPanel();
-  }
-  const s = document.getElementById('lum-status');
-  if (s) s.textContent = lumStatusText();
-}
-
-// Button: auto/manual open the measurement panel; theoretical/none apply + redeploy directly.
-async function applyIntensity() {
-  if (uiBusy) return;
-  const pi = getPiForDevice('display');
-  if (!pi) { log('Display not assigned to a Pi'); return; }
-  const sel = lumSelectValue();
-  if (sel === 'auto' || sel === 'manual') { openLumPanel(sel); return; }
-  if (sel === 'none' &&
-      !confirm('Disable luminance correction (none) and redeploy the warp?')) return;
-  _lockUI();
-  try {
-    log('Applying luminance correction: ' + sel + '...');
-    const geo = document.getElementById('warp-geometry-select');
-    const r = await fetch('/api/lum_apply', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({mode: sel, geometry: geo ? geo.value : undefined})
-    }).then(x => x.json());
-    (r.steps || []).forEach(s => log('  ' + s));
-    log(r.ok ? ('Applied ' + sel + ' correction.')
-             : ('Intensity apply failed: ' + (r.error || '')));
-  } catch (e) { log('Intensity apply error: ' + e); }
-  finally { _unlockUI(); }
-}
-
-const LUM_AZIMUTHS = [0, 20, 40, 60, 80, 100];
-function openLumPanel(method) {
-  const p = document.getElementById('lum-panel');
-  if (!p) return;
-  lumMeasure = {method, azs: LUM_AZIMUTHS.slice(), idx: 0, size: 15, alt: 0, readings: {}};
-  renderLumPanel();
-  showLumPatch();   // light the first patch so the operator sees where to aim
-}
-function closeLumPanel() {
-  lumMeasure = null;
-  const p = document.getElementById('lum-panel');
-  if (p) { p.style.display = 'none'; p.innerHTML = ''; }
-}
-function renderLumPanel() {
-  const p = document.getElementById('lum-panel');
-  if (!p || !lumMeasure) return;
-  const m = lumMeasure;
-  const rows = m.azs.map((az, i) => {
-    const val = (az in m.readings) ? m.readings[az] : '';
-    const hl = (i === m.idx) ? ' style="background:#2d2d2d"' : '';
-    const showBtn = (m.method === 'manual')
-      ? `<button class="btn btn-blue btn-sm" onclick="lumShow(${i})">Show</button>` : '';
-    const mark = (i === m.idx) ? '◀' : ((az in m.readings) ? '✓' : '');
-    return `<tr${hl}>
-      <td style="padding:2px 8px">${az}°</td>
-      <td>${showBtn}</td>
-      <td><button class="btn btn-gray btn-sm" onclick="lumRead(${i})">Read</button></td>
-      <td><input type="number" step="any" style="width:96px" value="${val}"
-                 oninput="lumSetReading(${i}, this.value)"></td>
-      <td style="color:#6f6; width:14px">${mark}</td></tr>`;
-  }).join('');
-  p.style.display = 'block';
-  p.innerHTML = `
-    <div style="font-size:11px; color:#bbb; margin-bottom:4px">
-      Measuring (${m.method}) — aim the PM100D at each white patch, Read (or type), then Fit &amp; Apply.
-      Patch size <input type="number" value="${m.size}" min="1" step="1" style="width:52px"
-        onchange="lumMeasure.size=parseFloat(this.value)||15; showLumPatch()">°
-    </div>
-    <table style="font-size:12px; border-collapse:collapse">${rows}</table>
-    <div style="margin-top:6px; display:flex; align-items:center; gap:8px">
-      <button class="btn btn-green btn-sm" onclick="lumFitApply()">Fit &amp; Apply</button>
-      <button class="btn btn-gray btn-sm" onclick="closeLumPanel()">Cancel</button>
-      <span style="font-size:10px; color:#888">${Object.keys(m.readings).length}/${m.azs.length} measured</span>
-    </div>`;
-}
-async function showLumPatch() {
-  if (!lumMeasure) return;
-  const pi = getPiForDevice('display');
-  if (!pi) { log('Display not assigned to a Pi'); return; }
-  const az = lumMeasure.azs[lumMeasure.idx];
-  // White square (contrast 1 on a black bg, normalized) = max drive. apply_lum:false renders RAW
-  // drive (no luminance correction) so the meter reads the true delivered luminance the fit needs.
-  await retryProxy(pi.ip, '/api/test_stimulus', {
-    shape: 'square', az_deg: az, alt_deg: lumMeasure.alt, size_deg: lumMeasure.size,
-    contrast: 1, bg_gray: 0, contrast_metric: 'normalized', apply_lum: false,
-  });
-}
-async function lumShow(i) {
-  if (!lumMeasure) return;
-  lumMeasure.idx = i;
-  renderLumPanel();
-  await showLumPatch();
-}
-function lumSetReading(i, val) {
-  if (!lumMeasure) return;
-  const az = lumMeasure.azs[i];
-  if (val === '' || val == null) delete lumMeasure.readings[az];
-  else lumMeasure.readings[az] = parseFloat(val);
-}
-async function lumRead(i) {
-  if (!lumMeasure) return;
-  lumMeasure.idx = i;
-  const r = await fetch('/api/lum_read', {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
-  }).then(x => x.json()).catch(e => ({ok: false, error: String(e)}));
-  if (!r.ok) { log('Meter read failed (' + (r.error || '') + ') — type the value manually'); return; }
-  lumSetReading(i, r.value);
-  log('az ' + lumMeasure.azs[i] + '°: ' + (+r.value).toPrecision(4));
-  if (lumMeasure.method === 'auto') await lumAdvance();
-  else renderLumPanel();
-}
-async function lumAdvance() {
-  if (!lumMeasure) return;
-  const m = lumMeasure;
-  let next = -1;
-  for (let k = 1; k <= m.azs.length; k++) {
-    const j = (m.idx + k) % m.azs.length;
-    if (!(m.azs[j] in m.readings)) { next = j; break; }
-  }
-  if (next === -1) { log('All azimuths measured — click Fit & Apply.'); renderLumPanel(); return; }
-  m.idx = next;
-  renderLumPanel();
-  await showLumPatch();
-}
-async function lumFitApply() {
-  if (!lumMeasure) return;
-  const measurements = Object.keys(lumMeasure.readings).map(az => ({
-    az_deg: parseFloat(az), alt_deg: lumMeasure.alt, reading: lumMeasure.readings[az],
-  }));
-  if (measurements.length < 2) { log('Need at least 2 readings to fit.'); return; }
-  _lockUI();
-  try {
-    log('Fitting ' + measurements.length + ' readings and deploying...');
-    const geo = document.getElementById('warp-geometry-select');
-    const r = await fetch('/api/lum_apply', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({mode: 'empirical', measurements, geometry: geo ? geo.value : undefined})
-    }).then(x => x.json());
-    (r.steps || []).forEach(s => log('  ' + s));
-    if (r.ok) {
-      if (rig.devices.display) rig.devices.display.luminance_correction = 'empirical';
-      warpExists = true;
-      log('Empirical luminance correction applied.');
-      closeLumPanel();
-    } else {
-      log('Fit & apply failed: ' + (r.error || ''));
-    }
-  } catch (e) { log('Fit & apply error: ' + e); }
-  finally { _unlockUI(); }
-}
-
-// The Calibrate control is a single toggle: green "Calibrate" starts, red "Stop Calib"
-// stops. Both start and stop re-initialize the projector (handled server-side).
-let calibrating = false;
-
-async function toggleCalibration() {
-  if (calibrating) await stopCalibration();
-  else await startCalibration();
-}
-
-async function startCalibration() {
-  const pi = getPiForDevice('display');
-  if (!pi) { log('Display not assigned to a Pi'); return; }
-  // Open the window synchronously within the click so it isn't popup-blocked;
-  // point it at the sliders once the backend confirms the tool is up.
-  const win = window.open('', 'geo-calibration', 'width=800,height=940');
-  if (win) win.document.write('<body style="font:15px sans-serif;background:#1b1b1b;'
-    + 'color:#eee;padding:22px">Re-initializing projector + starting calibration on ' + pi.ip + ' …</body>');
-  log('Re-initializing projector + starting calibration on ' + pi.ip + '...');
-  _lockUI();   // projector re-init is a long op — gate Quit + concurrent projector/Pi ops
-  const btn = document.querySelector('.calib-btn');
-  if (btn) btn.textContent = 'Starting…';
-  try {
-    const r = await fetch('/api/start_calibration', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({geometry: geoCurrentName || undefined, geometry_data: geoData || undefined})
-    });
-    const data = await r.json();
-    (data.steps || []).forEach(s => log('  ' + s));
-    if (data.ok && data.url) {
-      log('Calibration running — sliders at ' + data.url);
-      calibrating = true;
-      if (rig.devices.calibration_probe) { (deviceState.calibration_probe = deviceState.calibration_probe || {}).on = true; renderDeviceList(); }
-      if (win) win.location = data.url; else window.open(data.url, 'geo-calibration');
-    } else {
-      log('Calibration start failed: ' + (data.error || ''));
-      if (win) win.close();
-    }
-  } catch (e) {
-    log('Calibration error: ' + e);
-    if (win) win.close();
-  }
-  finally { _unlockUI(); }   // _unlockUI rebuilds the toggle in its new (green/red) state
-}
-
-async function stopCalibration() {
-  const pi = getPiForDevice('display');
-  if (!pi) { log('Display not assigned to a Pi'); return; }
-  log('Stopping calibration + re-initializing projector on ' + pi.ip + '...');
-  _lockUI();   // projector re-init is a long op — gate Quit + concurrent projector/Pi ops
-  const btn = document.querySelector('.calib-btn');
-  if (btn) btn.textContent = 'Stopping…';
-  let stopped = false;
-  try {
-    const r = await fetch('/api/stop_calibration', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
-    });
-    const data = await r.json();
-    (data.steps || []).forEach(s => log('  ' + s));
-    log(data.ok ? 'Calibration stopped.' : 'Stop failed: ' + (data.error || ''));
-    stopped = !!data.ok;
-  } catch (e) { log('Stop error: ' + e); }
-  if (stopped) calibrating = false;   // keep the red 'Stop' if it failed, so it can be retried
-  if (stopped && rig.devices.calibration_probe) { (deviceState.calibration_probe = deviceState.calibration_probe || {}).on = false; renderDeviceList(); }
-  _unlockUI();
-}
-
-async function toggleProbe() {
-  const pi = getPiForDevice('calibration_probe');
-  if (!pi) { log('Calibration probe not assigned to a Pi'); return; }
-  const ds = deviceState.calibration_probe = deviceState.calibration_probe || {};
-  const turningOn = ds.on !== true;
-  const result = await proxyPi(pi.ip, turningOn ? '/api/probe_on' : '/api/probe_off');
-  if (result.ok) {
-    ds.on = turningOn;
-    renderDeviceList();
-    log('Calibration probe ' + (turningOn ? 'ON (TTL HIGH)' : 'OFF (TTL LOW)'));
-  } else {
-    log('Probe toggle failed: ' + (result.error || ''));
-  }
-}
-
-async function startLickMonitor() {
-  const pi = getPiForDevice('lick_sensor');
-  if (!pi) { log('Lick sensor not assigned to a Pi'); return; }
-  const result = await proxyPi(pi.ip, '/api/monitor_lick');
-  if (result.ok) {
-    deviceState.lick_sensor = deviceState.lick_sensor || {};
-    deviceState.lick_sensor.monitoring = true;
-    piClockOffset = null; // reset offset for fresh calibration
-    renderDeviceList();
-    lickPollInterval = setInterval(() => pollLickData(pi.ip), 200);
-    startLickAnimation();
-    log('Lick monitoring started.');
-  } else { log('Failed: ' + (result.error || '')); }
-}
-
-async function stopLickMonitor() {
-  const pi = getPiForDevice('lick_sensor');
-  if (pi) await proxyPi(pi.ip, '/api/stop_monitor_lick');
-  deviceState.lick_sensor = deviceState.lick_sensor || {};
-  deviceState.lick_sensor.monitoring = false;
-  if (lickPollInterval) { clearInterval(lickPollInterval); lickPollInterval = null; }
-  stopLickAnimation();
-  renderDeviceList();
-  log('Lick monitoring stopped.');
-}
-
-let lickEvents = [];
-let piClockOffset = null; // Mac_time - Pi_time (seconds)
-let lickAnimFrame = null;
-
-let photodiodeEvents = [];
-let photodiodeClockOffset = null;
-let photodidePollInterval = null;
-let photodiodeAnimFrame = null;
-let photodiodeRaw = [];         // rolling raw transitions {t, level} (~last 2s) for the scope
-let photodiodeTrigger = null;   // latest raw rising-edge time = scope trigger
-let photodiodeVData = null;     // latest {available, v, p1, p99, v_high, v_low} from the Teensy V stream
-let photodiodeEdgeCount = 0;    // total raw rising edges since monitor start
-let _pdPolling = false;         // in-flight guard so overlapping polls can't race the raw buffer
-
-let rewardEvents = [];
-let rewardClockOffset = null;
-let rewardPollInterval = null;
-let rewardAnimFrame = null;
-
-let encoderEvents = [];
-let encoderPollInterval = null;
-let encoderAnimFrame = null;
-
-async function startEncoderMonitor() {
-  const pi = getPiForDevice('encoder');
-  if (!pi) { log('Encoder not assigned to a Pi'); return; }
-  const result = await proxyPi(pi.ip, '/api/monitor_encoder');
-  if (result.ok) {
-    deviceState.encoder = deviceState.encoder || {};
-    deviceState.encoder.monitoring = true;
-    encoderEvents = [];
-    renderDeviceList();
-    encoderPollInterval = setInterval(() => pollEncoderData(pi.ip), 200);
-    startEncoderAnimation();
-    log('Encoder monitoring started (spin the wheel).');
-  } else { log('Failed: ' + (result.error || '')); }
-}
-
-async function stopEncoderMonitor() {
-  const pi = getPiForDevice('encoder');
-  if (pi) await proxyPi(pi.ip, '/api/stop_monitor_encoder');
-  deviceState.encoder = deviceState.encoder || {};
-  deviceState.encoder.monitoring = false;
-  if (encoderPollInterval) { clearInterval(encoderPollInterval); encoderPollInterval = null; }
-  stopEncoderAnimation();
-  renderDeviceList();
-  log('Encoder monitoring stopped.');
-}
-
-async function pollEncoderData(ip) {
-  const result = await proxyPi(ip, '/api/encoder_data', {}, 'GET');
-  encoderEvents = (result && result.events) || [];
-  if (encoderEvents.length) {
-    const last = encoderEvents[encoderEvents.length - 1];
-    const s = document.getElementById('enc-speed'); if (s) s.textContent = (last.speed_cms || 0).toFixed(1);
-    const d = document.getElementById('enc-dist'); if (d) d.textContent = (last.distance_cm || 0).toFixed(1);
-  }
-}
-
-function startEncoderAnimation() {
-  function frame() { drawEncoderSpeed(); encoderAnimFrame = requestAnimationFrame(frame); }
-  encoderAnimFrame = requestAnimationFrame(frame);
-}
-function stopEncoderAnimation() {
-  if (encoderAnimFrame) { cancelAnimationFrame(encoderAnimFrame); encoderAnimFrame = null; }
-}
-
-function drawEncoderSpeed() {
-  const canvas = document.getElementById('encoder-canvas');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const w = canvas.width, h = canvas.height;
-  ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
-  const plotH = h - 12, windowS = 15;
-  if (!encoderEvents.length) { ctx.fillStyle = '#556'; ctx.font = '11px monospace'; ctx.fillText('waiting for wheel motion…', 8, h / 2); return; }
-  const now = encoderEvents[encoderEvents.length - 1].t;
-  const win = encoderEvents.filter(e => now - e.t <= windowS);
-  let maxV = 1; for (const e of win) { const v = Math.abs(e.speed_cms || 0); if (v > maxV) maxV = v; }
-  ctx.fillStyle = '#444'; ctx.font = '9px monospace';
-  for (let s = 0; s <= windowS; s += 5) { const x = ((windowS - s) / windowS) * w; ctx.fillText('-' + s + 's', x + 1, h - 2); }
-  ctx.fillStyle = '#666'; ctx.fillText(maxV.toFixed(0) + ' cm/s', 2, 9);
-  ctx.strokeStyle = '#26c6da'; ctx.lineWidth = 1.5; ctx.beginPath();
-  let started = false;
-  for (const e of win) {
-    const x = ((windowS - (now - e.t)) / windowS) * w;
-    const y = plotH - (Math.abs(e.speed_cms || 0) / maxV) * (plotH - 4);
-    if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
-  }
-  ctx.stroke();
-}
-
-async function pollLickData(ip) {
-  const result = await proxyPi(ip, '/api/lick_data', {}, 'GET');
-  lickEvents = result.events || [];
-  // Compute clock offset from first event we receive
-  if (piClockOffset === null && lickEvents.length > 0) {
-    piClockOffset = Date.now() / 1000 - lickEvents[lickEvents.length - 1].t;
-  }
-  const lastEl = document.getElementById('last-lick-time');
-  if (lastEl && lickEvents.length > 0) {
-    const lastT = lickEvents[lickEvents.length - 1].t;
-    const d = new Date(lastT * 1000);
-    lastEl.textContent = d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
-  }
-}
-
-function startLickAnimation() {
-  function frame() {
-    drawLickRaster();
-    lickAnimFrame = requestAnimationFrame(frame);
-  }
-  lickAnimFrame = requestAnimationFrame(frame);
-}
-
-function stopLickAnimation() {
-  if (lickAnimFrame) { cancelAnimationFrame(lickAnimFrame); lickAnimFrame = null; }
-}
-
-function drawLickRaster() {
-  const canvas = document.getElementById('lick-canvas');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const w = canvas.width, h = canvas.height;
-  ctx.fillStyle = '#0a0a1a';
-  ctx.fillRect(0, 0, w, h);
-
-  // "now" in Pi clock = Mac clock - offset
-  const windowS = 30;
-  const now = piClockOffset !== null ? (Date.now() / 1000 - piClockOffset) : (lickEvents.length > 0 ? lickEvents[lickEvents.length - 1].t : 0);
-
-  // Time axis labels
-  ctx.fillStyle = '#444';
-  ctx.font = '9px monospace';
-  for (let s = 0; s <= 30; s += 5) {
-    const x = ((windowS - s) / windowS) * w;
-    ctx.fillText('-' + s + 's', x, h - 2);
-  }
-
-  ctx.strokeStyle = '#4caf50';
-  ctx.lineWidth = 1.5;
-  for (const evt of lickEvents) {
-    const age = now - evt.t;
-    if (age > windowS || age < 0) continue;
-    const x = ((windowS - age) / windowS) * w;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, h - 12);
-    ctx.stroke();
-  }
-}
-
-async function deliverReward() {
-  const pi = getPiForDevice('reward');
-  if (!pi) { log('Reward not assigned to a Pi'); return; }
-  const amountEl = document.getElementById('reward-deliver-ul');
-  const amount = amountEl ? parseFloat(amountEl.value) : 4.0;
-  const cal = (rig.devices.reward || {}).calibration || {};
-  const table = cal.main || [];
-  const ms = interpolateCalMs(table, amount);
-  const gpio = ((rig.devices.reward || {}).pins || {}).main ? rig.devices.reward.pins.main.gpio : 18;
-  const nEl = document.getElementById('reward-count-n');
-  const intEl = document.getElementById('reward-interval-s');
-  const n = Math.max(1, nEl ? (parseInt(nEl.value) || 1) : 1);
-  const intervalS = Math.max(0, intEl ? (parseFloat(intEl.value) || 0) : 0);
-  log(`Delivering ${n}× ${amount} uL (${ms.toFixed(1)} ms, GPIO ${gpio})` + (n > 1 ? ` every ${intervalS}s...` : '...'));
-  for (let i = 0; i < n; i++) {
-    const result = await proxyPi(pi.ip, '/api/deliver_reward', {duration_ms: ms, gpio: gpio});
-    if (!result.ok) { log(`Failed at ${i + 1}/${n}: ` + (result.error || '')); return; }
-    if (i < n - 1 && intervalS > 0) await new Promise(r => setTimeout(r, intervalS * 1000));
-  }
-  log(n > 1 ? `Delivered ${n} rewards.` : 'Reward delivered.');
-}
-
-async function homeReward() {
-  const pi = getPiForDevice('reward');
-  if (!pi) { log('Reward not assigned to a Pi'); return; }
-  const homePin = ((rig.devices.reward || {}).pins || {}).home;
-  if (!homePin) { log('No home pin configured'); return; }
-  const gpio = homePin.gpio;
-  log(`Homing (10 ms TTL, GPIO ${gpio})...`);
-  const result = await proxyPi(pi.ip, '/api/deliver_reward', {duration_ms: 10, gpio: gpio});
-  log(result.ok ? 'Home pulse sent.' : 'Failed: ' + (result.error || ''));
-}
-
-// Set a reward pin's GPIO in the rig state (Save Rig persists it). Nested-safe:
-// the pins.<name> object is created if missing so a fresh rig can't crash the write.
-function setRewardPin(name, val) {
-  const r = rig.devices.reward;
-  r.pins = r.pins || {};
-  r.pins[name] = r.pins[name] || {label: name === 'main' ? 'reward' : name};
-  r.pins[name].gpio = parseInt(val);
-}
-
-// ── Reward live ──
-
-async function startRewardLive() {
-  const pi = getPiForDevice('reward');
-  if (!pi) { log('Reward not assigned to a Pi'); return; }
-  deviceState.reward = deviceState.reward || {};
-  deviceState.reward.monitoring = true;
-  rewardClockOffset = null;
-  rewardEvents = [];
-  renderDeviceList();
-  rewardPollInterval = setInterval(() => pollRewardData(pi.ip), 200);
-  startRewardAnimation();
-  log('Reward live view started.');
-}
-
-function stopRewardLive() {
-  deviceState.reward = deviceState.reward || {};
-  deviceState.reward.monitoring = false;
-  if (rewardPollInterval) { clearInterval(rewardPollInterval); rewardPollInterval = null; }
-  stopRewardAnimation();
-  renderDeviceList();
-  log('Reward live view stopped.');
-}
-
-async function pollRewardData(ip) {
-  const result = await proxyPi(ip, '/api/reward_data', {}, 'GET');
-  rewardEvents = result.events || [];
-  if (rewardClockOffset === null && rewardEvents.length > 0) {
-    rewardClockOffset = Date.now() / 1000 - rewardEvents[rewardEvents.length - 1].t;
-  }
-  const lastEl = document.getElementById('last-reward-time');
-  if (lastEl && rewardEvents.length > 0) {
-    const last = rewardEvents[rewardEvents.length - 1];
-    const d = new Date(last.t * 1000);
-    lastEl.textContent = d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0') + ' (' + last.duration_ms.toFixed(0) + 'ms)';
-  }
-  const countEl = document.getElementById('reward-count');
-  if (countEl) countEl.textContent = rewardEvents.length;
-}
-
-function startRewardAnimation() {
-  function frame() {
-    drawRewardRaster();
-    rewardAnimFrame = requestAnimationFrame(frame);
-  }
-  rewardAnimFrame = requestAnimationFrame(frame);
-}
-
-function stopRewardAnimation() {
-  if (rewardAnimFrame) { cancelAnimationFrame(rewardAnimFrame); rewardAnimFrame = null; }
-}
-
-function drawRewardRaster() {
-  const canvas = document.getElementById('reward-canvas');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const w = canvas.width, h = canvas.height;
-  ctx.fillStyle = '#0a0a1a';
-  ctx.fillRect(0, 0, w, h);
-
-  const windowS = 30;
-  const now = rewardClockOffset !== null
-    ? (Date.now() / 1000 - rewardClockOffset)
-    : (rewardEvents.length > 0 ? rewardEvents[rewardEvents.length - 1].t : 0);
-
-  ctx.fillStyle = '#444';
-  ctx.font = '9px monospace';
-  for (let s = 0; s <= 30; s += 5) {
-    const x = ((windowS - s) / windowS) * w;
-    ctx.fillText('-' + s + 's', x, h - 2);
-  }
-
-  ctx.strokeStyle = '#2196f3';
-  ctx.lineWidth = 2;
-  for (const evt of rewardEvents) {
-    const age = now - evt.t;
-    if (age > windowS || age < 0) continue;
-    const x = ((windowS - age) / windowS) * w;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, h - 12);
-    ctx.stroke();
-  }
-}
-
-// ── Photodiode monitoring ──
-
-async function startPhotodiodeMonitor() {
-  const pi = getPiForDevice('photodiode');
-  if (!pi) { log('Photodiode not assigned to a Pi'); return; }
-  const pd = rig.devices.photodiode || {};
-  const result = await proxyPi(pi.ip, '/api/photodiode_raw_start', {gpio: pd.gpio || 24});
-  if (result.ok) {
-    deviceState.photodiode = deviceState.photodiode || {};
-    deviceState.photodiode.monitoring = true;
-    photodiodeRaw = []; photodiodeTrigger = null; photodiodeEdgeCount = 0;
-    renderDeviceList();
-    photodidePollInterval = setInterval(() => pollPhotodiodeRaw(pi.ip), 200);
-    startPhotodiodeAnimation();
-    log('Photodiode scope started (raw transitions; glitch filter off during capture).');
-  } else { log('Failed: ' + (result.error || '')); }
-}
-
-async function stopPhotodiodeMonitor() {
-  if (deviceState.photodiode && deviceState.photodiode.testing) await stopPhotodiodeTest();
-  const pi = getPiForDevice('photodiode');
-  if (pi) await proxyPi(pi.ip, '/api/photodiode_raw_stop');
-  deviceState.photodiode = deviceState.photodiode || {};
-  deviceState.photodiode.monitoring = false;
-  if (photodidePollInterval) { clearInterval(photodidePollInterval); photodidePollInterval = null; }
-  stopPhotodiodeAnimation();
-  renderDeviceList();
-  log('Photodiode scope stopped.');
-}
-
-// Test: flash the red sync square every N frames on the follower display so the photodiode sees
-// real pulses (opens the scope too). Simulates the stimulus sync square during an experiment.
-async function startPhotodiodeTest() {
-  if (!(deviceState.photodiode && deviceState.photodiode.monitoring)) await startPhotodiodeMonitor();
-  const dpi = getPiForDevice('display');
-  if (!dpi) { log('Display not assigned to a Pi'); return; }
-  const pd = rig.devices.photodiode || {};
-  const everyN = pd.pulse_every_n_frames || 5;
-  const r = await retryProxy(dpi.ip, '/api/photodiode_test_start', {
-    every_n: everyN,
-    sync_corner: pd.sync_corner || 'top-left',   // carry the controls so Test reflects them live
-    sync_size_px: pd.sync_size_px || 0,
-    sync_brightness: pd.sync_brightness ?? 1,
-  });
-  if (r && r.ok) {
-    deviceState.photodiode = deviceState.photodiode || {};
-    deviceState.photodiode.testing = true;
-    renderDeviceList();
-    log('Photodiode test: flashing sync square every ' + everyN + ' frames.');
-  } else {
-    log('Test failed: ' + ((r && r.error) || 'is the display initialized on the follower?'));
-  }
-}
-
-async function stopPhotodiodeTest() {
-  const dpi = getPiForDevice('display');
-  if (dpi) await proxyPi(dpi.ip, '/api/photodiode_test_stop');
-  deviceState.photodiode = deviceState.photodiode || {};
-  deviceState.photodiode.testing = false;
-  renderDeviceList();
-  log('Photodiode test stopped.');
-}
-
-async function pollPhotodiodeRaw(ip) {
-  if (_pdPolling) return;                                       // don't overlap polls (raw buffer race)
-  _pdPolling = true;
-  try {
-    const result = await proxyPi(ip, '/api/photodiode_raw_data', {}, 'GET');
-    const trs = (result && result.transitions) || [];
-    if (trs.length) {
-      for (const e of trs) photodiodeRaw.push(e);
-      const newest = photodiodeRaw[photodiodeRaw.length - 1].t;
-      const cutoff = newest - 2;                                // keep ~last 2s
-      while (photodiodeRaw.length && photodiodeRaw[0].t < cutoff) photodiodeRaw.shift();
-      for (let i = photodiodeRaw.length - 1; i >= 0; i--) {     // latest rising edge = trigger
-        if (photodiodeRaw[i].level === 1) { photodiodeTrigger = photodiodeRaw[i].t; break; }
-      }
-      photodiodeEdgeCount += trs.filter(e => e.level === 1).length;
-      const lastEl = document.getElementById('last-pulse-time');
-      if (lastEl) {
-        const d = new Date(newest * 1000);
-        lastEl.textContent = d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
-      }
-    }
-    const countEl = document.getElementById('pulse-count');
-    if (countEl) countEl.textContent = photodiodeEdgeCount;
-
-    // Live V from the Teensy serial stream (n/a if pyserial / Teensy absent — degrades quietly).
-    const vr = await proxyPi(ip, '/api/photodiode_v', {}, 'GET');
-    photodiodeVData = vr;
-    const vEl = document.getElementById('pd-v');
-    const e1 = document.getElementById('pd-v1'), e99 = document.getElementById('pd-v99');
-    if (vEl) {
-      if (vr && vr.available && vr.v != null) {
-        const bad = (vr.p99 != null && vr.p99 >= (vr.v_high ?? 3.0)) ||
-                    (vr.p1  != null && vr.p1  <= (vr.v_low  ?? 0.3));
-        vEl.textContent = vr.v.toFixed(2) + 'V';
-        vEl.style.color = bad ? '#ffa64d' : '#66bb6a';
-        if (e1)  e1.textContent  = vr.p1  != null ? vr.p1.toFixed(2)  : '--';
-        if (e99) e99.textContent = vr.p99 != null ? vr.p99.toFixed(2) : '--';
-      } else {
-        vEl.textContent = 'n/a'; vEl.style.color = '#556';
-        if (e1) e1.textContent = '--'; if (e99) e99.textContent = '--';
-      }
-    }
-  } finally {
-    _pdPolling = false;
-  }
-}
-
-function startPhotodiodeAnimation() {
-  function frame() {
-    drawPhotodiodeScope();
-    photodiodeAnimFrame = requestAnimationFrame(frame);
-  }
-  photodiodeAnimFrame = requestAnimationFrame(frame);
-}
-
-function stopPhotodiodeAnimation() {
-  if (photodiodeAnimFrame) { cancelAnimationFrame(photodiodeAnimFrame); photodiodeAnimFrame = null; }
-}
-
-// DEPRECATED (unused): browser model of the OLD on-Pi steady/hold-off filters, kept only for the
-// stashed devices/photodiode_filtered.py. The active Teensy photodiode delivers one clean pulse per
-// sync (filtering runs on the Teensy), so drawPhotodiodeScope below no longer calls this — every raw
-// rising edge IS a detected onset. Restore the call from git if you revert to the filtered device.
-// Re-apply steady (glitch) + hold-off to raw transitions IN THE BROWSER, mirroring the device:
-//  - STEADY: a rising edge is confirmed only if the level holds high >= steadyMs (else it's a
-//    glitch); pigpio reports it delayed by steadyMs, so we mark it at t_rise + steadyMs.
-//  - HOLD-OFF: after an accepted edge, ignore confirmed edges within holdMs.
-// steadyMs/holdMs of 0 disable that stage (matches "0 = off" on the device).
-function _computeDetectedEdges(trs, steadyMs, holdMs) {
-  const steadyS = steadyMs / 1000, holdS = holdMs / 1000;
-  // STEADY = the pigpio glitch filter modelled as a TWO-EDGE level debounce: a raw level change
-  // is "confirmed" (flips the filtered level) only if the new level holds >= steadyS. A confirmed
-  // 0->1 flip is a detected rising edge (reported delayed by steadyS, like pigpio). A short low
-  // dip inside a high plateau is thus suppressed and yields NO extra rising edge — matching the
-  // hardware, unlike a one-sided high-dwell test.
-  const confirmed = [];
-  let filt = trs.length ? (trs[0].level === 1 ? 0 : 1) : 0;    // filtered level before trs[0]
-  for (let i = 0; i < trs.length; i++) {
-    const lvl = trs[i].level;
-    if (lvl === filt) continue;                                // no change vs the filtered baseline
-    const next = trs[i + 1];
-    const dwell = next ? (next.t - trs[i].t) : Infinity;       // how long the new level holds
-    if (dwell >= steadyS) {                                    // stable enough -> confirmed change
-      if (lvl === 1) confirmed.push(trs[i].t + steadyS);       // 0->1 = detected rising edge
-      filt = lvl;
-    }
-    // else: glitch too brief -> filtered level unchanged; its reversing edge is skipped (lvl===filt)
-  }
-  const accepted = [];
-  let last = -Infinity;
-  for (const t of confirmed) {
-    if (t - last >= holdS) { accepted.push(t); last = t; }     // hold-off lockout
-  }
-  return { confirmed, accepted };
-}
-
-// Triggered digital scope: the latest raw rising edge is t=0; ms timebase so the ~1–2ms pulse shape
-// is visible. The Teensy delivers ONE clean rising edge per sync pulse (steady/hold-off filtering runs
-// on the Teensy), so there is no on-Pi filtering to model — every raw rising edge IS a detected onset,
-// drawn as a single series. No steady/hold-off is read or reported here.
-function drawPhotodiodeScope() {
-  const canvas = document.getElementById('photodiode-canvas');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const w = canvas.width, h = canvas.height;
-  ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
-
-  // live V overlay (Teensy serial), top-right — shown even before any edges arrive
-  const vd = photodiodeVData;
-  if (vd && vd.available && vd.v != null) {
-    const badV = (vd.p99 != null && vd.p99 >= (vd.v_high ?? 3.0)) ||
-                 (vd.p1  != null && vd.p1  <= (vd.v_low  ?? 0.3));
-    ctx.textAlign = 'right';
-    ctx.font = 'bold 13px monospace'; ctx.fillStyle = badV ? '#ffa64d' : '#66bb6a';
-    ctx.fillText(`V ${vd.v.toFixed(2)}`, w - 6, 13);
-    ctx.font = '9px monospace'; ctx.fillStyle = '#889';
-    ctx.fillText(`1% ${vd.p1 != null ? vd.p1.toFixed(2) : '--'} · 99% ${vd.p99 != null ? vd.p99.toFixed(2) : '--'}`, w - 6, 25);
-    ctx.textAlign = 'left';
-  }
-
-  const preMs = 2, postMs = 14;
-  const totalS = (preMs + postMs) / 1000;
-
-  if (photodiodeTrigger === null) {
-    ctx.fillStyle = '#556'; ctx.font = '11px monospace';
-    ctx.fillText('waiting for a rising edge…', 10, h / 2);
-    return;
-  }
-  const t0 = photodiodeTrigger;
-  const winStart = t0 - preMs / 1000, winEnd = t0 + postMs / 1000;
-  const xOf = t => ((t - winStart) / totalS) * w;
-  const yHigh = 14, yLow = h - 22;
-
-  // level just before the window (for the step trace start)
-  let lvl = 0, haveBefore = false;
-  for (let i = photodiodeRaw.length - 1; i >= 0; i--) {
-    if (photodiodeRaw[i].t < winStart) { lvl = photodiodeRaw[i].level; haveBefore = true; break; }
-  }
-  const trs = photodiodeRaw.filter(e => e.t >= winStart && e.t <= winEnd);
-  if (!haveBefore && trs.length) lvl = trs[0].level === 1 ? 0 : 1;
-
-  // digital step waveform
-  ctx.strokeStyle = '#4fc3f7'; ctx.lineWidth = 1.5; ctx.beginPath();
-  let py = lvl ? yHigh : yLow; ctx.moveTo(0, py);
-  for (const e of trs) {
-    const x = xOf(e.t); ctx.lineTo(x, py); py = e.level ? yHigh : yLow; ctx.lineTo(x, py);
-  }
-  ctx.lineTo(w, py); ctx.stroke();
-
-  // trigger marker
-  ctx.strokeStyle = '#555'; ctx.setLineDash([3, 3]); ctx.beginPath();
-  ctx.moveTo(xOf(t0), 0); ctx.lineTo(xOf(t0), h - 12); ctx.stroke(); ctx.setLineDash([]);
-
-  // rising edges = detected pulse onsets (no filtering — clean Teensy signal)
-  let nEdges = 0;
-  ctx.strokeStyle = '#66bb6a'; ctx.lineWidth = 2;
-  for (const e of trs) {
-    if (e.level !== 1) continue;
-    const x = xOf(e.t); nEdges++;
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h - 12); ctx.stroke();
-  }
-
-  // ms axis labels relative to trigger
-  ctx.fillStyle = '#556'; ctx.font = '9px monospace';
-  const step = Math.max(2, Math.round((preMs + postMs) / 6));
-  for (let ms = -preMs; ms <= postMs; ms += step) {
-    ctx.fillText((ms > 0 ? '+' : '') + ms, xOf(t0 + ms / 1000) + 1, h - 2);
-  }
-  // legend
-  ctx.font = '9px monospace';
-  ctx.fillStyle = '#66bb6a';
-  ctx.fillText(`rising edges (Teensy — pre-filtered) · ${nEdges} in view`, 4, 10);
-}
-
-function updateRewardMs() {
-  const amountEl = document.getElementById('reward-deliver-ul');
-  const msEl = document.getElementById('reward-computed-ms');
-  if (!amountEl || !msEl) return;
-  const cal = (rig.devices.reward || {}).calibration || {};
-  const table = cal.main || [];
-  const ms = interpolateCalMs(table, parseFloat(amountEl.value) || 0);
-  msEl.textContent = ms.toFixed(1) + ' ms';
-}
-
-function updateCalTable() {
-  if (!rig || !rig.devices.reward) return;
-  const rows = document.querySelectorAll('.cal-row');
-  const newCal = [];
-  rows.forEach(row => {
-    const ms = parseFloat(row.querySelector('.cal-ms').value);
-    const ul = parseFloat(row.querySelector('.cal-ul').value);
-    if (!isNaN(ms) && !isNaN(ul)) newCal.push([ms, ul]);
-  });
-  rig.devices.reward.calibration = rig.devices.reward.calibration || {};
-  rig.devices.reward.calibration.main = newCal;
-  updateRewardMs();
-}
-
-function applyCalibration() {
-  updateCalTable();
-  saveRig();
-  log('Calibration saved to rig config.');
-  updateRewardMs();
-}
-
-function addCalRow() {
-  if (!rig || !rig.devices.reward) return;
-  rig.devices.reward.calibration = rig.devices.reward.calibration || {};
-  rig.devices.reward.calibration.main = rig.devices.reward.calibration.main || [];
-  rig.devices.reward.calibration.main.push([0, 0]);
-  renderDeviceList();
-}
-
-function removeCalRow() {
-  if (!rig || !rig.devices.reward) return;
-  const cal = rig.devices.reward.calibration && rig.devices.reward.calibration.main;
-  if (cal && cal.length > 0) cal.pop();
-  renderDeviceList();
-}
-
-// ── Rendering ──
+// ── Render ──
 
 function renderAll() {
   renderPiList();
   renderDeviceList();
+  renderDeviceCatalog();
   renderSlackSettings();
   renderShepherdSettings();
   renderDataDirs();
@@ -1949,7 +782,6 @@ function onSlackChange() {
 
 // Shepherd process-monitor toggle, stored on the rig (rig.shepherd) and saved by saveRig.
 // Applied on Install: ON enables+starts the leader shepherd service, OFF stops+disables it.
-// Defaults to ON (shepherd has always shipped enabled).
 function renderShepherdSettings() {
   if (!rig) return;
   rig.shepherd = rig.shepherd || {};
@@ -2002,7 +834,7 @@ function renderPiList() {
         <span class="status-dot ${dotClass}"></span>
         <strong>${pi.name}</strong>
         <span class="role-badge ${pi.role}">${pi.role}</span>
-        <span style="color:#888; font-size:11px">${pi.ip}</span>
+        <span style="color:#888; font-size:11px">${pi.user || 'vruser'}@${pi.ip}</span>
       </div>
       <div>
         ${(pi.devices || []).map(d =>
@@ -2023,8 +855,8 @@ function renderPiList() {
 }
 
 // Keep the Log card exactly as tall as the Pis card (measured with align-items:flex-start so log
-// content can't inflate it); the log then scrolls INSIDE the card. CSS min-height:180px floors it
-// to ~the 2-Pi startup height before the rig loads. Re-run on Pi re-render and on window resize.
+// content can't inflate it); the log then scrolls INSIDE the card. Re-run on Pi re-render and on
+// window resize.
 function syncLogHeight() {
   const piCard = document.getElementById('pi-list') && document.getElementById('pi-list').closest('.card');
   const logCard = document.getElementById('log') && document.getElementById('log').closest('.card');
@@ -2034,15 +866,18 @@ function syncLogHeight() {
 window.addEventListener('resize', syncLogHeight);
 
 let activeDeviceTab = null;   // which device tab is currently shown
-function devLabel(name) { return (deviceSchemas[name] && deviceSchemas[name].label) || name; }
+function devLabel(name) {
+  const t = (rig && rig.devices && rig.devices[name] && rig.devices[name].type) || name;
+  return (deviceSchemas[t] && deviceSchemas[t].label) || name;
+}
 
 function renderDeviceList() {
   const el = document.getElementById('device-list');
   if (!rig) { el.innerHTML = ''; return; }
   const pisReady = allPisOk();
   const devices = rig.devices || {};
-  // Alphabetical by label — same order as the Add-Device dropdown.
-  const names = Object.keys(devices).sort((a, b) => devLabel(a).localeCompare(devLabel(b)));
+  // Rig-yaml order (same order Initialize runs them in).
+  const names = Object.keys(devices);
   if (!names.length) {
     el.innerHTML = '<div style="color:#888; font-size:12px">No devices — add one above.</div>';
     return;
@@ -2058,7 +893,7 @@ function renderDeviceList() {
     const off = (dev.enabled !== false) ? '' : ' style="opacity:0.5"';
     return `<button class="device-tab${active}" data-device="${name}" title="${devLabel(name)}"
                     onclick="switchDeviceTab('${name}')">
-      <span class="status-dot ${dot}"></span><span class="device-tab-label"${off}>${devLabel(name)}</span>
+      <span class="status-dot ${dot}"></span><span class="device-tab-label"${off}>${name}</span>
     </button>`;
   }).join('');
 
@@ -2069,7 +904,6 @@ function renderDeviceList() {
     </div>`).join('');
 
   el.innerHTML = `<div class="device-tabs">${tabs}</div><div class="device-panels">${panels}</div>`;
-  if (lumMeasure) renderLumPanel();   // re-hydrate an open intensity-cal panel after a re-render
 }
 
 // Switch the visible device tab in place (no full re-render, so input state is preserved).
@@ -2081,8 +915,18 @@ function switchDeviceTab(name) {
     t.classList.toggle('active', t.dataset.device === name));
 }
 
+// Update one rig-config field from the generic card editor. Numbers stay numbers, JSON arrays
+// parse ([1280, 720]), everything else is kept as a string.
+function updateDeviceField(name, key, raw) {
+  if (!rig || !rig.devices[name]) return;
+  let v = raw;
+  const s = String(raw).trim();
+  if (s !== '' && !isNaN(Number(s))) v = Number(s);
+  else { try { const j = JSON.parse(s); if (Array.isArray(j)) v = j; } catch (e) {} }
+  rig.devices[name][key] = v;
+}
+
 function renderDeviceCard(name, dev, pisReady) {
-  const schema = deviceSchemas[name] || {};
   const enabled = dev.enabled !== false;
   const ds = deviceState[name] || {};
   const initDot = ds.initialized === true ? 'dot-green' : ds.initialized === false ? 'dot-red' : 'dot-gray';
@@ -2094,16 +938,7 @@ function renderDeviceCard(name, dev, pisReady) {
   }).join('');
 
   const showControls = enabled && pisReady;
-  let controlsHtml = '';
-  if (showControls) {
-    if (name === 'camera') controlsHtml = renderCameraControls(dev);
-    else if (name === 'display') controlsHtml = renderDisplayControls(dev);
-    else if (name === 'lick_sensor') controlsHtml = renderLickControls(dev);
-    else if (name === 'photodiode') controlsHtml = renderPhotodiodeControls(dev);
-    else if (name === 'reward') controlsHtml = renderRewardControls(dev);
-    else if (name === 'calibration_probe') controlsHtml = renderProbeControls(dev);
-    else if (name === 'encoder') controlsHtml = renderEncoderControls(dev);
-  }
+  const controlsHtml = showControls ? renderGenericControls(name, dev) : '';
 
   // Reinit lives in the header row (next to title/status) — one per device.
   const reinitBtn = showControls
@@ -2118,8 +953,9 @@ function renderDeviceCard(name, dev, pisReady) {
         <span class="status-dot ${initDot}"></span>
         <span class="device-chip ${enabled ? 'enabled' : ''}"
               onclick="toggleDevice('${name}')" style="cursor:pointer">
-          ${schema.label || name} ${enabled ? '(on)' : '(off)'}
+          ${name} ${enabled ? '(on)' : '(off)'}
         </span>
+        <span style="color:#667; font-size:10px">${devLabel(name)}</span>
         ${assignHtml}
         ${reinitBtn}
       </h4>
@@ -2129,575 +965,58 @@ function renderDeviceCard(name, dev, pisReady) {
     </div>`;
 }
 
-// ── Camera prediction lookup ── mirrors devices/camera.py SENSOR_MODES (measured off the rig's
-// IMX477). maxFps is the SENSOR ceiling per raw bit depth, rounded DOWN so the UI never lets you
-// over-request; whether the SOFTWARE encoder sustains a combo is a separate feasibility question
-// (tools/camera_sweep.py). File size and bit/px are pure arithmetic. Nothing fancy — this table
-// plus three formulas drive every prediction shown in the panel.
-const CAM_MODES = {
-  '2028x1520': { label: 'hires (full sensor 4:3)', size: [2028, 1520], fov: '100% × 100%',
-                 outputs: [[1014, 760], [2028, 1520]], maxFps: {8: 66, 10: 53, 12: 45} },
-  '2028x1080': { label: 'fast (16:9)',             size: [2028, 1080], fov: '100% × 71%',
-                 outputs: [[1014, 540], [2028, 1080]], maxFps: {8: 92, 10: 74, 12: 62} },
-};
-function camModeKey(dev) {
-  if (dev.sensor_mode) return dev.sensor_mode[0] + 'x' + dev.sensor_mode[1];
-  // legacy yaml without sensor_mode: infer the mode from the current output resolution
-  const r = dev.resolution || [1014, 540];
-  for (const [k, m] of Object.entries(CAM_MODES))
-    if (m.outputs.some(o => o[0] === r[0] && o[1] === r[1])) return k;
-  return '2028x1080';
-}
-function camMode(dev)   { return CAM_MODES[camModeKey(dev)] || CAM_MODES['2028x1080']; }
-// Native-output ENCODER ceilings (MEASURED on the Pi 5: the software H.264 encoder saturates and
-// drops frames above these when emitting the full-resolution stream — native 2028x1080 fails at
-// 55, native 2028x1520 at 45). Half/downscaled outputs have NO such limit — they run clean to the
-// sensor ceiling (verified to 66 fps @ 25% CPU). Effective max fps = min(sensor, encoder).
-const ENC_MAX_FPS = { '2028x1080': 50, '2028x1520': 40 };
-function camSensorMaxFps(dev) { const m = camMode(dev); return m.maxFps[dev.bit_depth || 12] || m.maxFps[12]; }
-function camEncoderCap(dev) {
-  const m = camMode(dev), r = dev.resolution || m.outputs[0];
-  const isNative = (r[0] === m.size[0] && r[1] === m.size[1]);
-  return isNative ? (ENC_MAX_FPS[camModeKey(dev)] || Infinity) : Infinity;
-}
-function camMaxFps(dev) { return Math.min(camSensorMaxFps(dev), camEncoderCap(dev)); }
-function camFileSizeGB(dev, minutes) { return (dev.bitrate_mbps || 4) * minutes * 60 / 8000; }
-function camBitpx(dev)  { const r = dev.resolution || [1014, 540]; return (dev.bitrate_mbps || 4) * 1e6 / (r[0] * r[1] * (dev.fps || 50)); }
-function camBand(bpp)   { return bpp >= 0.14 ? ['great', '#4caf50'] : bpp >= 0.11 ? ['good', '#8bc34a'] : bpp >= 0.08 ? ['ok', '#ffa64d'] : ['starved', '#ff6b6b']; }
-function camOutLabel(mode, o) { return (o[0] === mode.size[0] ? 'native ' : 'half ') + o[0] + '×' + o[1]; }
+// Generic card body: the device's rig-yaml fields as editable inputs (persisted by Save Rig),
+// plus Live monitoring — a video device streams MJPEG, everything else streams its events into
+// a JSON readout via the generic monitor endpoints.
+function renderGenericControls(name, dev) {
+  const ds = deviceState[name] || {};
+  const fields = Object.entries(dev)
+    .filter(([k, v]) => !['type', 'enabled'].includes(k)
+                        && (v === null || typeof v !== 'object' || Array.isArray(v)))
+    .map(([k, v]) => {
+      if (typeof v === 'boolean') {
+        return `<div class="device-field"><label>${k}</label>
+          <input type="checkbox" ${v ? 'checked' : ''}
+                 onchange="rig.devices['${name}']['${k}'] = this.checked"></div>`;
+      }
+      const val = Array.isArray(v) ? JSON.stringify(v) : (v ?? '');
+      return `<div class="device-field"><label>${k}</label>
+        <input type="text" value='${String(val).replace(/'/g, "&#39;")}'
+               onchange="updateDeviceField('${name}','${k}',this.value)"></div>`;
+    }).join('');
 
-function onCamModeChange(val) {
-  rig.devices.camera = rig.devices.camera || {};
-  const mode = CAM_MODES[val]; if (!mode) return;
-  rig.devices.camera.sensor_mode = mode.size.slice();
-  const cur = rig.devices.camera.resolution;
-  if (!cur || !mode.outputs.some(o => o[0] === cur[0] && o[1] === cur[1]))
-    rig.devices.camera.resolution = mode.outputs[0].slice();   // default to the 'half' output
-  _camClampFps();
-  renderDeviceList();
-}
-function onCamBitDepthChange(val) {
-  rig.devices.camera = rig.devices.camera || {};
-  rig.devices.camera.bit_depth = parseInt(val);
-  _camClampFps();
-  renderDeviceList();
-}
-function onCamResChange(val) {
-  rig.devices.camera = rig.devices.camera || {};
-  rig.devices.camera.resolution = val.split('x').map(Number);
-  renderDeviceList();
-}
-function onCamBitrateChange(val) {
-  rig.devices.camera = rig.devices.camera || {};
-  rig.devices.camera.bitrate_mbps = parseInt(val);
-  renderDeviceList();
-}
-function _camClampFps() {
-  const cam = rig.devices.camera, max = camMaxFps(cam);
-  if ((cam.fps || 50) > max) cam.fps = max;
-}
-
-function renderCameraControls(dev) {
-  const modeKey = camModeKey(dev);
-  const mode = camMode(dev);
-  const bitDepth = dev.bit_depth || 12;
-  const maxFps = camMaxFps(dev);
-  const res = dev.resolution || mode.outputs[0];
-  const resStr = res[0] + 'x' + res[1];
-  const fps = Math.min(dev.fps || 50, maxFps);   // display the fps clamped to the sensor ceiling
-  const autoExp = dev.auto_exposure ?? true;
-  const maxMs = 1000 / fps;   // exposure (ms) is bounded by the frame period at this fps
-  const expMs = Math.max(0.1, Math.min(dev.exposure_ms ?? 10, maxMs));
-  const gainVal = dev.gain ?? 1.0;
-  const bitrate = dev.bitrate_mbps ?? 4;
-  const h264Profile = dev.h264_profile ?? 'main';
-  const sizeGB = camFileSizeGB(dev, 60);                         // 60-min estimate
-  const bpp = camBitpx({ ...dev, resolution: res, fps });        // quality proxy
-  const band = camBand(bpp);
-  const encLimited = camEncoderCap(dev) < camSensorMaxFps(dev);  // native output, encoder-capped
-  const livePreset = dev.live_preset ?? 'med';
-  const ds = deviceState.camera || {};
-  const streaming = ds.streaming;
-  const lock = streaming ? 'disabled' : '';   // res/fps/bitrate reconfigure the camera -> lock while live
-  const pi = getPiForDevice('camera');
-  // Proxied through the setup app (same-origin) rather than hitting the Pi directly, so the
-  // preview works from any browser that can reach this app — the Pi hop runs server-side.
-  const streamUrl = pi ? ('/api/camera_feed?ts=' + Date.now()) : '';   // cache-bust so each Live re-requests a fresh stream
-
-  return `
-    <div class="device-controls">
-      <div class="device-field">
-        <!-- Sensor mode = field of view. 'fast' 2028x1080 is 16:9 (100% width, 71% height);
-             'hires' 2028x1520 is the full 4:3 sensor. Pinned so the FoV is deterministic. -->
-        <label>Mode</label>
-        <select ${lock} onchange="onCamModeChange(this.value)">
-          <option value="2028x1080" ${modeKey === '2028x1080' ? 'selected' : ''}>fast &mdash; 16:9 (100%×71%)</option>
-          <option value="2028x1520" ${modeKey === '2028x1520' ? 'selected' : ''}>hires &mdash; 4:3 (full sensor)</option>
-        </select>
+  const isVideo = !!dev.video;
+  let liveHtml;
+  if (isVideo) {
+    const streaming = !!ds.streaming;
+    const url = '/api/camera_feed?device=' + encodeURIComponent(name) + '&ts=' + Date.now();
+    liveHtml = `
+      <div class="device-controls" style="margin-top:6px">
+        ${streaming
+          ? `<button class="btn btn-red btn-sm" onclick="stopVideoStream('${name}')">Stop</button>`
+          : `<button class="btn btn-blue btn-sm" onclick="startVideoStream('${name}')" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
       </div>
-      <div class="device-field">
-        <!-- Raw readout depth. 8-bit is plenty for well-lit motion and raises the fps ceiling;
-             the saved video is 8-bit either way. Higher depth lowers the fps ceiling. -->
-        <label>Bit depth</label>
-        <select ${lock} onchange="onCamBitDepthChange(this.value)">
-          <option value="8"  ${bitDepth === 8  ? 'selected' : ''}>8</option>
-          <option value="10" ${bitDepth === 10 ? 'selected' : ''}>10</option>
-          <option value="12" ${bitDepth === 12 ? 'selected' : ''}>12</option>
-        </select>
-      </div>
-      <div class="device-field">
-        <!-- Output size: native (1:1 with the mode) or half (2x downscale — smaller px count,
-             so more bits/px at the same bitrate). Options depend on the chosen mode. -->
-        <label>Resolution</label>
-        <select ${lock} onchange="onCamResChange(this.value)">
-          ${mode.outputs.map(o => `<option value="${o[0]}x${o[1]}" ${resStr === o[0]+'x'+o[1] ? 'selected' : ''}>${camOutLabel(mode, o)}</option>`).join('')}
-        </select>
-      </div>
-      <div class="device-field">
-        <label>FPS <span style="color:${encLimited ? '#ffa64d' : '#888'};font-weight:normal">(max ${maxFps}${encLimited ? ', encoder' : ''})</span></label>
-        <input type="number" id="cam-fps" value="${fps}" min="10" max="${maxFps}" style="width:55px"
-               ${lock} onchange="onCamFpsChange()">
-      </div>
-      <div class="device-field">
-        <label>Bitrate</label>
-        <select ${lock} onchange="onCamBitrateChange(this.value)">
-          ${[4,8,10,12,24].map(b => `<option value="${b}" ${bitrate === b ? 'selected' : ''}>${b} Mbit</option>`).join('')}
-        </select>
-      </div>
-      <div class="device-field">
-        <!-- "main" enables CABAC: ~2x the compression of baseline for CPU only. Only drop to
-             baseline for a player that cannot handle CABAC. -->
-        <label>Profile</label>
-        <select ${lock} onchange="rig.devices.camera.h264_profile = this.value">
-          <option value="main" ${h264Profile === 'main' ? 'selected' : ''}>main</option>
-          <option value="high" ${h264Profile === 'high' ? 'selected' : ''}>high</option>
-          <option value="baseline" ${h264Profile === 'baseline' ? 'selected' : ''}>baseline</option>
-        </select>
-      </div>
-    </div>
-    <!-- Row 2: live predictions (from CAM_MODES + arithmetic; file size depends on bitrate only) -->
-    <div style="font-size:11px; color:#aaa; margin-top:3px">
-      FoV ${mode.fov} &nbsp;·&nbsp; ~${sizeGB.toFixed(1)} GB / 60 min &nbsp;·&nbsp;
-      quality <b style="color:${band[1]}">${bpp.toFixed(3)} bit/px (${band[0]})</b>
-      ${encLimited ? `&nbsp;·&nbsp;<span style="color:#ffa64d">native output: encoder-limited to ${maxFps} fps</span>` : ''}
-    </div>
-    <!-- Row 3: exposure / gain -->
-    <div class="device-controls" style="margin-top:4px">
-      <div class="device-field">
-        <label>Auto exp</label>
-        <input type="checkbox" id="cam-auto" ${autoExp ? 'checked' : ''}
-               onchange="onCamAutoToggle(this.checked)">
-      </div>
-      <div class="device-field">
-        <label>Exp ms <span style="color:#888;font-weight:normal">(max ${maxMs.toFixed(1)})</span></label>
-        <input type="number" id="cam-exp" value="${expMs}" min="0.1" max="${maxMs.toFixed(1)}" step="0.5"
-               style="width:70px" ${autoExp ? 'disabled' : ''} onchange="onCamExpChange()">
-      </div>
-      <div class="device-field">
-        <label>Gain</label>
-        <input type="number" id="cam-gain" value="${gainVal}" min="1" max="16" step="0.1"
-               style="width:55px" ${autoExp ? 'disabled' : ''} onchange="onCamExpChange()">
-      </div>
-    </div>
-    ${streaming ? '<div style="font-size:10px; color:#888; margin-top:2px">Stop the stream to change mode / bit-depth / resolution / FPS / bitrate.</div>' : ''}
-    <!-- Row 4: experiment live view preset -->
-    <div class="device-controls" style="margin-top:4px">
-      <span style="font-size:11px; color:#888;">Experiment live view (saved video unaffected):</span>
-      <div class="device-field">
-        <label>Quality</label>
-        <select onchange="rig.devices.camera.live_preset = this.value">
-          <option value="high" ${livePreset === 'high' ? 'selected' : ''}>High (25fps)</option>
-          <option value="med" ${livePreset === 'med' ? 'selected' : ''}>Med (15fps)</option>
-          <option value="low" ${livePreset === 'low' ? 'selected' : ''}>Low (10fps)</option>
-        </select>
-      </div>
-    </div>
-    <!-- Row 5: Live / Stop -->
-    <div class="device-controls" style="margin-top:6px">
-      ${streaming
-        ? `<button class="btn btn-red btn-sm" onclick="stopCameraStream()">Stop</button>`
-        : `<button class="btn btn-blue btn-sm" onclick="startCameraStream()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
-    </div>
-    <!-- Row 6: live-stream window (OFFLINE until Live is pressed) -->
-    <div class="stream-container">
-      ${streaming
-        ? `<img src="${streamUrl}" alt="Camera stream" style="filter:grayscale(1)" onerror="cameraImgError(this)">`
-        : `<div class="stream-offline">OFFLINE</div>`}
-    </div>`;
-}
-
-function renderDisplayControls(dev) {
-  const warp = dev.apply_warp || false;
-  const contrastMetric = dev.contrast_metric || 'weber';
-  const warpBtnClass = warpExists ? 'btn-yellow' : 'btn-orange';
-  const warpBtnText = warpExists ? 'Regenerate Warp' : 'Generate Warp';
-
-  // Geometry dropdown options
-  const geoOptions = geoFiles.map(f =>
-    `<option value="${f}" ${f === geoCurrentName ? 'selected' : ''}>${f.replace('.yaml','')}</option>`
-  ).join('');
-
-  // Geometry param fields (only shown when loaded)
-  let geoFields = '';
-  if (geoData) {
-    const g = geoData;
-    const s = g.screen || {};
-    const p = g.projector || {};
-    // azimuth_height (eye/az-line above screen bottom) drives the derived altitudes;
-    // fall back to reconstructing it from altitude_min for older geometry files.
-    const azH = (s.azimuth_height != null) ? s.azimuth_height
-      : ((s.parabola_A && s.altitude_min_deg != null)
-         ? +(-s.parabola_A * Math.tan(s.altitude_min_deg * Math.PI / 180)).toFixed(1) : '');
-    const gf = (section, key, label, val, step) =>
-      `<div class="device-field">
-        <label>${label}</label>
-        <input type="number" value="${val}" step="${step || 'any'}"
-               onchange="updateGeoField('${section}','${key}',parseFloat(this.value))">
+      <div class="stream-container">
+        ${streaming
+          ? `<img src="${url}" alt="${name} stream" onerror="videoImgError('${name}', this)">`
+          : `<div class="stream-offline">OFFLINE</div>`}
       </div>`;
-
-    geoFields = `
-    <div style="margin-top:6px; border-top:1px solid #333; padding-top:6px">
-      <div class="device-controls geo-row">
-        <span class="geo-label">SCREEN</span>
-        ${gf('screen','parabola_A','A depth cm',s.parabola_A,0.1)}
-        ${gf('screen','parabola_B','B curve',s.parabola_B,0.001)}
-        ${gf('screen','height_cm','Height cm',s.height_cm,0.1)}
-        <div class="device-field">
-          <label>Az height cm</label>
-          <input type="number" value="${azH}" step="0.1"
-                 onchange="updateAzimuthHeight(parseFloat(this.value))">
-        </div>
+  } else {
+    const monitoring = !!ds.monitoring;
+    liveHtml = `
+      <div class="device-controls" style="margin-top:6px">
+        ${monitoring
+          ? `<button class="btn btn-red btn-sm" onclick="stopDeviceMonitor('${name}')">Stop</button>`
+          : `<button class="btn btn-blue btn-sm" onclick="startDeviceMonitor('${name}')" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
+        ${monitoring ? `<span style="font-size:11px; color:#888">events: <span id="mon-count-${name}">${ds.monCount || 0}</span></span>` : ''}
       </div>
-      <div class="device-controls geo-row">
-        <span class="geo-label">VISUAL SPACE</span>
-        <div class="device-field">
-          <label>Alt min° (derived)</label>
-          <input type="number" value="${s.altitude_min_deg ?? ''}" step="1" disabled>
-        </div>
-        <div class="device-field">
-          <label>Alt max° (derived)</label>
-          <input type="number" value="${s.altitude_max_deg ?? ''}" step="1" disabled>
-        </div>
-        <div class="device-field">
-          <label>Az min° (derived)</label>
-          <input type="number" id="az-min-derived" value="${derivedAz.min ?? ''}" step="1" disabled>
-        </div>
-        <div class="device-field">
-          <label>Az max° (derived)</label>
-          <input type="number" id="az-max-derived" value="${derivedAz.max ?? ''}" step="1" disabled>
-        </div>
-      </div>
-      <div class="device-controls geo-row">
-        <span class="geo-label">PROJECTOR</span>
-        ${gf('projector','throw_ratio','Throw ratio',p.throw_ratio,0.1)}
-        ${gf('projector','throw_distance_cm','Throw cm',p.throw_distance_cm,1)}
-        ${gf('projector','horizontal_stretch','H stretch',p.horizontal_stretch ?? 1.0,0.05)}
-        ${gf('projector','vertical_stretch','V stretch',p.vertical_stretch ?? 2.4,0.05)}
-        ${gf('projector','optical_axis_elevation_deg','Axis elev°',p.optical_axis_elevation_deg,1)}
-        ${gf('projector','lens_offset_vertical','Lens offset',p.lens_offset_vertical,0.1)}
-        ${gf('projector','lateral_offset_cm','Lat offset cm',p.lateral_offset_cm,0.1)}
-      </div>
-      <div style="font-size:10px; color:#888; margin-top:6px">
-        Edits persist to <b>${geoCurrentName || 'rig_geometry.yaml'}</b> when you click
-        <b>Save Rig</b> (top-left).
-      </div>
-    </div>`;
+      ${monitoring ? `<div class="mon-box" id="mon-box-${name}">waiting for events…</div>` : ''}`;
   }
 
   return `
-    <div class="disp-section">
-      <span class="disp-label">RENDERING</span>
-      <div class="device-controls">
-        <div class="device-field">
-          <label style="display:inline; cursor:pointer">
-            <input type="checkbox" ${warp ? 'checked' : ''}
-                   onchange="rig.devices.display.apply_warp = this.checked"
-                   style="width:auto; min-width:auto; margin-right:3px; vertical-align:middle">
-            Apply warp
-          </label>
-        </div>
-        <div class="device-field">
-          <label>Contrast metric</label>
-          <select onchange="rig.devices.display.contrast_metric = this.value" style="width:auto">
-            <option value="weber" ${contrastMetric === 'weber' ? 'selected' : ''}>Weber</option>
-            <option value="michelson" ${contrastMetric === 'michelson' ? 'selected' : ''}>Michelson</option>
-            <option value="normalized" ${contrastMetric === 'normalized' ? 'selected' : ''}>Normalized</option>
-          </select>
-        </div>
-      </div>
-    </div>
-
-    <div class="disp-section">
-      <span class="disp-label">TESTS</span>
-      <div class="device-controls">
-        <button class="btn btn-blue btn-sm" onclick="testCheckers()">Test Checkers</button>
-        <button class="btn btn-gray btn-sm" onclick="blankDisplay()">Blank</button>
-        <div class="device-field">
-          <label>Bg</label>
-          <input type="number" id="blank-gray-value" value="0.0" min="0" max="1" step="0.01" style="width:60px">
-        </div>
-        <button class="btn btn-green btn-sm" onclick="testStimulus()">Stimulus</button>
-        <div class="device-field">
-          <label>Shape</label>
-          <select id="test-stim-shape" style="width:auto">
-            <option value="square">Square</option>
-            <option value="circle">Circle</option>
-          </select>
-        </div>
-        <div class="device-field"><label>Az°</label>
-          <input type="number" id="test-stim-az" value="0" step="1" style="width:56px"></div>
-        <div class="device-field"><label>Alt°</label>
-          <input type="number" id="test-stim-alt" value="0" step="1" style="width:56px"></div>
-        <div class="device-field"><label>Size°</label>
-          <input type="number" id="test-stim-size" value="8" step="1" min="1" style="width:56px"></div>
-        <div class="device-field"><label>Contrast</label>
-          <input type="number" id="test-stim-contrast" value="0.5" min="0" max="1" step="0.01" style="width:60px"></div>
-        <button class="btn btn-gray btn-sm" onclick="correctTestContrast()" title="Clamp the contrast to the highest value showable at the current Bg in the active metric">Correct</button>
-      </div>
-    </div>
-
-    <div class="disp-section">
-      <span class="disp-label">CALIBRATION</span>
-      <div class="device-controls">
-        <button class="calib-btn btn ${calibrating ? 'btn-red' : 'btn-green'} btn-sm" onclick="toggleCalibration()">${calibrating ? 'Stop Calib' : 'Calibrate'}</button>
-        <div class="device-field">
-          <label>Intensity</label>
-          <select id="lum-mode-select" onchange="onLumModeChange(this.value)" style="width:auto">
-            <option value="auto" ${lumSelectValue()==='auto'?'selected':''}>auto (measure)</option>
-            <option value="manual" ${lumSelectValue()==='manual'?'selected':''}>manual (measure)</option>
-            <option value="theoretical" ${lumSelectValue()==='theoretical'?'selected':''}>theoretical</option>
-            <option value="none" ${lumSelectValue()==='none'?'selected':''}>none</option>
-          </select>
-        </div>
-        <button class="btn btn-orange btn-sm" onclick="applyIntensity()">Intensity Cal</button>
-        <span id="lum-status" style="font-size:10px; color:#888">${lumStatusText()}</span>
-      </div>
-      <div id="lum-panel" style="display:none; margin-top:8px"></div>
-    </div>
-
-    <div class="disp-section">
-      <span class="disp-label">GEOMETRY</span>
-      <div class="device-controls">
-        <div class="device-field">
-          <label>File</label>
-          <select id="warp-geometry-select" onchange="selectGeometry(this.value)"
-                  style="min-width:180px; max-width:280px">
-            ${geoOptions}
-          </select>
-        </div>
-        <button class="btn btn-gray btn-sm" onclick="refreshGeoList()" title="Reload the geometry list (pick up newly saved calibrations)">&#8635;</button>
-        <button class="btn btn-blue btn-sm" onclick="sendGeometry()" title="Copy the selected geometry to the projector Pi as its rig_geometry.yaml">Send to projector</button>
-        <button class="warp-btn btn ${warpBtnClass} btn-sm" onclick="generateWarp()" title="Ray-trace the selected geometry into warp_map.npz and deploy it to the Leader">${warpBtnText}</button>
-        ${warpExists ? '<span style="font-size:10px; color:#4caf50">warp_map.npz found on Leader</span>' : '<span style="font-size:10px; color:#f44336">warp_map.npz not found on Leader</span>'}
-      </div>
-      ${geoFields}
-    </div>`;
-}
-
-function renderLickControls(dev) {
-  const addr = dev.i2c_address || '0x5A';
-  const electrode = dev.electrode || 4;
-  const ds = deviceState.lick_sensor || {};
-  const monitoring = ds.monitoring;
-
-  return `
-    <div class="device-controls">
-      <div class="device-field">
-        <label>I2C</label>
-        <input type="text" value="${addr}" style="width:55px"
-               onchange="rig.devices.lick_sensor.i2c_address = this.value">
-      </div>
-      <div class="device-field">
-        <label>Ch</label>
-        <input type="number" value="${electrode}" min="0" max="11" style="width:45px"
-               onchange="rig.devices.lick_sensor.electrode = parseInt(this.value)">
-      </div>
-      ${monitoring
-        ? `<button class="btn btn-red btn-sm" onclick="stopLickMonitor()">Stop</button>`
-        : `<button class="btn btn-blue btn-sm" onclick="startLickMonitor()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
-      ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">Last lick: <span id="last-lick-time">--</span></span>` : ''}
-    </div>
-    ${monitoring ? `<canvas id="lick-canvas" class="lick-canvas" width="400" height="60"></canvas>` : ''}`;
-}
-
-function renderEncoderControls(dev) {
-  const addr = dev.i2c_address || '0x36';
-  const wheel = dev.wheel_diameter_cm ?? 15;
-  const rate = dev.sample_hz ?? 100;
-  const ds = deviceState.encoder || {};
-  const monitoring = ds.monitoring;
-  return `
-    <div class="device-controls">
-      <div class="device-field">
-        <label>I2C</label>
-        <input type="text" value="${addr}" style="width:55px"
-               onchange="rig.devices.encoder.i2c_address = this.value">
-      </div>
-      <div class="device-field">
-        <label>Wheel &oslash; (cm)</label>
-        <input type="number" value="${wheel}" min="1" step="0.1" style="width:55px"
-               onchange="rig.devices.encoder.wheel_diameter_cm = parseFloat(this.value) || 15">
-      </div>
-      <div class="device-field">
-        <label>Sample (Hz)</label>
-        <input type="number" value="${rate}" min="10" max="500" step="10" style="width:50px"
-               onchange="rig.devices.encoder.sample_hz = parseInt(this.value) || 100">
-      </div>
-      ${monitoring
-        ? `<button class="btn btn-red btn-sm" onclick="stopEncoderMonitor()">Stop</button>`
-        : `<button class="btn btn-blue btn-sm" onclick="startEncoderMonitor()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
-      ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">Speed <span id="enc-speed">--</span> cm/s | Dist <span id="enc-dist">--</span> cm</span>` : ''}
-    </div>
-    ${monitoring ? `<canvas id="encoder-canvas" class="lick-canvas" width="440" height="80"></canvas>` : ''}
-    <div style="font-size:10px; color:#666; margin-top:2px">AS5600 magnetic angle sensor (I2C ${addr}) &mdash; spin the wheel; distance uses wheel &oslash;.</div>`;
-}
-
-function renderPhotodiodeControls(dev) {
-  const gpio = dev.gpio || 24;
-  const every_n = dev.pulse_every_n_frames || 5;
-  const corner = dev.sync_corner || 'top-left';
-  // Cap = frame_x from geo calibration: the leftover width outside the visible area
-  // (symmetric left/right, so one cap serves all four corners).
-  const sizeCap = (geoData && geoData.calibration && geoData.calibration.frame_x) || 400;
-  const sizePx = dev.sync_size_px || 0;   // 0 = auto (full dead-band width)
-  const brightness = dev.sync_brightness ?? 1;   // red LED level 0..1
-  const ds = deviceState.photodiode || {};
-  const monitoring = ds.monitoring;
-
-  return `
-    <div class="device-controls">
-      <div class="device-field">
-        <label>GPIO</label>
-        <input type="number" value="${gpio}" min="0" max="27" style="width:45px"
-               onchange="rig.devices.photodiode.gpio = parseInt(this.value)">
-      </div>
-      <div class="device-field">
-        <label>Sync every N frames</label>
-        <input type="number" value="${every_n}" min="1" max="60" style="width:45px"
-               onchange="rig.devices.photodiode.pulse_every_n_frames = parseInt(this.value)">
-      </div>
-      <div class="device-field">
-        <label>Sync corner</label>
-        <select onchange="rig.devices.photodiode.sync_corner = this.value; renderDeviceList()">
-          ${['top-left','top-right','bottom-left','bottom-right'].map(c =>
-            `<option value="${c}" ${c === corner ? 'selected' : ''}>${c}</option>`).join('')}
-        </select>
-      </div>
-      <div class="device-field">
-        <label>Sync size px</label>
-        <input type="number" value="${sizePx}" min="0" max="${sizeCap}" step="1" style="width:55px"
-               title="0 = auto (full dead-band width). Max ${sizeCap}px = frame_x from geo calibration — the leftover width outside the visible area (symmetric left/right)."
-               onchange="this.value = Math.max(0, Math.min(${sizeCap}, parseInt(this.value) || 0)); rig.devices.photodiode.sync_size_px = parseInt(this.value); renderDeviceList()">
-      </div>
-      <div class="device-field">
-        <label>Sync brightness</label>
-        <input type="number" value="${brightness}" min="0" max="1" step="0.05" style="width:55px"
-               title="Red LED level in the sync square, 0..1 (0 = off/black, 1 = full red). Location, size, and brightness are all read from here into the display."
-               onchange="this.value = Math.max(0, Math.min(1, parseFloat(this.value) || 0)); rig.devices.photodiode.sync_brightness = parseFloat(this.value); renderDeviceList()">
-      </div>
-      <!-- DEPRECATED photodiode filter controls (Steady filter + Hold-off): filtering now runs on the
-           Teensy (teensy/photodiode_sync.ino), so these are removed from the card. The self-filtering
-           device is stashed at devices/photodiode_filtered.py. To revert, restore this block + the
-           glitchOn/glitchMs/holdOn/holdMs consts + the live sliders below from git history. -->
-      ${monitoring
-        ? `<button class="btn btn-red btn-sm" onclick="stopPhotodiodeMonitor()">Stop</button>`
-        : `<button class="btn btn-blue btn-sm" onclick="startPhotodiodeMonitor()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
-      ${ds.testing
-        ? `<button class="btn btn-red btn-sm" onclick="stopPhotodiodeTest()">Stop test</button>`
-        : `<button class="btn btn-sm" onclick="startPhotodiodeTest()" ${ds.initialized !== true ? 'disabled' : ''} title="Flash the red sync square every N frames on the display (simulates the stimulus sync pulse) and open the scope">Test</button>`}
-      ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">Edges: <span id="pulse-count">0</span> | Last: <span id="last-pulse-time">--</span></span>` : ''}
-      ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">| V <span id="pd-v" style="font-weight:600">--</span> <span style="color:#556">[1% <span id="pd-v1">--</span> · 99% <span id="pd-v99">--</span>]</span></span>` : ''}
-    </div>
-    ${monitoring ? `<canvas id="photodiode-canvas" class="lick-canvas" width="460" height="120" style="width:460px;height:120px;max-width:100%"></canvas>` : ''}
-    <div style="font-size:10px; color:#666; margin-top:2px">Rising edge detection on GPIO${gpio} (clean pulses from the Teensy — filtering runs on the Teensy) — red sync square at ${corner}, ${sizePx ? sizePx + 'px' : 'auto (' + sizeCap + 'px = dead-band width)'}, brightness ${brightness}</div>`;
-}
-
-function renderRewardControls(dev) {
-  const rewardType = dev.reward_type || 'water';
-  const homePin = (dev.pins || {}).home;
-  const mainGpio = (((dev.pins || {}).main) || {}).gpio || 18;
-  const homeGpio = (((dev.pins || {}).home) || {}).gpio || 17;
-  const cal = (dev.calibration || {}).main || [];
-  const deliverUl = 4.0;
-  const computedMs = interpolateCalMs(cal, deliverUl);
-  const ds = deviceState.reward || {};
-  const monitoring = ds.monitoring;
-
-  let calRows = cal.map((row, i) => `
-    <tr class="cal-row">
-      <td><input class="cal-ms" type="number" value="${row[0]}" step="1" onchange="updateCalTable()"></td>
-      <td><input class="cal-ul" type="number" value="${row[1]}" step="0.1" onchange="updateCalTable()"></td>
-    </tr>
-  `).join('');
-
-  return `
-    <div class="device-controls">
-      <div class="device-field">
-        <label>Type</label>
-        <input type="text" value="${rewardType}" style="width:70px"
-               onchange="rig.devices.reward.reward_type = this.value">
-      </div>
-      <div class="device-field">
-        <label>Reward GPIO</label>
-        <input type="number" value="${mainGpio}" min="0" max="27" style="width:45px"
-               onchange="setRewardPin('main', this.value)">
-      </div>
-      <div class="device-field">
-        <label>Home GPIO</label>
-        <input type="number" value="${homeGpio}" min="0" max="27" style="width:45px"
-               onchange="setRewardPin('home', this.value)">
-      </div>
-      <div class="device-field">
-        <label>Deliver</label>
-        <input type="number" id="reward-deliver-ul" value="${deliverUl}" min="0.5" max="20" step="0.5"
-               style="width:55px" oninput="updateRewardMs()">
-        <label>uL</label>
-      </div>
-      <div class="device-field">
-        <label>×</label>
-        <input type="number" id="reward-count-n" value="1" min="1" step="1" style="width:45px">
-      </div>
-      <div class="device-field">
-        <label>every</label>
-        <input type="number" id="reward-interval-s" value="0.5" min="0" step="0.1" style="width:50px">
-        <label>s</label>
-      </div>
-      <button class="btn btn-green btn-sm" onclick="deliverReward()" ${ds.initialized !== true ? 'disabled' : ''}>Deliver</button>
-      <span id="reward-computed-ms" style="font-size:11px; color:#888">${computedMs.toFixed(1)} ms</span>
-      ${homePin ? `<button class="btn btn-orange btn-sm" onclick="homeReward()" ${ds.initialized !== true ? 'disabled' : ''}>Home</button>` : ''}
-      ${monitoring
-        ? `<button class="btn btn-red btn-sm" onclick="stopRewardLive()">Stop</button>`
-        : `<button class="btn btn-blue btn-sm" onclick="startRewardLive()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
-      ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">Pulses: <span id="reward-count">0</span> | Last: <span id="last-reward-time">--</span></span>` : ''}
-    </div>
-    ${monitoring ? `<canvas id="reward-canvas" class="lick-canvas" width="400" height="60"></canvas>` : ''}
-    <table class="cal-table">
-      <tr><th>ms</th><th>uL</th></tr>
-      ${calRows}
-    </table>
-    <div class="btn-row" style="margin-top:4px">
-      <button class="btn btn-blue btn-sm" onclick="addCalRow()">+ Row</button>
-      <button class="btn btn-red btn-sm" onclick="removeCalRow()">- Row</button>
-      <button class="btn btn-orange btn-sm" onclick="applyCalibration()">Save Calibration</button>
-    </div>`;
-}
-
-function renderProbeControls(dev) {
-  const gpio = dev.gpio || 22;
-  const ds = deviceState.calibration_probe || {};
-  const on = ds.on === true;
-
-  return `
-    <div class="device-controls">
-      <div class="device-field">
-        <label>GPIO</label>
-        <input type="number" value="${gpio}" min="0" max="27" style="width:45px"
-               onchange="rig.devices.calibration_probe.gpio = parseInt(this.value)">
-      </div>
-      <button class="btn ${on ? 'btn-green' : 'btn-gray'} btn-sm" onclick="toggleProbe()"
-              ${ds.initialized !== true ? 'disabled' : ''}>${on ? 'Probe On' : 'Probe Off'}</button>
-      <span style="font-size:11px; color:#888; margin-left:4px">TTL ${on ? 'HIGH' : 'LOW'} · auto-driven by geometry calibration</span>
-    </div>`;
+    <div class="device-controls">${fields}</div>
+    <div style="font-size:10px; color:#666; margin-top:2px">Fields persist on Save Rig; Reinit applies them to the device.</div>
+    ${liveHtml}`;
 }
 
 function renderDeviceCatalog() {
@@ -2750,7 +1069,7 @@ function removeDevice() {
   if (!sel || !sel.value) return;
   const name = sel.value; catalogSel = name;
   if (!rig.devices[name]) { log((deviceSchemas[name] ? deviceSchemas[name].label : name) + ' is not in the rig.'); return; }
-  if (!confirm('Remove ' + (deviceSchemas[name] ? deviceSchemas[name].label : name) + ' from the rig?\nIts pins/calibration will be dropped on the next Save Rig.')) return;
+  if (!confirm('Remove ' + (deviceSchemas[name] ? deviceSchemas[name].label : name) + ' from the rig?\nIts config will be dropped on the next Save Rig.')) return;
   delete rig.devices[name];
   (rig.pis || []).forEach(pi => { pi.devices = (pi.devices || []).filter(d => d !== name); });
   log('Removed ' + (deviceSchemas[name] ? deviceSchemas[name].label : name) + ' from the rig.');

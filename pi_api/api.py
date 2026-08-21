@@ -2,17 +2,22 @@
 pi_api/api.py
 
 Lightweight Flask REST API running on each Pi (port 5080).
-Handles: status, file upload/download, process start/stop,
-stim generation, and calibration.
+Handles: status, file upload/download, process start/stop, data transfer,
+and a GENERIC device surface — devices self-register via @register_device
+(module name == device type), so adding a device needs no new endpoints:
+  /api/init_device      {name, type, config}
+  /api/monitor_device   {name}   /api/stop_monitor_device {name}
+  /api/device_data?name=
+Camera-like devices (anything implementing start_preview/start_recording/
+mjpeg_stream) are driven through the device-name-keyed camera endpoints.
 """
 
 from __future__ import annotations
-import itertools
+import importlib
 import json
 import os
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import threading
@@ -30,46 +35,72 @@ DATA_DIR = Path.home() / "data"
 # mirrors the latest of these to its data dir at transfer time and prunes old ones here.
 SHEPHERD_LOG_DIR = Path.home() / "shepherd_logs"
 
-# Currently running process (leader or follower)
+# Currently running process (the leader engine)
 _process: subprocess.Popen | None = None
 _process_log: list[str] = []
 
 # Persistent device instances (survive across requests)
 _devices: dict = {}  # name -> initialized Device instance
 _devices_lock = threading.Lock()
-# Serializes camera open/close across the whole check→pop→construct sequence so two concurrent
-# camera_preview_start/stop calls can't both open a Picamera2 and hang libcamera. Always acquire
-# this OUTSIDE _devices_lock (never the reverse) to keep a consistent lock order.
-_camera_lock = threading.Lock()
-_lick_events: list = []
-_photodiode_events: list = []
-_photodiode_raw: list = []   # diagnostic raw transitions {t, level} for the setup-UI scope
-_encoder_events: list = []   # running-wheel {t, speed_cms, distance_cm} for the setup-UI monitor
-_reward_events: list = []
+# Per-device open/close serialization for camera-like devices, so two concurrent
+# preview_start/stop calls on the same device can't both open the capture pipeline.
+# Always acquire a camera lock OUTSIDE _devices_lock (never the reverse).
+_cam_locks: dict = {}
+_cam_locks_guard = threading.Lock()
+# Setup-UI live-monitor buffers, keyed by device name
+_monitor_events: dict = {}
+
+
+def _cam_lock(name: str) -> threading.Lock:
+    with _cam_locks_guard:
+        return _cam_locks.setdefault(name, threading.Lock())
+
+
+def _ensure_rig_path():
+    if str(RIG_DIR) not in sys.path:
+        sys.path.insert(0, str(RIG_DIR))
+
+
+def _load_device_class(dev_type: str):
+    """Import devices/<type>.py (self-registers via @register_device) and return the class."""
+    _ensure_rig_path()
+    from devices.base import DEVICE_REGISTRY
+    if dev_type not in DEVICE_REGISTRY:
+        importlib.import_module(f"devices.{dev_type}")
+    return DEVICE_REGISTRY[dev_type]
+
+
+def _is_session_recording(dev) -> bool:
+    """A real SESSION recording is writing (not a throwaway preview)."""
+    return bool(getattr(dev, "_recording", False)
+                and not getattr(dev, "_is_preview", True))
 
 
 @app.route("/api/status")
 def status():
     """Health check: running process, disk space, hostname, live session recording."""
     disk = shutil.disk_usage(str(Path.home()))
-    # camera_recording = a real SESSION recording is still writing (not a throwaway preview).
-    # The controller checks this before a Transfer: downloading a video that is still being
-    # written silently produces a truncated copy, which is how ASD109_20260814_002 lost 346 MB.
+    # cameras = every stored device that looks like a camera (has _recording).
+    # camera_recording/camera_frames stay as any/sum aggregates: the controller checks
+    # camera_recording before a Transfer (downloading a video that is still being written
+    # silently produces a truncated copy), and shepherd derives live encode fps from
+    # camera_frames.
+    cams = {}
     with _devices_lock:
-        cam = _devices.get("camera")
-    cam_rec = bool(cam is not None
-                   and getattr(cam, "_recording", False)
-                   and not getattr(cam, "_is_preview", True))
-    # camera_frames = frames encoded so far this recording. shepherd (the health
-    # monitor) polls this to derive live encode fps and alert if the encoder falls
-    # behind (a thermal-throttle symptom). None when not recording.
-    cam_frames = getattr(cam, "_frame_idx", None) if cam_rec else None
+        for name, dev in _devices.items():
+            if hasattr(dev, "_recording"):
+                rec = _is_session_recording(dev)
+                cams[name] = {"recording": rec,
+                              "frames": getattr(dev, "_frame_idx", None) if rec else None}
+    any_rec = any(c["recording"] for c in cams.values())
+    frames = sum(c["frames"] or 0 for c in cams.values()) if any_rec else None
     return jsonify({
         "ok": True,
         "hostname": os.uname().nodename,
         "process_running": _process is not None and _process.poll() is None,
-        "camera_recording": cam_rec,
-        "camera_frames": cam_frames,
+        "cameras": cams,
+        "camera_recording": any_rec,
+        "camera_frames": frames,
         "disk_free_gb": round(disk.free / 1e9, 1),
         "disk_total_gb": round(disk.total / 1e9, 1),
         "python": sys.executable,
@@ -182,17 +213,16 @@ def list_files(session_id):
 
 @app.route("/api/consolidate/<session_id>", methods=["POST"])
 def consolidate(session_id):
-    """Leader only. Fold the session's sidecars (metadata.yaml, stimuli.npz, trials.yaml,
-    frame_timestamps.npy) into <session_id>.h5 and delete them, leaving one self-contained
-    .h5 (+ video.h264) to transfer. Idempotent."""
+    """Leader only. Fold the session's sidecars (metadata.yaml, frame_timestamps.npy, ...)
+    into <session_id>.h5 and delete them, leaving one self-contained .h5 (+ video files)
+    to transfer. Idempotent."""
     data = request.get_json(silent=True) or {}
     subj, subj_date, _ = _parse_session_id(session_id)
     session_dir = (DATA_DIR / subj / subj_date / session_id) if subj else (DATA_DIR / session_id)
     vd = (data.get("video_dir") or "").strip() or "/media/vruser/ssd/video"
     video_session_dir = (Path(vd) / subj / subj_date / session_id) if subj else (Path(vd) / session_id)
     try:
-        if str(RIG_DIR) not in sys.path:
-            sys.path.insert(0, str(RIG_DIR))
+        _ensure_rig_path()
         from shared.consolidate import consolidate_session
         res = consolidate_session(
             session_dir, video_session_dir if video_session_dir.exists() else None)
@@ -207,38 +237,34 @@ def consolidate(session_id):
 
 @app.route("/api/start", methods=["POST"])
 def start():
-    """Start leader.py or follower.py as a subprocess."""
+    """Start the leader engine as a subprocess."""
     global _process, _process_log
     data = request.json
-    script = data.get("script")  # "leader" or "follower"
-    args = data.get("args", [])
+    script = data.get("script")
+    args = list(data.get("args", []))
 
     if _process and _process.poll() is None:
         return jsonify({"ok": False, "error": "Process already running"}), 409
 
-    conda_prefix = Path.home() / "miniforge3" / "envs" / "rig" / "bin"
-    python = str(conda_prefix / "python")
-
-    if script == "leader":
-        cmd = [python, str(RIG_DIR / "engine" / "leader.py")] + args
-    elif script == "follower":
-        cmd = [python, str(RIG_DIR / "engine" / "follower.py")] + args
-    else:
+    if script != "leader":
         return jsonify({"ok": False, "error": f"Unknown script: {script}"}), 400
 
+    conda_prefix = Path.home() / "miniforge3" / "envs" / "rig" / "bin"
+    python = str(conda_prefix / "python")
+    cmd = [python, str(RIG_DIR / "engine" / "leader.py")] + args
+
+    # Resolve relative --rig/--task values against ~/rig so the controller never has to
+    # know this Pi's username or home directory.
+    for flag in ("--rig", "--task"):
+        if flag in cmd:
+            i = cmd.index(flag) + 1
+            if i < len(cmd) and not cmd[i].startswith("/"):
+                cmd[i] = str(RIG_DIR / cmd[i])
+
     _process_log = []
-    env = os.environ.copy()
-    if script == "follower":
-        env.setdefault("DISPLAY", ":0")
-        env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-        # A session's follower.py owns pygame/:0 itself — make sure the setup display worker isn't
-        # still holding it. The leader's Go path calls /api/shutdown_display first, but that is
-        # best-effort; this guard closes the gap so the two never contend for :0.
-        with _display_worker_lock:
-            _kill_display_worker()
     _process = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1, env=env)
+        text=True, bufsize=1)
 
     # Log reader thread
     def read_output():
@@ -281,13 +307,13 @@ def logs():
 @app.route("/api/restart", methods=["POST"])
 def restart():
     """Restart the pi_api process (systemd Restart=always respawns it). Graceful SIGTERM first,
-    then FORCE-exit if still alive after 2s: with the display up, SDL (pygame) can swallow SIGTERM,
-    which used to leave stale code running and make Deploy / Restart-API silently no-op."""
+    then FORCE-exit if still alive after 2s, in case something swallowed SIGTERM — otherwise
+    stale code keeps running and Deploy / Restart-API silently no-ops."""
     def _shutdown():
         time.sleep(0.5)
         os.kill(os.getpid(), signal.SIGTERM)   # graceful
         time.sleep(2.0)
-        os._exit(0)                            # forced: SIGTERM was swallowed (e.g. SDL)
+        os._exit(0)                            # forced: SIGTERM was swallowed
 
     threading.Thread(target=_shutdown, daemon=True).start()
     return jsonify({"ok": True, "message": "Restarting..."})
@@ -295,35 +321,36 @@ def restart():
 
 @app.route("/api/release_devices", methods=["POST"])
 def release_devices():
-    """Close all pi_api-managed device instances (before engine takes over)."""
+    """Close all pi_api-managed device instances (before the engine takes over)."""
     released = []
-    # _camera_lock OUTSIDE _devices_lock (consistent order) so closing the camera here can't
-    # race a concurrent camera_preview_start/stop and leave libcamera in a bad state.
-    with _camera_lock:
-        with _devices_lock:
-            for name, dev in list(_devices.items()):
-                try:
-                    if hasattr(dev, 'stop_stream'):
-                        dev.stop_stream()
-                    if hasattr(dev, 'close'):
-                        dev.close()
-                    released.append(name)
-                except Exception as e:
-                    released.append(f"{name} (error: {e})")
-            _devices.clear()
-    _lick_events.clear()
-    _photodiode_events.clear()
-    _reward_events.clear()
-    _encoder_events.clear()
+    with _devices_lock:
+        names = list(_devices.keys())
+    # Camera locks OUTSIDE _devices_lock (consistent order) so closing a camera here can't
+    # race a concurrent preview_start/stop and leave the capture pipeline in a bad state.
+    for name in names:
+        with _cam_lock(name):
+            with _devices_lock:
+                dev = _devices.pop(name, None)
+            if dev is None:
+                continue
+            try:
+                if hasattr(dev, 'stop_stream'):
+                    dev.stop_stream()
+                if hasattr(dev, 'close'):
+                    dev.close()
+                released.append(name)
+            except Exception as e:
+                released.append(f"{name} (error: {e})")
+    _monitor_events.clear()
     return jsonify({"ok": True, "released": released})
 
 
 def _release_one(name):
-    """Release and drop a single stored device BEFORE a re-init reclaims its line/bus.
+    """Release and drop a single stored device BEFORE a re-init reclaims its line/bus/port.
     Without this, re-initializing a persistent device (the per-card Reinit button, or a
-    second Init Devices without a pi_api restart) leaves the old instance still holding the
-    GPIO line — the new claim then fails 'GPIO busy' (lgpio, exclusive) or silently orphans
-    the old handle/thread (I2C). Mirrors release_devices' stop_stream()->close() order."""
+    second Init Devices without a pi_api restart) leaves the old instance still holding its
+    resource (GPIO line, I2C handle, serial port, capture subprocess). Mirrors
+    release_devices' stop_stream()->close() order."""
     with _devices_lock:
         dev = _devices.pop(name, None)
         if dev is not None:
@@ -336,674 +363,124 @@ def _release_one(name):
                 pass
 
 
-@app.route("/api/generate_stims", methods=["POST"])
-def generate_stims():
-    """Leader only. Generate stimuli from task config + warp map."""
+# ── Generic device endpoints ──
+
+
+@app.route("/api/init_device", methods=["POST"])
+def init_device():
+    """Initialize (or re-initialize) one device from its rig-yaml config.
+    Body: {name, type, config}. The device class comes from devices/<type>.py."""
+    data = request.json or {}
+    name = data.get("name")
+    dev_type = data.get("type", name)
+    config = data.get("config", {}) or {}
+    if not name:
+        return jsonify({"ok": False, "error": "missing device name"}), 400
+    with _devices_lock:
+        existing = _devices.get(name)
+    if existing is not None and _is_session_recording(existing):
+        return jsonify({"ok": False,
+                        "error": "Session recording in progress; not re-initialized"}), 409
     try:
-        data = request.json
-        task_path = data.get("task_config")
-        session_id = data.get("session_id")
-
-        # Load task config (path is relative to ~/rig/)
-        import yaml
-        full_path = RIG_DIR / task_path
-        with open(full_path) as f:
-            task_config = yaml.safe_load(f)
-
-        # Load warp map if available and apply_warp is enabled
-        import numpy as np
-        warp_map = None
-        apply_warp = data.get("apply_warp", False)
-        warp_warning = None
-        if apply_warp:
-            warp_path = Path.home() / "rig" / "calibration" / "warp_map.npz"
-            if warp_path.exists():
-                warp_map = np.load(str(warp_path))
-            else:
-                warp_warning = f"apply_warp=True but warp_map.npz not found at {warp_path}. Using centered fallback."
-
-        # Import and run generator
-        sys.path.insert(0, str(RIG_DIR))
-        from shared.stim_generator import generate_stimuli
-
-        subj, subj_date, _ = _parse_session_id(session_id)
-        if subj:
-            stim_dir = DATA_DIR / subj / subj_date / session_id
-        else:
-            stim_dir = DATA_DIR / session_id
-        stim_dir.mkdir(parents=True, exist_ok=True)
-        contrast_metric = data.get("contrast_metric", "weber")
-        arrays = generate_stimuli(task_config, warp_map, str(stim_dir),
-                                  contrast_metric=contrast_metric)
-
-        result = {
-            "ok": True,
-            "n_trials": int(arrays["n_trials"][0]),
-            "npz_path": str((stim_dir / "stimuli.npz").relative_to(Path.home())),
-        }
-        if warp_warning:
-            result["warning"] = warp_warning
-        return jsonify(result)
+        cls = _load_device_class(dev_type)
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/push_stims", methods=["POST"])
-def push_stims():
-    """Leader only. Upload stim NPZ to a Follower Pi."""
-    data = request.json
-    follower_ip = data["follower_ip"]
-    session_id = data["session_id"]
-    api_port = data.get("api_port", 5080)
-
-    subj, subj_date, _ = _parse_session_id(session_id)
-    if subj:
-        npz_path = DATA_DIR / subj / subj_date / session_id / "stimuli.npz"
-    else:
-        npz_path = DATA_DIR / session_id / "stimuli.npz"
-    if not npz_path.exists():
-        return jsonify({"ok": False, "error": "Stim NPZ not found"}), 404
-
-    # Upload to follower via its REST API
-    import requests as req
-    with open(npz_path, "rb") as f:
-        r = req.post(f"http://{follower_ip}:{api_port}/api/upload",
-                     files={"file": f},
-                     data={"path": f"stims/{session_id}/stimuli.npz"},
-                     timeout=10)
-    return jsonify({"ok": True, "follower_response": r.json()})
-
-
-@app.route("/api/calibrate", methods=["POST"])
-def calibrate():
-    """Run device calibration. Returns calibration data."""
-    data = request.json
-    device_name = data.get("device")
-    params = data.get("params", {})
-
-    # Import device classes
-    sys.path.insert(0, str(RIG_DIR))
-    from devices.base import DEVICE_REGISTRY
-
-    if device_name not in DEVICE_REGISTRY:
-        return jsonify({"ok": False, "error": f"Unknown device: {device_name}"}), 400
-
-    # For reward calibration, use the calibration module
-    if device_name == "reward":
-        from devices.reward_calibration import run_calibration
-        from devices.base import DEVICE_REGISTRY
-        cls = DEVICE_REGISTRY["reward"]
+        return jsonify({"ok": False, "error": f"unknown device type '{dev_type}': {e}"}), 400
+    _release_one(name)   # free any prior instance so this (re)init can re-claim its resource
+    try:
         dev = cls()
-        # Load rig config for pin setup
-        rig_path = RIG_DIR / "rigs" / "cheese.yaml"
-        if rig_path.exists():
-            import yaml
-            with open(rig_path) as f:
-                rig = yaml.safe_load(f)
-            dev_config = rig["devices"].get("reward", {})
-            dev.init(rig_config=dev_config, task_params={})
-        results = run_calibration(dev, **params)
-        dev.close()
-        return jsonify({"ok": True, "results": results})
-
-    return jsonify({"ok": False, "error": "Calibration not implemented for this device"}), 400
-
-
-# ── Device control endpoints ──
-
-
-def _ensure_rig_path():
-    sys.path.insert(0, str(RIG_DIR))
-
-
-# ── Setup-time display worker (out-of-process) ──────────────────────────────────
-# pygame/SDL is NOT run inside pi_api: a crash there would take the whole management API down. The
-# follower's setup-time display therefore runs as a separate subprocess (engine/display_worker.py)
-# that we spawn/kill/respawn — exactly like /api/start spawns follower.py for a session — and talk
-# to over a localhost-only UDP socket. _display_command() keeps its old (cmd, timeout) signature so
-# the display endpoints below are unchanged.
-_DISPLAY_WORKER_PORT = 5578
-_DISPLAY_ADDR = ("127.0.0.1", _DISPLAY_WORKER_PORT)
-_display_worker: subprocess.Popen | None = None
-_display_worker_log: list[str] = []
-_display_worker_lock = threading.Lock()   # one outstanding request at a time (no result desync)
-_display_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-_display_sock.settimeout(0.5)
-_display_req_id = itertools.count(1)
-
-
-def _display_worker_alive() -> bool:
-    return _display_worker is not None and _display_worker.poll() is None
-
-
-def _ping_display_worker() -> bool:
-    """One ping/pong round-trip (the worker's receiver answers even during a blocking sync test)."""
-    try:
-        rid = next(_display_req_id)
-        _display_sock.sendto(json.dumps({"id": rid, "action": "ping"}).encode(), _DISPLAY_ADDR)
-        deadline = time.monotonic() + 0.5
-        while time.monotonic() < deadline:
-            try:
-                data, _ = _display_sock.recvfrom(65535)
-            except (socket.timeout, OSError):
-                break
-            try:
-                r = json.loads(data.decode())
-            except Exception:
-                continue
-            if r.get("id") == rid and r.get("pong"):
-                return True
-    except OSError:
-        pass
-    return False
-
-
-def _spawn_display_worker() -> None:
-    """Start engine/display_worker.py as a child, mirroring /api/start's follower launch."""
-    global _display_worker, _display_worker_log
-    # reap any orphan from a prior pi_api crash that could still hold :0 / the UDP port
-    subprocess.run(["pkill", "-f", "engine/display_worker.py"], capture_output=True, check=False)
-    time.sleep(0.1)
-    python = str(Path.home() / "miniforge3" / "envs" / "rig" / "bin" / "python")
-    cmd = [python, str(RIG_DIR / "engine" / "display_worker.py"),
-           "--port", str(_DISPLAY_WORKER_PORT)]
-    env = os.environ.copy()
-    env.setdefault("DISPLAY", ":0")
-    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-    _display_worker_log = []
-    _display_worker = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                       text=True, bufsize=1, env=env)
-
-    def _read():
-        for line in _display_worker.stdout:
-            _display_worker_log.append(line.rstrip())
-            if len(_display_worker_log) > 200:
-                _display_worker_log.pop(0)
-    threading.Thread(target=_read, daemon=True).start()
-    # bounded wait for the worker to bind + answer, so a bad :0/bind surfaces now, not later
-    for _ in range(40):    # ~4 s
-        if not _display_worker_alive():
-            return
-        if _ping_display_worker():
-            return
-        time.sleep(0.1)
-
-
-def _ensure_display_worker() -> bool:
-    if _display_worker_alive():
-        return True
-    _spawn_display_worker()
-    return _display_worker_alive()
-
-
-def _kill_display_worker() -> None:
-    """Terminate the worker so it releases pygame/:0 for follower.py — process death, not just a
-    quit() on a lingering thread. The worker's SIGTERM handler runs pygame.quit() first."""
-    global _display_worker
-    if _display_worker is not None:
-        try:
-            _display_worker.terminate()
-            _display_worker.wait(timeout=2)
-        except Exception:
-            try:
-                _display_worker.kill()
-            except Exception:
-                pass
-    _display_worker = None
-
-
-def _stop_sync_worker() -> None:
-    """Fire-and-forget: unblock a running sync-test flash loop (out-of-band, like the old Event)."""
-    if _display_worker_alive():
-        try:
-            _display_sock.sendto(
-                json.dumps({"id": next(_display_req_id), "action": "stop_sync"}).encode(),
-                _DISPLAY_ADDR)
-        except OSError:
-            pass
-
-
-def _display_command(cmd: dict, timeout: float = 10.0) -> dict:
-    """Send one command to the display worker and wait for its reply. Same signature as the old
-    in-process version, so the display endpoints are unchanged. Spawns the worker on 'init'; for
-    other actions when the worker is down, returns the same messages the old thread did."""
-    action = cmd.get("action")
-    with _display_worker_lock:
-        if action == "init":
-            _ensure_display_worker()
-        if not _display_worker_alive():
-            if action == "shutdown":
-                return {"ok": True}                                  # already released
-            if action == "reload_warp":
-                return {"ok": True, "reloaded": False, "message": "display not active"}
-            return {"ok": False, "error": "Display not initialized"}
-        rid = next(_display_req_id)
-        payload = dict(cmd)
-        payload["id"] = rid
-        try:
-            _display_sock.sendto(json.dumps(payload).encode(), _DISPLAY_ADDR)
-        except OSError as e:
-            return {"ok": False, "error": f"display worker unreachable: {e}", "worker_down": True}
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not _display_worker_alive():
-                break
-            try:
-                data, _ = _display_sock.recvfrom(65535)
-            except socket.timeout:
-                continue
-            except OSError:
-                break
-            try:
-                r = json.loads(data.decode())
-            except Exception:
-                continue
-            if r.get("id") == rid:                                   # drain any stale reply
-                return r
-        _kill_display_worker()                                       # clean respawn next time
-        return {"ok": False, "error": "display worker crashed; restarting", "worker_down": True}
-
-
-@app.route("/api/init_projector", methods=["POST"])
-def init_projector():
-    """Run start_projector.sh (GPIO ALT2, DLPC3436 init, X11)."""
-    script = RIG_DIR / "start_projector.sh"
-    if not script.exists():
-        return jsonify({"ok": False, "error": "start_projector.sh not found"}), 404
-    try:
-        r = subprocess.run(
-            ["bash", str(script)],
-            capture_output=True, text=True, timeout=30)
-        if r.returncode == 0:
-            return jsonify({"ok": True, "message": "Projector initialized"})
-        else:
-            detail = (r.stderr.strip() or r.stdout.strip() or
-                      f"start_projector.sh exited with code {r.returncode}")
-            return jsonify({
-                "ok": False,
-                "error": f"Projector failed to initialize: {detail[-200:]}",
-            }), 500
-    except subprocess.TimeoutExpired:
-        return jsonify({"ok": False, "error": "Timeout (30s)"}), 504
-
-
-@app.route("/api/init_display", methods=["POST"])
-def init_display():
-    """Initialize pygame display via dedicated thread."""
-    data = request.json or {}
-    rig_cfg = data.get("rig_config", {"resolution": [1920, 1080]})
-    result = _display_command({"action": "init", "rig_config": rig_cfg}, timeout=25)
-    code = 200 if result.get("ok") else 500
-    return jsonify(result), code
-
-
-@app.route("/api/blank_display", methods=["POST"])
-def blank_display():
-    """Blank display with given gray value."""
-    data = request.json or {}
-    gray = data.get("gray_value", 0.0)
-    result = _display_command({"action": "blank", "gray_value": gray})
-    code = 200 if result.get("ok") else 500
-    return jsonify(result), code
-
-
-@app.route("/api/test_checkers", methods=["POST"])
-def test_checkers():
-    """Show checkerboard pattern on display."""
-    data = request.json or {}
-    result = _display_command({"action": "checkers", "apply_warp": data.get("apply_warp", True)})
-    code = 200 if result.get("ok") else 500
-    return jsonify(result), code
-
-
-@app.route("/api/test_stimulus", methods=["POST"])
-def test_stimulus():
-    """Draw one test patch (square/circle) at az/alt with a contrast on the given bg.
-    Contrast arrives in the rig's active metric; convert it to the normalized render
-    fraction (same mapping generation uses) so the value matches the experiment card."""
-    data = request.json or {}
-    bg = float(data.get("bg_gray", 0.0))
-    contrast = float(data.get("contrast", 0.5))
-    metric = data.get("contrast_metric", "weber")
-    try:
-        _ensure_rig_path()
-        from shared.stim_generator import metric_to_fraction
-        frac = float(metric_to_fraction(contrast, bg, metric))
-    except Exception:
-        frac = contrast   # fall back to raw fraction if the converter isn't importable
-    frac = max(0.0, min(1.0, frac))
-    result = _display_command({
-        "action": "stimulus",
-        "az_deg": float(data.get("az_deg", 0.0)),
-        "alt_deg": float(data.get("alt_deg", 0.0)),
-        "size_deg": float(data.get("size_deg", 8.0)),
-        "corr_contrast": frac,
-        "bg_gray": bg,
-        "shape": data.get("shape", "square"),
-        # Intensity-cal measurement sends apply_lum:false to render RAW drive (so the meter reads
-        # the uncorrected delivered luminance the correction is fit from). Normal tests correct.
-        "apply_lum": bool(data.get("apply_lum", True)),
-    })
-    code = 200 if result.get("ok") else 500
-    return jsonify(result), code
-
-
-@app.route("/api/reload_warp", methods=["POST"])
-def reload_warp():
-    """Re-read warp_map.npz into the already-running display (after Generate Warp), without
-    a full re-init. Returns reloaded=False (still ok) if the display thread isn't active —
-    it will pick up the new warp on the next init_display."""
-    result = _display_command({"action": "reload_warp"})
-    code = 200 if result.get("ok") else 500
-    return jsonify(result), code
-
-
-@app.route("/api/shutdown_display", methods=["POST"])
-def shutdown_display():
-    """Shut down the setup display worker (release pygame/:0 for follower.py). Killing the process
-    is what guarantees the SDL/X grab on :0 is released; its SIGTERM handler quits pygame first."""
-    with _display_worker_lock:
-        _kill_display_worker()
-    return jsonify({"ok": True})
-
-
-@app.route("/api/init_lick", methods=["POST"])
-def init_lick():
-    """Initialize lick sensor (MPR121 I2C)."""
-    _ensure_rig_path()
-    from devices.lick_sensor import LickSensor
-    data = request.json or {}
-    rig_cfg = {
-        "i2c_address": data.get("i2c_address", "0x5A"),
-        "electrode": data.get("electrode", 4),
-        "i2c_bus": data.get("i2c_bus", 1),
-    }
-    _release_one("lick_sensor")   # free any prior instance so this (re)init can re-claim the bus
-    try:
-        dev = LickSensor()
-        dev.init(rig_config=rig_cfg, task_params={})
+        dev.init(rig_config=config, task_params={})
+        if dev.needs_calibration and "calibration" in config:
+            dev.load_calibration(config["calibration"])
         with _devices_lock:
-            _devices["lick_sensor"] = dev
+            _devices[name] = dev
         check = dev.check()
-        return jsonify({"ok": True, "message": check.get("message", "OK")})
+        ok = bool(check.get("ok", True))
+        body = {"ok": ok, "message": check.get("message", "OK")}
+        if not ok:
+            body["error"] = check.get("message", "check failed")
+        return jsonify(body), (200 if ok else 500)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-@app.route("/api/monitor_lick", methods=["POST"])
-def monitor_lick():
-    """Start lick monitoring (polling + event collection)."""
-    global _lick_events
+@app.route("/api/monitor_device", methods=["POST"])
+def monitor_device():
+    """Start a device's live stream into a per-name buffer (setup-UI monitor)."""
+    name = (request.json or {}).get("name")
     with _devices_lock:
-        dev = _devices.get("lick_sensor")
+        dev = _devices.get(name)
     if not dev:
-        return jsonify({"ok": False, "error": "Lick sensor not initialized"}), 400
-    _lick_events = []
+        return jsonify({"ok": False, "error": f"{name} not initialized"}), 400
+    buf = _monitor_events[name] = []
 
-    def on_lick(evt):
-        _lick_events.append(evt)
-        # Keep last 30 seconds (~6000 events max at 200Hz)
-        if len(_lick_events) > 6000:
-            _lick_events.pop(0)
+    def on_event(evt):
+        buf.append(evt)
+        if len(buf) > 3000:
+            del buf[:len(buf) - 3000]
 
-    dev.start_stream(on_lick)
+    dev.start_stream(on_event)
     return jsonify({"ok": True})
 
 
-@app.route("/api/stop_monitor_lick", methods=["POST"])
-def stop_monitor_lick():
-    """Stop lick monitoring."""
+@app.route("/api/stop_monitor_device", methods=["POST"])
+def stop_monitor_device():
+    """Stop a device's live-monitor stream."""
+    name = (request.json or {}).get("name")
     with _devices_lock:
-        dev = _devices.get("lick_sensor")
+        dev = _devices.get(name)
     if dev:
         dev.stop_stream()
     return jsonify({"ok": True})
 
 
-@app.route("/api/lick_data")
-def lick_data():
-    """Return collected lick events (polled by UI)."""
-    return jsonify({"events": _lick_events})
+@app.route("/api/device_data")
+def device_data():
+    """Return-and-clear a device's buffered monitor events (polled by the setup UI)."""
+    name = request.args.get("name", "")
+    buf = _monitor_events.get(name, [])
+    _monitor_events[name] = []
+    return jsonify({"events": buf})
 
 
-@app.route("/api/init_encoder", methods=["POST"])
-def init_encoder():
-    """Initialize the running-wheel encoder (AS5600 magnetic angle sensor, I2C)."""
-    _ensure_rig_path()
-    from devices.encoder import Encoder
-    data = request.json or {}
-    rig_cfg = {
-        "i2c_address": data.get("i2c_address", "0x36"),
-        "i2c_bus": data.get("i2c_bus", 1),
-        "wheel_diameter_cm": data.get("wheel_diameter_cm", 15.0),
-        "sample_hz": data.get("sample_hz", 100),
-    }
-    _release_one("encoder")   # free any prior instance so this (re)init can re-claim the bus
-    try:
-        dev = Encoder()
-        dev.init(rig_config=rig_cfg, task_params={})
-        with _devices_lock:
-            _devices["encoder"] = dev
-        check = dev.check()
-        return jsonify({"ok": True, "message": check.get("message", "OK")})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/monitor_encoder", methods=["POST"])
-def monitor_encoder():
-    """Start running-wheel monitoring (setup-UI live speed view)."""
-    global _encoder_events
-    with _devices_lock:
-        dev = _devices.get("encoder")
-    if not dev:
-        return jsonify({"ok": False, "error": "Encoder not initialized"}), 400
-    _encoder_events = []
-
-    def on_run(evt):
-        _encoder_events.append(evt)
-        if len(_encoder_events) > 3000:
-            _encoder_events.pop(0)
-
-    dev.start_stream(on_run)
-    return jsonify({"ok": True})
-
-
-@app.route("/api/stop_monitor_encoder", methods=["POST"])
-def stop_monitor_encoder():
-    """Stop running-wheel monitoring."""
-    with _devices_lock:
-        dev = _devices.get("encoder")
-    if dev:
-        dev.stop_stream()
-    return jsonify({"ok": True})
-
-
-@app.route("/api/encoder_data")
-def encoder_data():
-    """Return collected running-wheel samples (polled by the setup UI)."""
-    return jsonify({"events": _encoder_events})
-
-
-@app.route("/api/init_camera", methods=["POST"])
-def init_camera():
-    """Check if a camera is detected."""
-    _ensure_rig_path()
-    from devices.camera import Camera
-    try:
-        dev = Camera()
-        check = dev.check()
-        if check.get("ok"):
-            return jsonify({"ok": True, "message": check.get("message", "OK")})
-        else:
-            return jsonify({"ok": False, "error": check.get("message", "No camera")}), 500
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/init_reward", methods=["POST"])
-def init_reward():
-    """Initialize reward: claim/verify GPIO pins via lgpio."""
-    data = request.json or {}
-    pins = data.get("pins", {"main": {"gpio": 18}})
-    try:
-        import lgpio
-        chip = lgpio.gpiochip_open(0)   # 40-pin header = gpiochip0 on Pi 5 (current OS) and Pi 4
-        try:
-            results = []
-            for name, pin_cfg in pins.items():
-                gpio = pin_cfg.get("gpio", 18)
-                lgpio.gpio_claim_output(chip, gpio, 0)   # claim output, drive low
-                lgpio.gpio_read(chip, gpio)
-                results.append(f"{name}(GPIO{gpio})=OK")
-        finally:
-            lgpio.gpiochip_close(chip)   # release the handle even if a claim raised
-        return jsonify({"ok": True, "message": ", ".join(results)})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/init_photodiode", methods=["POST"])
-def init_photodiode():
-    """Initialize the photodiode (leader) and run the UNIVERSAL sync verify: flash the FOLLOWER's
-    display ~1 s while sampling GPIO pulses + the Teensy V stream, and fail init if the pulses aren't
-    detected (±1) or V is out of range. The setup orchestrator passes `follower_ip` so we can POST
-    the flash; without it (or with verify disabled) we skip the flash half and just report the level."""
-    _ensure_rig_path()
-    from devices.photodiode import Photodiode
-    data = request.json or {}
-    _release_one("photodiode")   # free the old line so this (re)init can re-claim it (lgpio is exclusive)
-    try:
-        # Pass through everything the device needs (gpio + the new serial/V/verify fields). The
-        # legacy glitch/debounce keys are ignored by the lgpio device, so they're dropped.
-        rig_cfg = {k: data[k] for k in (
-            "gpio", "gpiochip", "pulse_every_n_frames", "serial_port",
-            "v_high", "v_low", "v_window_s", "v_realert_s",
-            "verify_duration_s", "verify_enabled",
-            "sync_corner", "sync_size_px", "sync_brightness") if k in data}
-        rig_cfg.setdefault("gpio", data.get("gpio", 24))
-        dev = Photodiode()
-        dev.init(rig_config=rig_cfg, task_params={})
-        with _devices_lock:
-            _devices["photodiode"] = dev
-
-        verify = None
-        follower = data.get("follower_ip")
-        if getattr(dev, "verify_enabled", True) and follower:
-            import urllib.request      # stdlib — pi_api's rig env has no `requests`
-            fport = data.get("follower_api_port", 5080)
-            furl = f"http://{follower}:{fport}/api/photodiode_sync_burst"
-
-            def sync_burst(duration_s):
-                body = {"every_n": data.get("pulse_every_n_frames", 5), "duration_s": duration_s}
-                for k in ("sync_corner", "sync_size_px", "sync_brightness"):
-                    if k in data:
-                        body[k] = data[k]
-                payload = json.dumps(body).encode()
-                # WAIT for the follower display to be up before the real flash. A fresh display worker
-                # (or one being respawned after a crash) may not be ready the instant the photodiode
-                # inits, so retry while it reports "not initialized" or is unreachable — instead of
-                # failing on the first miss. A down-display burst returns immediately (no flash), so
-                # retrying is cheap; the actual 1 s flash only runs once the display answers.
-                deadline = time.time() + 10.0
-                last = "no response"
-                while time.time() < deadline:
-                    try:
-                        rq = urllib.request.Request(
-                            furl, data=payload,
-                            headers={"Content-Type": "application/json"}, method="POST")
-                        with urllib.request.urlopen(rq, timeout=duration_s + 10) as resp:
-                            r = json.loads(resp.read().decode())
-                    except Exception as e:                 # display Pi/API not reachable yet
-                        last = str(e)[:80]
-                        time.sleep(1.0)
-                        continue
-                    if r.get("ok"):
-                        return int(r.get("flashes", 0))
-                    last = r.get("error", "display flash failed")
-                    if "not initialized" in last.lower():  # display coming up — wait and retry
-                        time.sleep(1.0)
-                        continue
-                    raise RuntimeError(last)               # a real flash failure, not a readiness issue
-                raise RuntimeError(f"display not ready ({last}) — initialize the display first")
-
-            verify = dev.verify_sync(sync_burst)
-            if not verify.get("ok"):
-                return jsonify({"ok": False, "verify": verify,
-                                "error": (f"Photodiode cannot init: {verify.get('reason')}. "
-                                          "Untick 'Photodiode stim sync' to run without it.")}), 500
-        check = dev.check()
-        return jsonify({"ok": True, "message": check.get("message", "OK"), "verify": verify})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/init_calibration_probe", methods=["POST"])
-def init_calibration_probe():
-    """Initialize the calibration probe: create a persistent GPIO-latch device."""
-    _ensure_rig_path()
-    from devices.calibration_probe import CalibrationProbe
-    data = request.json or {}
-    gpio = data.get("gpio", 22)
-    _release_one("calibration_probe")   # free the old line so this (re)init can re-claim it (lgpio is exclusive)
-    try:
-        dev = CalibrationProbe()
-        dev.init(rig_config={"gpio": gpio}, task_params={})
-        with _devices_lock:
-            _devices["calibration_probe"] = dev
-        check = dev.check()
-        return jsonify({"ok": True, "message": check.get("message", "OK")})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+# ── Camera-like devices (device-name keyed) ──
 
 
 @app.route("/api/camera_preview_start", methods=["POST"])
 def camera_preview_start():
-    """Start camera MJPEG preview (or session recording if session_id given)."""
+    """Start a camera device's MJPEG preview (or session recording if session_id given).
+    Body: {device, type, config, session_id?, video_dir?, downsample?}."""
     data = request.get_json(silent=True) or {}   # tolerate a body-less POST (no 415)
-    # Serialize the whole check→pop→construct so two concurrent starts can't both open a
-    # Picamera2 and hang libcamera.
-    with _camera_lock:
+    name = data.get("device", "camera")
+    dev_type = data.get("type", name)
+    config = data.get("config", {}) or {}
+    # Serialize the whole check→pop→construct per device so two concurrent starts can't
+    # both open the capture pipeline.
+    with _cam_lock(name):
         # Don't restart if already recording (e.g. session recording started by Go)
         with _devices_lock:
-            existing = _devices.get("camera")
-        if existing and existing._recording:
-            return jsonify({"ok": True, "message": "Camera already recording"})
-        # Tear down any stale (non-recording) camera before reopening. Constructing a new
-        # Picamera2 while a previous sensor handle lingers hangs libcamera — this is what froze
-        # the camera on res/fps changes.
+            existing = _devices.get(name)
+        if existing is not None and getattr(existing, "_recording", False):
+            return jsonify({"ok": True, "message": f"{name} already recording"})
+        # Tear down any stale (non-recording) instance before reopening — a lingering
+        # capture handle can block the new open.
         with _devices_lock:
-            stale = _devices.pop("camera", None)
+            stale = _devices.pop(name, None)
         if stale is not None:
             try:
-                stale.close()   # close() settles internally so libcamera releases the sensor
+                stale.close()
             except Exception:
                 pass
-        _ensure_rig_path()
-        from devices.camera import Camera
-        rig_cfg = {
-            "resolution": data.get("resolution", [1280, 720]),
-            "fps": data.get("fps", 50),
-            "bitrate_mbps": data.get("bitrate_mbps", 4),
-            "h264_profile": data.get("h264_profile", "main"),
-            "gop_s": data.get("gop_s", 5.0),
-            "sensor_mode": data.get("sensor_mode"),   # pin FoV/mode (None => legacy auto-select)
-            "bit_depth": data.get("bit_depth"),       # pin raw depth (None => picamera2 default 12)
-            "auto_exposure": data.get("auto_exposure", True),
-            "exposure_ms": data.get("exposure_ms", 10),
-            "gain": data.get("gain", 1.0),
-            "live_preset": data.get("live_preset", "med"),
-        }
-        # A real session_id records to disk; "preview"/none is a setup-UI live view — no file, and
-        # a faithful full-fps preview (start_preview runs with no encoder to starve).
+        try:
+            cls = _load_device_class(dev_type)
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"unknown device type '{dev_type}': {e}"}), 400
+        # A real session_id records to disk; "preview"/none is a setup-UI live view — no file.
         session_id = data.get("session_id")
         recording = bool(session_id and session_id != "preview")
         dev = None
         try:
-            dev = Camera()
-            dev.init(rig_config=rig_cfg, task_params={})
+            dev = cls()
+            dev.init(rig_config=config, task_params={})
             if recording:
                 video_dir = data.get("video_dir", "/media/vruser/ssd/video")
                 _EXTRA_DOWNLOAD_DIRS.add(Path(video_dir))   # transfer may pull from here
@@ -1013,7 +490,7 @@ def camera_preview_start():
             else:
                 dev.start_preview(downsample=bool(data.get("downsample", False)))
             with _devices_lock:
-                _devices["camera"] = dev
+                _devices[name] = dev
             return jsonify({"ok": True})
         except Exception as e:
             # Never leave a half-opened camera outside _devices — it would hang the next open.
@@ -1027,51 +504,57 @@ def camera_preview_start():
 
 @app.route("/api/camera_stream")
 def camera_stream():
-    """MJPEG stream from camera."""
+    """MJPEG stream from a camera device (?device=<name>)."""
     from flask import Response
+    name = request.args.get("device", "camera")
     with _devices_lock:
-        dev = _devices.get("camera")
-    if not dev:
-        return jsonify({"ok": False, "error": "Camera not streaming"}), 400
+        dev = _devices.get(name)
+    if not dev or not hasattr(dev, "mjpeg_stream"):
+        return jsonify({"ok": False, "error": f"{name} not streaming"}), 400
     return Response(dev.mjpeg_stream(),
                     mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
 @app.route("/api/camera_preview_stop", methods=["POST"])
 def camera_preview_stop():
-    """Stop camera preview. Refuses to stop an active SESSION recording unless force=True, so a
-    setup-UI Reinit/Stop can't silently truncate a running experiment's video — only the
-    experiment UI's own end-of-session stop passes force=True."""
+    """Stop a camera device's preview. Refuses to stop an active SESSION recording unless
+    force=True, so a setup-UI Reinit/Stop can't silently truncate a running experiment's
+    video — only the experiment UI's own end-of-session stop passes force=True."""
     data = request.get_json(silent=True) or {}   # tolerate a body-less POST (no 415)
+    name = data.get("device", "camera")
     force = bool(data.get("force", False))
-    with _camera_lock:
+    with _cam_lock(name):
         with _devices_lock:
-            dev = _devices.get("camera")
-        if (dev is not None and getattr(dev, "_recording", False)
-                and not getattr(dev, "_is_preview", True) and not force):
+            dev = _devices.get(name)
+        if dev is not None and _is_session_recording(dev) and not force:
             return jsonify({"ok": True,
                             "message": "Session recording in progress; not stopped"})
         with _devices_lock:
-            dev = _devices.pop("camera", None)
+            dev = _devices.pop(name, None)
         if dev:
-            dev.stop_recording()
+            if hasattr(dev, "stop_recording"):
+                dev.stop_recording()
             dev.close()
     return jsonify({"ok": True})
 
 
 @app.route("/api/camera_controls", methods=["POST"])
 def camera_controls():
-    """Apply live exposure/gain to the running camera (setup-UI banding tuning). Serialized with
-    start/stop via _camera_lock so we never set controls on a camera being torn down."""
+    """Apply live exposure/gain to a running camera that supports it (?device=<name> in body).
+    Serialized with start/stop via the device's camera lock."""
     data = request.json or {}
-    with _camera_lock:
+    name = data.get("device", "camera")
+    with _cam_lock(name):
         with _devices_lock:
-            dev = _devices.get("camera")
-        if dev is None or getattr(dev, "_cam", None) is None:
-            return jsonify({"ok": False, "error": "Camera not running"}), 400
-        # Never change exposure/gain mid-experiment: a real session recording must not be mutated
-        # by stale setup-UI tuning (mirrors camera_preview_stop's session guard).
-        if getattr(dev, "_recording", False) and not getattr(dev, "_is_preview", True):
+            dev = _devices.get(name)
+        if dev is None:
+            return jsonify({"ok": False, "error": f"{name} not running"}), 400
+        if not hasattr(dev, "apply_exposure"):
+            return jsonify({"ok": False,
+                            "error": f"{name} has no live exposure controls"}), 400
+        # Never change exposure/gain mid-experiment: a real session recording must not be
+        # mutated by stale setup-UI tuning (mirrors camera_preview_stop's session guard).
+        if _is_session_recording(dev):
             return jsonify({"ok": False,
                             "error": "Session recording in progress; controls locked"}), 409
         try:
@@ -1085,63 +568,15 @@ def camera_controls():
             return jsonify({"ok": False, "error": str(e)}), 500
 
 
-def _find_camera_i2c():
-    """Locate the bound CSI sensor's i2c driver + device node, e.g. ('/sys/.../imx477', '10-001a').
-    Rig-agnostic: scans every imx* driver for a bound device (a symlink named bus-addr). Returns
-    (driver_dir, node) or (None, None)."""
-    import glob
-    for drv in sorted(glob.glob("/sys/bus/i2c/drivers/imx*")):
-        for node in sorted(glob.glob(drv + "/*-*")):   # device nodes are symlinks like 10-001a
-            if os.path.islink(node):
-                return drv, os.path.basename(node)
-    return None, None
-
-
-@app.route("/api/camera_reset", methods=["POST"])
-def camera_reset():
-    """Recover a wedged CSI camera by rebinding its i2c sensor driver — the escalation when a soft
-    reinit can't clear a libcamera hang (capture stuck mid-frame). Closes any open Picamera2 first
-    (under _camera_lock), then unbind+bind the sensor node so the next open re-probes a clean
-    sensor. Needs root to write bind/unbind; pi_api runs as vruser with passwordless sudo. Refuses
-    while a real session recording is live so a stray click can't kill an experiment's video."""
-    with _camera_lock:
-        with _devices_lock:
-            dev = _devices.get("camera")
-        if (dev is not None and getattr(dev, "_recording", False)
-                and not getattr(dev, "_is_preview", True)):
-            return jsonify({"ok": False,
-                            "error": "Session recording in progress; not reset"}), 409
-        with _devices_lock:
-            dev = _devices.pop("camera", None)
-        if dev is not None:
-            try:
-                dev.close()   # settles internally so libcamera releases (or tries to) before unbind
-            except Exception:
-                pass
-        drv, node = _find_camera_i2c()
-        if not node:
-            return jsonify({"ok": False, "error": "no bound imx camera i2c node found"}), 500
-        try:
-            subprocess.run(["sudo", "sh", "-c", f"echo {node} > {drv}/unbind"],
-                           check=True, capture_output=True, text=True, timeout=10)
-            time.sleep(0.5)
-            subprocess.run(["sudo", "sh", "-c", f"echo {node} > {drv}/bind"],
-                           check=True, capture_output=True, text=True, timeout=10)
-            time.sleep(1.0)   # let the sensor re-probe before the next Picamera2() open
-        except subprocess.CalledProcessError as e:
-            return jsonify({"ok": False,
-                            "error": (e.stderr or str(e)).strip()}), 500
-        except Exception as e:
-            return jsonify({"ok": False, "error": str(e)}), 500
-        return jsonify({"ok": True, "driver": os.path.basename(drv), "node": node})
+# ── Shepherd (health monitor) ──
 
 
 @app.route("/api/shepherd", methods=["POST"])
 def shepherd_control():
     """Start or stop the shepherd health-monitor service live, so the setup-UI Monitor toggle takes
     effect immediately without a reinstall. enabled=true -> enable+start; false -> stop+disable.
-    Needs root to drive systemd; pi_api runs as vruser with passwordless sudo (same as camera_reset).
-    Idempotent, and a no-op-safe if the unit was never installed (reports that instead of erroring)."""
+    Needs root to drive systemd; pi_api runs with passwordless sudo.
+    Idempotent, and no-op-safe if the unit was never installed (reports that instead of erroring)."""
     enabled = bool((request.json or {}).get("enabled", True))
     # unit presence check first, so an un-installed shepherd gives a clear message, not a systemd error
     present = subprocess.run(["systemctl", "list-unit-files", "shepherd.service"],
@@ -1214,248 +649,6 @@ def shepherd_logs_cleanup():
         except OSError:
             pass
     return jsonify({"ok": True, "deleted": deleted, "kept": kept, "days": days})
-
-
-@app.route("/api/monitor_photodiode", methods=["POST"])
-def monitor_photodiode():
-    """Start photodiode pulse monitoring (rising edge detection)."""
-    global _photodiode_events
-    _ensure_rig_path()
-    from devices.photodiode import Photodiode
-
-    data = request.json or {}
-    gpio = data.get("gpio", 24)
-
-    # Create persistent device if not already initialized
-    with _devices_lock:
-        dev = _devices.get("photodiode")
-    if not dev:
-        try:
-            dev = Photodiode()
-            dev.init(rig_config={
-                "gpio": gpio,
-                "glitch_enabled": data.get("glitch_enabled", True),
-                "glitch_ms": data.get("glitch_ms", 0.5),
-                "debounce_enabled": data.get("debounce_enabled", True),
-                "debounce_ms": data.get("debounce_ms", 5),
-            }, task_params={})
-            with _devices_lock:
-                _devices["photodiode"] = dev
-        except Exception as e:
-            return jsonify({"ok": False, "error": str(e)}), 500
-    else:
-        # Reusing an already-inited device: a prior raw scope may have left the daemon glitch
-        # filter at 0. Re-assert the configured steady filter so the detected monitor is correct.
-        try:
-            dev._pi.set_glitch_filter(dev.gpio, getattr(dev, "_glitch_us", 0))
-        except Exception:
-            pass
-
-    _photodiode_events = []
-
-    def on_pulse(evt):
-        _photodiode_events.append(evt)
-        if len(_photodiode_events) > 6000:
-            _photodiode_events.pop(0)
-
-    dev.start_stream(on_pulse)
-    return jsonify({"ok": True})
-
-
-@app.route("/api/stop_monitor_photodiode", methods=["POST"])
-def stop_monitor_photodiode():
-    """Stop photodiode pulse monitoring."""
-    with _devices_lock:
-        dev = _devices.get("photodiode")
-    if dev:
-        dev.stop_stream()
-    return jsonify({"ok": True})
-
-
-@app.route("/api/probe_on", methods=["POST"])
-def probe_on():
-    """Latch the calibration probe GPIO HIGH."""
-    with _devices_lock:
-        dev = _devices.get("calibration_probe")
-    if dev is None:
-        return jsonify({"ok": False, "error": "calibration probe not initialized"}), 400
-    dev.set_state(True)
-    return jsonify({"ok": True, "high": True})
-
-
-@app.route("/api/probe_off", methods=["POST"])
-def probe_off():
-    """Latch the calibration probe GPIO LOW."""
-    with _devices_lock:
-        dev = _devices.get("calibration_probe")
-    if dev is None:
-        return jsonify({"ok": False, "error": "calibration probe not initialized"}), 400
-    dev.set_state(False)
-    return jsonify({"ok": True, "high": False})
-
-
-@app.route("/api/photodiode_data")
-def photodiode_data():
-    """Return collected photodiode pulse events (polled by UI)."""
-    return jsonify({"events": _photodiode_events})
-
-
-@app.route("/api/photodiode_raw_start", methods=["POST"])
-def photodiode_raw_start():
-    """Start RAW transition capture (both edges, glitch filter OFF) for the setup-UI diagnostic
-    scope. Reuses the initialized photodiode device; lazily inits from the posted config if needed."""
-    global _photodiode_raw
-    _ensure_rig_path()
-    data = request.json or {}
-    with _devices_lock:
-        dev = _devices.get("photodiode")
-    if not dev:
-        from devices.photodiode import Photodiode
-        try:
-            dev = Photodiode()
-            dev.init(rig_config={
-                "gpio": data.get("gpio", 24),
-                "glitch_enabled": data.get("glitch_enabled", True),
-                "glitch_ms": data.get("glitch_ms", 0.5),
-                "debounce_enabled": data.get("debounce_enabled", True),
-                "debounce_ms": data.get("debounce_ms", 5),
-            }, task_params={})
-            with _devices_lock:
-                _devices["photodiode"] = dev
-        except Exception as e:
-            return jsonify({"ok": False, "error": str(e)}), 500
-    _photodiode_raw = []
-
-    def on_tr(evt):
-        _photodiode_raw.append(evt)
-        if len(_photodiode_raw) > 20000:      # cap: keep the most recent transitions
-            del _photodiode_raw[:len(_photodiode_raw) - 20000]
-
-    try:
-        dev.start_raw_capture(on_tr)
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-    return jsonify({"ok": True})
-
-
-@app.route("/api/photodiode_raw_data")
-def photodiode_raw_data():
-    """Return-and-clear raw transitions buffered since the last poll (the scope accumulates them
-    client-side into a rolling window)."""
-    global _photodiode_raw
-    buf = _photodiode_raw
-    _photodiode_raw = []
-    return jsonify({"ok": True, "transitions": buf})
-
-
-@app.route("/api/photodiode_v")
-def photodiode_v():
-    """Live photodiode VOLTAGE (from the Teensy USB serial stream) for the setup-UI card readout.
-    available=False if the photodiode isn't initialized or has no serial (pyserial/Teensy absent)."""
-    with _devices_lock:
-        dev = _devices.get("photodiode")
-    if dev is None or not hasattr(dev, "get_v_status"):
-        return jsonify({"available": False})
-    try:
-        return jsonify(dev.get_v_status())
-    except Exception as e:
-        return jsonify({"available": False, "error": str(e)[:120]})
-
-
-@app.route("/api/photodiode_raw_stop", methods=["POST"])
-def photodiode_raw_stop():
-    """Stop raw capture and restore the device's configured glitch filter."""
-    with _devices_lock:
-        dev = _devices.get("photodiode")
-    if dev:
-        try:
-            dev.stop_raw_capture()
-        except Exception:
-            pass
-    return jsonify({"ok": True})
-
-
-@app.route("/api/photodiode_test_start", methods=["POST"])
-def photodiode_test_start():
-    """Flash the red photodiode sync square every N frames on THIS Pi's display (the follower),
-    simulating a session's sync pulses so the photodiode/scope can be exercised from the setup UI.
-    Runs in the display worker; stop via /api/photodiode_test_stop. If the display isn't up the
-    worker replies "Display not initialized"."""
-    data = request.json or {}
-    every_n = int(data.get("every_n", 5))
-    _stop_sync_worker()        # unblock any prior flash loop so the worker can accept the new one
-    time.sleep(0.05)
-    cmd = {"action": "sync_test", "every_n": every_n}
-    for k in ("sync_corner", "sync_size_px", "sync_brightness"):   # apply the current controls live, no re-deploy needed
-        if k in data:
-            cmd[k] = data[k]
-    return jsonify(_display_command(cmd, timeout=5))
-
-
-@app.route("/api/photodiode_test_stop", methods=["POST"])
-def photodiode_test_stop():
-    """Stop the sync-square flash test (out-of-band stop_sync to the display worker)."""
-    _stop_sync_worker()
-    return jsonify({"ok": True})
-
-
-@app.route("/api/photodiode_sync_burst", methods=["POST"])
-def photodiode_sync_burst():
-    """Follower: run a BOUNDED red-sync flash burst on the display for the leader's photodiode init
-    verify, and return how many flashes it actually emitted. Blocks ~duration_s (the worker runs the
-    burst to completion, then replies with the count) — unlike the ack-first interactive test."""
-    data = request.json or {}
-    dur = float(data.get("duration_s", 1.0))
-    cmd = {"action": "sync_burst", "every_n": int(data.get("every_n", 5)), "duration_s": dur}
-    for k in ("sync_corner", "sync_size_px", "sync_brightness"):
-        if k in data:
-            cmd[k] = data[k]
-    return jsonify(_display_command(cmd, timeout=dur + 5))
-
-
-@app.route("/api/deliver_reward", methods=["POST"])
-def deliver_reward():
-    """Deliver a single reward pulse and log the event."""
-    data = request.json or {}
-    duration_ms = data.get("duration_ms", 10)
-    gpio = data.get("gpio", 18)
-    try:
-        import lgpio
-        import time
-        import threading
-        chip = lgpio.gpiochip_open(0)   # 40-pin header = gpiochip0 on Pi 5 (current OS) and Pi 4
-        lgpio.gpio_claim_output(chip, gpio, 0)
-
-        t_fire = time.time()
-        _reward_events.append({"event": "reward", "t": t_fire, "duration_ms": duration_ms})
-        if len(_reward_events) > 6000:
-            _reward_events.pop(0)
-
-        def pulse():
-            try:
-                lgpio.gpio_write(chip, gpio, 1)
-                time.sleep(duration_ms / 1000.0)
-            finally:
-                # always close the valve + release the gpiochip, even if a write/sleep raised
-                try:
-                    lgpio.gpio_write(chip, gpio, 0)
-                except Exception:
-                    pass
-                try:
-                    lgpio.gpiochip_close(chip)
-                except Exception:
-                    pass
-
-        threading.Thread(target=pulse, daemon=True).start()
-        return jsonify({"ok": True, "duration_ms": duration_ms, "gpio": gpio})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/reward_data")
-def reward_data():
-    """Return collected reward pulse events (polled by UI)."""
-    return jsonify({"events": _reward_events})
 
 
 # ── Main ──

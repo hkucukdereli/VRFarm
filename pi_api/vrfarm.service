@@ -1,11 +1,14 @@
+# Rendered at Install time by setup/app.py: {{USER}} / {{HOME}} are replaced with the
+# Pi's actual user (rig yaml pis[].user) before the unit is copied over. To install by
+# hand, substitute them yourself first.
 [Unit]
 Description=VRFarm Pi API
 After=network.target
 
 [Service]
-User=vruser
-WorkingDirectory=/home/vruser/rig
-ExecStart=/home/vruser/miniforge3/envs/rig/bin/python pi_api/api.py
+User={{USER}}
+WorkingDirectory={{HOME}}/rig
+ExecStart={{HOME}}/miniforge3/envs/rig/bin/python pi_api/api.py
 Restart=always
 RestartSec=3
 TimeoutStopSec=5

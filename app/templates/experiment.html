@@ -62,6 +62,13 @@
   .video-box img { max-width: 100%; max-height: 480px; display: block; }
   .video-box .placeholder { color: #444; font-size: 12px; }
 
+  /* IMU strip */
+  .strip-panel { background: #16213e; border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
+  .strip-header { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; }
+  .strip-header h3 { margin: 0; font-size: 11px; letter-spacing: 0.5px; color: #aaa; }
+  .strip-header .info { font-size: 11px; color: #888; font-family: monospace; }
+  .strip-canvas { width: 100%; height: 60px; display: block; background: #0a0a1a; }
+
   /* Trial table */
   .trial-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
   .trial-table th { text-align: left; padding: 4px 6px; color: #888; border-bottom: 1px solid #333; }
@@ -213,6 +220,15 @@
     <!-- Video devices (one box per rig device with video: true) -->
     <div class="video-row" id="video-panels" style="display:none;"></div>
 
+    <!-- IMU strip (unhides on the first imu event; data flows during a session) -->
+    <div class="strip-panel" id="panel-imu" style="display:none;">
+      <div class="strip-header">
+        <h3>IMU |a| (g)</h3>
+        <span class="info" id="imu-info"></span>
+      </div>
+      <canvas class="strip-canvas" id="canvas-imu"></canvas>
+    </div>
+
     <!-- Trial table -->
     <div class="card" style="margin-top: 10px">
       <h3>Trials</h3>
@@ -251,6 +267,9 @@ let clockInterval = null;
 // Live video state
 let liveOn = false;
 let videoRetries = {};          // per-device <img> retry timers
+
+// IMU stream (from either gyroscope device, session-time)
+let imuEvents = [];             // {t, mag, gx, gy, gz}, last ~30 s at ~15 Hz
 
 // Today's date as yyyymmdd (LOCAL, not UTC — avoids the evening off-by-one). Set once at load;
 // stays editable and is not reset when an experiment is loaded.
@@ -595,6 +614,7 @@ async function startSession() {
   currentTrialTotalS = null;
   currentItiS = null;
   phaseOverride = null;
+  imuEvents = [];
   document.getElementById('trial-tbody').innerHTML = '';
 
   // Per-device save choices (Actions row 2). Unchecked -> not recorded.
@@ -742,6 +762,12 @@ function handleEvent(evt) {
         estRemainingMs = Math.max(0, estRemainingMs - evt.duration_s * 1000);
       }
       break;
+    case 'imu':
+      // Gyroscope stream (throttled ~15 Hz by the device): plot |a| over the last 30 s.
+      imuEvents.push({t: evt.t, mag: evt.mag || 0, gx: evt.gx, gy: evt.gy, gz: evt.gz});
+      if (imuEvents.length > 600) imuEvents.shift();
+      drawImuStrip();
+      break;
     case 'shepherd_alert': {
       // Health alert from the shepherd monitor on a rig Pi. Orange = warning,
       // red = critical, default = recovery ('ok'). The 🐑 makes it scannable.
@@ -827,6 +853,50 @@ async function _stopVideos() {
     const el = document.getElementById('video-content-' + name);
     if (el) el.innerHTML = `<span class="placeholder">${name} off</span>`;
   }
+}
+
+// ── IMU strip ──
+
+function drawImuStrip() {
+  const panel = document.getElementById('panel-imu');
+  if (panel && panel.style.display === 'none') panel.style.display = '';
+  const canvas = document.getElementById('canvas-imu');
+  if (!canvas || !imuEvents.length) return;
+  const ctx = canvas.getContext('2d');
+  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
+    canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight;
+  }
+  const w = canvas.width, h = canvas.height, plotH = h - 12;
+  ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
+  const WINDOW = 30;                                  // seconds shown
+  const tNow = imuEvents[imuEvents.length - 1].t;     // device clock; no offset needed
+  const win = imuEvents.filter(e => tNow - e.t <= WINDOW);
+  if (!win.length) return;
+  let maxV = 1.2;                                     // >= 1 g so rest sits mid-plot
+  for (const e of win) if (e.mag > maxV) maxV = e.mag;
+  // 1 g reference line
+  const y1g = plotH - (1.0 / maxV) * (plotH - 3);
+  ctx.strokeStyle = '#2a3550'; ctx.setLineDash([3, 3]);
+  ctx.beginPath(); ctx.moveTo(0, y1g); ctx.lineTo(w, y1g); ctx.stroke(); ctx.setLineDash([]);
+  // |a| trace
+  ctx.strokeStyle = '#26c6da'; ctx.lineWidth = 1.5; ctx.beginPath();
+  let started = false;
+  for (const e of win) {
+    const x = ((WINDOW - (tNow - e.t)) / WINDOW) * w;
+    const y = plotH - (e.mag / maxV) * (plotH - 3);
+    if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  // time ticks
+  ctx.fillStyle = '#444'; ctx.font = '9px monospace';
+  for (let tau = 0; tau <= WINDOW; tau += 10) {
+    const x = ((WINDOW - tau) / WINDOW) * w;
+    ctx.fillText(tau === 0 ? 'now' : '-' + tau + 's', Math.min(x + 1, w - 26), h - 2);
+  }
+  const last = win[win.length - 1];
+  const info = document.getElementById('imu-info');
+  if (info) info.textContent =
+    `|a| ${last.mag.toFixed(2)} g · gyro ${last.gx}/${last.gy}/${last.gz} (max ${maxV.toFixed(1)} g)`;
 }
 
 // ── Live toggle ──

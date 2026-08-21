@@ -17,6 +17,12 @@ _COMMON = [
     ("shared/mjpeg_relay.py", "shared/mjpeg_relay.py"),
     ("devices/__init__.py", "devices/__init__.py"),
     ("devices/base.py", "devices/base.py"),
+    ("devices/mjpeg_pipe.py", "devices/mjpeg_pipe.py"),
+    ("devices/worldcam.py", "devices/worldcam.py"),
+    ("devices/naneye.py", "devices/naneye.py"),
+    ("devices/icm42670.py", "devices/icm42670.py"),
+    ("devices/gyroscope_nano.py", "devices/gyroscope_nano.py"),
+    ("devices/gyroscope_i2c.py", "devices/gyroscope_i2c.py"),
     ("pi_api/api.py", "pi_api/api.py"),
 ]
 

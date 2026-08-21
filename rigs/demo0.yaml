@@ -1,0 +1,58 @@
+name: demo0
+# The catchme rig: one Pi 4 leader (rpi-demo0), two cameras + one 6-axis IMU.
+# Only ONE gyro variant is physically wired at a time — flip the `enabled` flags
+# together with the wiring (nano = sensor on the Arduino, i2c = sensor on the Pi).
+data:
+  leader_dir: /home/pi/data
+  video_dir: /home/pi/video
+network:
+  api_port: 5080
+  command_port: 5572
+  event_port: 5571
+pis:
+- devices:
+  - worldcam
+  - naneye
+  - gyroscope_nano
+  - gyroscope_i2c
+  ip: 192.168.10.103
+  name: rpi-demo0
+  role: leader
+  user: pi
+devices:
+  worldcam:
+    type: worldcam
+    enabled: true
+    video: true
+    # MacroSilicon MS210x USB grabber — stable by-id path (== /dev/video1 today),
+    # immune to node renumbering across boots.
+    video_device: /dev/v4l/by-id/usb-MACROSILICON_USB_Video_20200909-video-index0
+    resolution: [1280, 720]
+    fps: 30
+    preview_fps: 10
+  naneye:
+    type: naneye
+    enabled: true
+    video: true
+    libcamera_bin: /usr/local/bin/libcamera-vid
+    camera_match: vbridge
+    resolution: [320, 320]
+    fps: 30            # sensor does up to 186 — raise after measured_fps proves headroom
+    preview_fps: 10
+  gyroscope_nano:
+    type: gyroscope_nano
+    enabled: true
+    serial_port: /dev/ttyUSB0
+    baud: 115200
+    sample_hz: 100
+  gyroscope_i2c:
+    type: gyroscope_i2c
+    enabled: false     # sensor currently wired to the Nano — enable when rewired to i2c-1
+    i2c_bus: 1
+    i2c_address: '0x68'
+    sample_hz: 100
+shepherd:
+  enabled: false
+slack:
+  enabled: false
+  webhook_url: ''

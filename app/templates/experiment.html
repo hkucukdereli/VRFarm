@@ -478,7 +478,7 @@ function renderSaveDevices() {
   if (!host) return;
   const devs = (config && config.rig && config.rig.devices) || {};
   host.innerHTML = Object.entries(devs)
-    .filter(([, cfg]) => cfg && cfg.enabled)
+    .filter(([, cfg]) => cfg && cfg.enabled !== false)
     .map(([name]) =>
       `<label style="display:inline-flex; align-items:center; gap:3px; color:#bbb; cursor:pointer;">` +
       `<input type="checkbox" class="save-dev" data-dev="${name}" checked>${name}</label>`)
@@ -490,7 +490,7 @@ function renderSaveDevices() {
 function _videoDeviceNames() {
   const devs = (config && config.rig && config.rig.devices) || {};
   return Object.entries(devs)
-    .filter(([, cfg]) => cfg && cfg.enabled && cfg.video)
+    .filter(([, cfg]) => cfg && cfg.enabled !== false && cfg.video)
     .map(([name]) => name);
 }
 

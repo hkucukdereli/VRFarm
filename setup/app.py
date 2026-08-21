@@ -308,6 +308,11 @@ def api_deploy_pi():
                     files={"file": f},
                     data={"path": remote},
                     timeout=10)
+            # A failed upload must fail the deploy — otherwise stale code keeps running
+            # on the Pi while the log says everything was uploaded.
+            if not (r.ok and r.json().get("ok")):
+                raise RuntimeError(f"upload {remote} failed: "
+                                   f"HTTP {r.status_code} {r.text[:200]}")
             steps.append(f"Uploaded {remote}")
 
         # Restart pi_api so the just-uploaded code actually RUNS. A long-running Python
@@ -439,7 +444,9 @@ def api_init_devices():
     devices = _rig_config.get("devices", {})
 
     for dev_name, cfg in devices.items():
-        if not (cfg or {}).get("enabled"):
+        # `enabled` defaults True everywhere (engine, controllers, UIs): present = on
+        # unless explicitly disabled.
+        if not (cfg or {}).get("enabled", True):
             continue
         ip = dev_to_ip.get(dev_name)
         if ip:
@@ -458,7 +465,7 @@ def api_reinit_device():
         return jsonify({"ok": False, "error": "No rig loaded"}), 400
     dev_name = (request.json or {}).get("device")
     devices = _rig_config.get("devices", {})
-    if dev_name not in devices or not devices[dev_name].get("enabled"):
+    if dev_name not in devices or not devices[dev_name].get("enabled", True):
         return jsonify({"ok": False, "error": f"{dev_name} is not enabled"}), 400
     ip = next((pi["ip"] for pi in _rig_config.get("pis", [])
                if dev_name in pi.get("devices", [])), None)

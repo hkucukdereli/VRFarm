@@ -10,14 +10,11 @@ the .h5 is already gone, so a fresh process opens the closed file and rebuilds i
 
 Merges (then deletes the source):
   metadata.yaml        -> root attributes (+ task_config as a JSON string)
-  stimuli.npz          -> /stimulus group (planned params, de-duped vs /trials)
   frame_timestamps.npy -> /camera/frame_timestamps  (Nx3, with a `columns` attr)
-  camera_metadata.json -> /camera attrs (sensor mode, ScalerCrop, output size, colour space,
-                          exposure, encoder settings — the geometry the video was shot with)
-  trials.yaml          -> dropped (redundant with stimuli.npz)
+  camera_metadata.json -> /camera attrs (the geometry/settings the video was shot with)
 
-Reorganizes the flat per-trial datasets the engine wrote into groups:
-  /trials (recorded), /lick, /reward, /photodiode.
+Reorganizes the flat per-trial datasets the engine wrote into groups: anything not
+listed in _GROUP lands under /trials.
 """
 from __future__ import annotations
 import json
@@ -26,32 +23,9 @@ from pathlib import Path
 
 FORMAT_VERSION = 2
 
-# flat per-trial dataset (engine output) -> destination group
+# flat dataset (engine output) -> destination group. Extend when a device family
+# should get its own group (e.g. a continuous stream); unknown names -> /trials.
 _GROUP = {}
-for _n in ("trial_num", "block_num", "trial_outcome", "level_effective", "adaptive_state",
-           "iti_duration_s", "stim_az_deg", "contrast", "corr_contrast",
-           "iti_start_t", "stim_onset_t", "true_onset_t", "response_window_t", "outcome_t",
-           "first_lick_t", "display_latency_s", "sync_ok"):
-    _GROUP[_n] = "trials"
-for _n in ("lick_times", "iti_lick_times", "iti_lick_count"):
-    _GROUP[_n] = "lick"
-for _n in ("reward_t", "reward_amount_ul", "reward_pavlovian"):
-    _GROUP[_n] = "reward"
-_GROUP["sync_pulses"] = "photodiode"
-
-# stimuli.npz per-trial arrays -> /stimulus dataset name (renamed for clarity)
-_NPZ_DATASET = {
-    "stim_alt_deg": "stim_alt_deg", "px_x": "px_x", "px_y": "px_y", "px_size": "px_size",
-    "duration_s": "duration_s", "prestim_durations": "prestim_s",
-    "poststim_durations": "poststim_s", "iti_durations": "iti_planned_s",
-    "block_delays": "block_delays", "block_start_indices": "block_start_indices",
-}
-# stimuli.npz scalars -> /stimulus group attrs
-_NPZ_ATTR = ("background_gray", "global_delay", "shape",
-             "block_delay_skip_first", "sync_square_every_n")
-# stimuli.npz arrays that duplicate recorded /trials data -> dropped
-_NPZ_SKIP = {"trial_idx", "block_num", "stim_az_deg", "contrast", "corr_contrast",
-             "bg_gray", "n_trials"}
 
 
 def _remux_and_prune_video(video_session_dir, h5_path):
@@ -129,7 +103,7 @@ def _remux_and_prune_video(video_session_dir, h5_path):
 def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=True, remux_video=True):
     """Build the final self-contained HDF5 for a session and remove sidecars.
 
-    session_dir: dir holding <session_id>.h5, metadata.yaml, stimuli.npz, trials.yaml.
+    session_dir: dir holding <session_id>.h5 + metadata.yaml.
     video_session_dir: dir holding frame_timestamps.npy (+ video.h264); optional.
     remux_video: copy-remux video.h264 -> video.mp4 and delete the raw (default True).
     Returns a summary dict. Idempotent: a file already at FORMAT_VERSION is left alone.
@@ -153,12 +127,10 @@ def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=Tru
         return {"ok": True, "skipped": "already consolidated", "h5": str(h5_path), "video": vres}
 
     meta_path = session_dir / "metadata.yaml"
-    npz_path = session_dir / "stimuli.npz"
-    trials_yaml = session_dir / "trials.yaml"
     tslog_path = Path(video_session_dir) / "frame_timestamps.npy" if video_session_dir else None
     geom_path = Path(video_session_dir) / "camera_metadata.json" if video_session_dir else None
 
-    merged = {"metadata": False, "stimulus": False, "camera": False, "camera_geometry": False}
+    merged = {"metadata": False, "camera": False, "camera_geometry": False}
     tmp = h5_path.with_name(h5_path.name + ".consolidating")
     try:
         with h5py.File(h5_path, "r") as src, h5py.File(tmp, "w") as dst:
@@ -186,35 +158,14 @@ def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=Tru
                         dst.attrs[k] = v
                 merged["metadata"] = True
 
-            # 3) stimuli.npz -> /stimulus (planned params, de-duped vs /trials)
-            planned_iti_written = False
-            if npz_path.exists():
-                z = np.load(npz_path, allow_pickle=True)
-                sg = dst.require_group("stimulus")
-                for key in z.files:
-                    if key in _NPZ_SKIP:
-                        continue
-                    if key in _NPZ_DATASET:
-                        sg.create_dataset(_NPZ_DATASET[key], data=z[key])
-                        planned_iti_written |= (key == "iti_durations")
-                    elif key in _NPZ_ATTR:
-                        val = z[key]
-                        val = val.item() if getattr(val, "size", None) == 1 else val
-                        sg.attrs[key] = val.decode() if isinstance(val, bytes) else val
-                merged["stimulus"] = True
-            # fallback: planned ITI from the engine's own copy if the NPZ is missing
-            if not planned_iti_written and "_iti_durations_planned" in src:
-                dst.require_group("stimulus").create_dataset(
-                    "iti_planned_s", data=src["_iti_durations_planned"][:])
-
-            # 4) frame_timestamps.npy -> /camera/frame_timestamps
+            # 3) frame_timestamps.npy -> /camera/frame_timestamps
             if tslog_path and tslog_path.exists():
                 ts = np.load(tslog_path)
                 d = dst.create_dataset("camera/frame_timestamps", data=ts)
                 d.attrs["columns"] = ["frame_idx", "wall_clock_s", "sensor_ts_ns"]
                 merged["camera"] = True
 
-            # 5) camera_metadata.json -> /camera attrs. Sensor mode, ScalerCrop, output size,
+            # 4) camera_metadata.json -> /camera attrs. Sensor mode, ScalerCrop, output size,
             # colour space, exposure and encoder settings — i.e. which part of the scene each
             # pixel is and at what scale. None of it is recoverable from video.h264, so without
             # this a change of resolution or crop is invisible in the archive. require_group:
@@ -247,7 +198,7 @@ def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=Tru
 
     removed = []
     if delete_sidecars:
-        for p in (meta_path, npz_path, trials_yaml, tslog_path, geom_path):
+        for p in (meta_path, tslog_path, geom_path):
             if p and Path(p).exists():
                 Path(p).unlink()
                 removed.append(Path(p).name)

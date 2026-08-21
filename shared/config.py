@@ -73,11 +73,6 @@ def get_leader_pi(rig: dict) -> dict:
     raise ValueError("No leader Pi in rig config")
 
 
-def get_follower_pis(rig: dict) -> list[dict]:
-    """Return list of Pi dicts with role='follower'."""
-    return [pi for pi in rig["pis"] if pi["role"] == "follower"]
-
-
 def make_session_id(subject_id: str, date_str: str, session_num: int) -> str:
     return f"{subject_id}_{date_str}_{session_num:03d}"
 

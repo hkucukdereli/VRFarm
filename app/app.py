@@ -44,9 +44,8 @@ state = {
     "task_config": None,
     "rig_path": None,
     "task_path": None,
-    "session": {},          # subject_id, date, session_num, level, notes
+    "session": {},          # subject_id, date, session_num, notes
     "session_id": None,
-    "session_dir": None,    # controller-side data folder for this session (created at Go)
     "deployed": False,
 }
 
@@ -304,32 +303,6 @@ def save_task_as_route():
     return jsonify({"ok": True, "last_saved": today, "name": safe})
 
 
-@app.route("/api/connect", methods=["POST"])
-def connect():
-    """Check Pi REST APIs are online."""
-    rig = state["rig_config"]
-    if not rig:
-        return jsonify({"error": "No rig config loaded"}), 400
-
-    api_port = rig["network"]["api_port"]
-    results = {}
-
-    for pi in rig["pis"]:
-        name = pi["name"]
-        ip = pi["ip"]
-        try:
-            r = requests.get(f"http://{ip}:{api_port}/api/status", timeout=3)
-            results[name] = {"ok": True, "status": r.json()}
-        except Exception as e:
-            results[name] = {"ok": False, "error": str(e)}
-
-    all_ok = all(r["ok"] for r in results.values())
-    if all_ok:
-        state["phase"] = "connected"
-
-    return jsonify({"results": results, "all_ok": all_ok})
-
-
 @app.route("/api/deploy", methods=["POST"])
 def deploy():
     """Deploy code + configs to the Pis. Enables Go button on success."""
@@ -390,7 +363,6 @@ def deploy():
                      f"experiments/{Path(state['task_path']).name}")
         steps.append("Uploaded task config to Leader")
 
-        state["trial_table"] = []
         state["deployed"] = True
         state["phase"] = "deployed"
         _app_logger.info(f"DEPLOY ok session={state['session_id']} steps={len(steps)}")
@@ -399,25 +371,6 @@ def deploy():
     except Exception as e:
         _app_logger.error(f"DEPLOY failed session={state.get('session_id')} error={e}")
         return jsonify({"ok": False, "error": str(e), "steps": steps})
-
-
-@app.route("/api/trial_table")
-def get_trial_table():
-    """Return pre-computed trial table."""
-    return jsonify({"trials": state.get("trial_table", [])})
-
-
-@app.route("/api/drain_events", methods=["POST"])
-def drain_events():
-    """Drain buffered SSE events so Live starts fresh."""
-    count = 0
-    while not _event_queue.empty():
-        try:
-            _event_queue.get_nowait()
-            count += 1
-        except queue.Empty:
-            break
-    return jsonify({"ok": True, "drained": count})
 
 
 @app.route("/api/go", methods=["POST"])
@@ -432,23 +385,11 @@ def go():
     cmd_port = rig["network"]["command_port"]
     session = state["session"]
 
-    # Per-device "save data" choices from the Actions row (default: save everything). Camera unchecked
-    # -> livestream only (no video file); a behavioral device unchecked -> Leader skips its HDF5 datasets.
+    # Per-device "save data" choices from the Actions row (default: save everything). A video
+    # device unchecked -> livestream only (no file); any other device unchecked -> Leader skips
+    # its HDF5 datasets.
     _body = request.get_json(silent=True) or {}
     save = _body.get("save", {})
-    # Create the session data folder NOW (so the live plots can be saved into it at end/stop,
-    # regardless of whether the data is later transferred). Uses the transfer destination if the
-    # UI field is set, else the controller default — the same layout transfer() writes to.
-    dest_override = str(_body.get("dest_dir", "")).strip()
-    try:
-        dest_root = Path(dest_override).expanduser() if dest_override else _data_dir()
-        sdir = _session_dir(dest_root)
-        sdir.mkdir(parents=True, exist_ok=True)
-        state["session_dir"] = str(sdir)
-        print(f"[go] session dir: {sdir}")
-    except Exception as e:
-        print(f"[go] could not create session dir: {e}")
-        state["session_dir"] = None
     rig_filename = Path(state["rig_path"]).name
     task_filename = Path(state["task_path"]).name
 
@@ -482,8 +423,10 @@ def go():
     print("[go] Starting leader...")
     # Devices the user chose NOT to save -> tell the Leader to skip their HDF5 datasets.
     # (Video devices are handled separately below: unchecked = preview-only, no file.)
+    # `enabled` defaults True everywhere (engine, load_rig, UIs): present = on unless
+    # explicitly disabled.
     skip_save = [d for d, cfg in rig.get("devices", {}).items()
-                 if cfg.get("enabled", False) and not save.get(d, True)]
+                 if cfg.get("enabled", True) and not save.get(d, True)]
     # Relative paths: pi_api resolves them against ~/rig on the Pi, whatever its username.
     leader_args = [
         "--rig", f"rigs/{rig_filename}",
@@ -537,7 +480,7 @@ def go():
     # sets `video: true` (see _video_devices).
     for dev_name, dev_cfg, pi in _video_devices(rig):
         save_this = bool(save.get(dev_name, True))
-        video_dir = rig["data"].get("video_dir") or "/media/vruser/ssd/video"   # `or`: a present-but-empty value falls back too
+        video_dir = rig.get("data", {}).get("video_dir") or "/media/vruser/ssd/video"   # `or`: a present-but-empty value falls back too
         payload = {
             "device": dev_name,
             "type": dev_cfg.get("type", dev_name),
@@ -609,10 +552,11 @@ def go():
 
 def _video_devices(rig):
     """(name, config, pi) for every enabled rig device marked `video: true` — the devices the
-    controller starts/stops through the camera endpoints (preview vs session recording)."""
+    controller starts/stops through the camera endpoints (preview vs session recording).
+    `enabled` defaults True, matching the engine and load_rig."""
     out = []
     for name, cfg in (rig.get("devices", {}) or {}).items():
-        if not cfg.get("enabled", False) or not cfg.get("video", False):
+        if not cfg.get("enabled", True) or not cfg.get("video", False):
             continue
         pi = next((p for p in rig["pis"] if name in p.get("devices", [])), None)
         if pi is not None:
@@ -723,42 +667,11 @@ def _data_dir() -> Path:
 
 
 def _session_dir(dest_root) -> Path:
-    """Session data folder: <root>/<subject>/<subject>_<date>/<session_id> — the same layout used
-    by transfer(), so plots saved at Go land alongside the data if/when it's transferred."""
+    """Session data folder: <root>/<subject>/<subject>_<date>/<session_id> — the layout
+    transfer() writes to."""
     subject_id = state["session"]["subject_id"]
     date_str = state["session"]["date"]
     return Path(dest_root) / subject_id / f"{subject_id}_{date_str}" / state["session_id"]
-
-
-@app.route("/api/save_plots", methods=["POST"])
-def save_plots():
-    """Write the browser's live-plot PNGs into the session folder (created at Go) so the plots
-    persist for later review regardless of whether the data is transferred."""
-    import base64
-    req = request.get_json(silent=True) or {}
-    plots = req.get("plots", {})
-    sess_dir = state.get("session_dir")
-    if not sess_dir:
-        if not state.get("session_id"):
-            return jsonify({"ok": False, "error": "No active session"}), 400
-        sess_dir = str(_session_dir(_data_dir()))   # fallback: default data dir
-    d = Path(sess_dir)
-    try:
-        d.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        return jsonify({"ok": False, "error": f"Cannot create {d}: {e}"}), 500
-    written = []
-    for name, dataurl in plots.items():
-        if not isinstance(dataurl, str) or "," not in dataurl:
-            continue
-        try:
-            raw = base64.b64decode(dataurl.split(",", 1)[1])
-            safe = "".join(c for c in str(name) if c.isalnum() or c in "-_") or "plot"
-            (d / f"{safe}.png").write_bytes(raw)
-            written.append(f"{safe}.png")
-        except Exception:
-            pass
-    return jsonify({"ok": True, "dir": str(d), "written": written})
 
 
 @app.route("/api/transfer", methods=["POST"])
@@ -780,16 +693,19 @@ def transfer():
         return jsonify({"ok": False, "error": f"Cannot create destination {dest}: {e}"})
 
     # Build the final self-contained .h5 on the Leader first: merge the sidecars
-    # (metadata.yaml, stimuli.npz, trials.yaml, frame_timestamps.npy) into it and delete them,
-    # so only <session>.h5 + video.h264 remain to pull.
+    # (metadata.yaml, frame_timestamps.npy, ...) into it and delete them, so only
+    # <session>.h5 + the video files remain to pull. data_dir/video_dir come from the rig
+    # yaml so a non-default leader_dir still consolidates/transfers.
     steps = []
     leader = next((p for p in rig["pis"] if p.get("role") == "leader"), rig["pis"][0])
     try:
-        # timeout is generous: consolidation now also copy-remuxes video.h264 -> video.mp4 on the
-        # leader, which reads+writes the whole video (~a minute for a few GB, more for a big one).
+        # timeout is generous: consolidation also copy-remuxes the raw video on the leader,
+        # which reads+writes the whole file (~a minute for a few GB, more for a big one).
         cj = requests.post(
             f"http://{leader['ip']}:{api_port}/api/consolidate/{session_id}",
-            json={"video_dir": rig.get("data", {}).get("video_dir", "")}, timeout=900).json()
+            json={"video_dir": rig.get("data", {}).get("video_dir", ""),
+                  "data_dir": rig.get("data", {}).get("leader_dir", "")},
+            timeout=900).json()
         if cj.get("ok") and cj.get("skipped"):
             steps.append(f"Consolidate: {cj['skipped']}")
         elif cj.get("ok"):
@@ -827,7 +743,8 @@ def transfer():
         try:
             r = requests.get(
                 f"{base}/api/files/{session_id}",
-                params={"video_dir": rig.get("data", {}).get("video_dir", "")},
+                params={"video_dir": rig.get("data", {}).get("video_dir", ""),
+                        "data_dir": rig.get("data", {}).get("leader_dir", "")},
                 timeout=5)
             r.raise_for_status()
             listing = r.json()
@@ -964,25 +881,6 @@ def subject_history(subject_id):
         return jsonify([])
     db_dir = _data_dir() / "subjects"
     return jsonify(get_subject_history(subject_id, db_dir))
-
-
-@app.route("/api/engine_logs")
-def engine_logs():
-    """Fetch engine process logs from all Pis."""
-    rig = state["rig_config"]
-    if not rig:
-        return jsonify({})
-    api_port = rig["network"]["api_port"]
-    n = request.args.get("n", 50, type=int)
-    result = {}
-    for pi in rig["pis"]:
-        try:
-            r = requests.get(f"http://{pi['ip']}:{api_port}/api/logs?n={n}",
-                             timeout=3)
-            result[pi["name"]] = r.json().get("lines", [])
-        except Exception as e:
-            result[pi["name"]] = [f"Error fetching logs: {e}"]
-    return jsonify(result)
 
 
 def _find_video_device(rig, name):
@@ -1145,7 +1043,13 @@ def _start_udp_listener(event_port: int):
         while _udp_running:
             try:
                 data, _ = sock.recvfrom(4096)
-                event = json.loads(data)
+                try:
+                    event = json.loads(data)
+                    if not isinstance(event, dict):
+                        continue
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue   # a malformed datagram must NOT kill the listener —
+                               # session_end teardown depends on this thread staying alive
                 rig_name = state["rig_config"]["name"]
                 # Track trials
                 if event.get("type") == "trial":
@@ -1210,12 +1114,17 @@ def _stop_udp_listener():
 
 
 def _upload_file(ip: str, port: int, local_path: str, remote_path: str):
-    """Upload a file to Pi via REST API."""
+    """Upload a file to Pi via REST API. Raises on failure — a silently failed upload
+    would leave STALE code running on the Pi while Deploy reports success."""
     with open(local_path, "rb") as f:
-        requests.post(f"http://{ip}:{port}/api/upload",
-                      files={"file": f},
-                      data={"path": remote_path},
-                      timeout=10)
+        r = requests.post(f"http://{ip}:{port}/api/upload",
+                          files={"file": f},
+                          data={"path": remote_path},
+                          timeout=10)
+    r.raise_for_status()
+    j = r.json()
+    if not j.get("ok"):
+        raise RuntimeError(f"upload {remote_path} to {ip} failed: {j.get('error', '?')}")
 
 
 

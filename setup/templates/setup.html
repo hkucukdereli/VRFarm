@@ -689,6 +689,7 @@ async function startDeviceMonitor(name) {
   ds.monCount = 0;
   ds.monLast = null;
   renderDeviceList();
+  if (monPolls[name]) clearInterval(monPolls[name]);   // never leak a prior interval
   monPolls[name] = setInterval(() => pollDeviceData(name, pi.ip), 300);
   log(name + ' monitoring started.');
 }
@@ -915,13 +916,15 @@ function switchDeviceTab(name) {
     t.classList.toggle('active', t.dataset.device === name));
 }
 
-// Update one rig-config field from the generic card editor. Numbers stay numbers, JSON arrays
-// parse ([1280, 720]), everything else is kept as a string.
+// Update one rig-config field from the generic card editor. Decimal numbers stay numbers,
+// JSON arrays parse ([1280, 720]), everything else is kept as a string — including hex
+// strings like '0x68' (Number('0x68') would silently turn an i2c address into 104, which
+// a device parsing int(str, 16) would then read as 0x104).
 function updateDeviceField(name, key, raw) {
   if (!rig || !rig.devices[name]) return;
   let v = raw;
   const s = String(raw).trim();
-  if (s !== '' && !isNaN(Number(s))) v = Number(s);
+  if (s !== '' && !/^0x/i.test(s) && !isNaN(Number(s))) v = Number(s);
   else { try { const j = JSON.parse(s); if (Array.isArray(j)) v = j; } catch (e) {} }
   rig.devices[name][key] = v;
 }

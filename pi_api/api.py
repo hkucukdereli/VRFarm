@@ -159,15 +159,21 @@ def _parse_session_id(session_id: str):
 
 @app.route("/api/files/<session_id>")
 def list_files(session_id):
-    """List session data files available for transfer."""
+    """List session data files available for transfer. The controller passes the rig's
+    data.leader_dir (?data_dir=...) so a non-default location still transfers; falls
+    back to ~/data."""
     files = []
     home = Path.home()
     subj, subj_date, _ = _parse_session_id(session_id)
 
+    dd = request.args.get("data_dir", "").strip()
+    data_base = Path(dd).expanduser() if dd else DATA_DIR
+    if dd:
+        _EXTRA_DOWNLOAD_DIRS.add(data_base)   # so /api/download accepts it
     # Check data dir (nested: subject/subject_date/session_id)
     for candidate in [
-        DATA_DIR / subj / subj_date / session_id if subj else None,
-        DATA_DIR / session_id,  # legacy flat layout
+        data_base / subj / subj_date / session_id if subj else None,
+        data_base / session_id,  # legacy flat layout
     ]:
         if candidate and candidate.exists():
             for f in candidate.rglob("*"):
@@ -218,7 +224,9 @@ def consolidate(session_id):
     to transfer. Idempotent."""
     data = request.get_json(silent=True) or {}
     subj, subj_date, _ = _parse_session_id(session_id)
-    session_dir = (DATA_DIR / subj / subj_date / session_id) if subj else (DATA_DIR / session_id)
+    dd = (data.get("data_dir") or "").strip()
+    data_base = Path(dd).expanduser() if dd else DATA_DIR
+    session_dir = (data_base / subj / subj_date / session_id) if subj else (data_base / session_id)
     vd = (data.get("video_dir") or "").strip() or "/media/vruser/ssd/video"
     video_session_dir = (Path(vd) / subj / subj_date / session_id) if subj else (Path(vd) / session_id)
     try:
@@ -349,18 +357,19 @@ def _release_one(name):
     """Release and drop a single stored device BEFORE a re-init reclaims its line/bus/port.
     Without this, re-initializing a persistent device (the per-card Reinit button, or a
     second Init Devices without a pi_api restart) leaves the old instance still holding its
-    resource (GPIO line, I2C handle, serial port, capture subprocess). Mirrors
-    release_devices' stop_stream()->close() order."""
+    resource (GPIO line, I2C handle, serial port, capture subprocess). Pop under
+    _devices_lock, close OUTSIDE it — a slow close (joins, subprocess teardown) must not
+    block /api/status and every other device access."""
     with _devices_lock:
         dev = _devices.pop(name, None)
-        if dev is not None:
-            try:
-                if hasattr(dev, 'stop_stream'):
-                    dev.stop_stream()
-                if hasattr(dev, 'close'):
-                    dev.close()
-            except Exception:
-                pass
+    if dev is not None:
+        try:
+            if hasattr(dev, 'stop_stream'):
+                dev.stop_stream()
+            if hasattr(dev, 'close'):
+                dev.close()
+        except Exception:
+            pass
 
 
 # ── Generic device endpoints ──
@@ -376,31 +385,35 @@ def init_device():
     config = data.get("config", {}) or {}
     if not name:
         return jsonify({"ok": False, "error": "missing device name"}), 400
-    with _devices_lock:
-        existing = _devices.get(name)
-    if existing is not None and _is_session_recording(existing):
-        return jsonify({"ok": False,
-                        "error": "Session recording in progress; not re-initialized"}), 409
     try:
         cls = _load_device_class(dev_type)
     except Exception as e:
         return jsonify({"ok": False, "error": f"unknown device type '{dev_type}': {e}"}), 400
-    _release_one(name)   # free any prior instance so this (re)init can re-claim its resource
-    try:
-        dev = cls()
-        dev.init(rig_config=config, task_params={})
-        if dev.needs_calibration and "calibration" in config:
-            dev.load_calibration(config["calibration"])
+    # Per-name camera lock (harmless for non-cameras): serializes this release→construct→
+    # store against a concurrent camera_preview_start/stop on the same device, and keeps
+    # the recording check + release atomic.
+    with _cam_lock(name):
         with _devices_lock:
-            _devices[name] = dev
-        check = dev.check()
-        ok = bool(check.get("ok", True))
-        body = {"ok": ok, "message": check.get("message", "OK")}
-        if not ok:
-            body["error"] = check.get("message", "check failed")
-        return jsonify(body), (200 if ok else 500)
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+            existing = _devices.get(name)
+        if existing is not None and _is_session_recording(existing):
+            return jsonify({"ok": False,
+                            "error": "Session recording in progress; not re-initialized"}), 409
+        _release_one(name)   # free any prior instance so this (re)init can re-claim its resource
+        try:
+            dev = cls()
+            dev.init(rig_config=config, task_params={})
+            if dev.needs_calibration and "calibration" in config:
+                dev.load_calibration(config["calibration"])
+            with _devices_lock:
+                _devices[name] = dev
+            check = dev.check()
+            ok = bool(check.get("ok", True))
+            body = {"ok": ok, "message": check.get("message", "OK")}
+            if not ok:
+                body["error"] = check.get("message", "check failed")
+            return jsonify(body), (200 if ok else 500)
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/monitor_device", methods=["POST"])
@@ -435,11 +448,17 @@ def stop_monitor_device():
 
 @app.route("/api/device_data")
 def device_data():
-    """Return-and-clear a device's buffered monitor events (polled by the setup UI)."""
+    """Return-and-clear a device's buffered monitor events (polled by the setup UI).
+    Drain IN PLACE: the monitor callback holds this exact list object in its closure,
+    so rebinding _monitor_events[name] to a new list would orphan the buffer and the
+    monitor would go silent after the first poll."""
     name = request.args.get("name", "")
-    buf = _monitor_events.get(name, [])
-    _monitor_events[name] = []
-    return jsonify({"events": buf})
+    buf = _monitor_events.get(name)
+    if buf is None:
+        return jsonify({"events": []})
+    events = list(buf)
+    del buf[:len(events)]   # keep anything appended during the copy
+    return jsonify({"events": events})
 
 
 # ── Camera-like devices (device-name keyed) ──
@@ -485,7 +504,10 @@ def camera_preview_start():
                 video_dir = data.get("video_dir", "/media/vruser/ssd/video")
                 _EXTRA_DOWNLOAD_DIRS.add(Path(video_dir))   # transfer may pull from here
                 subj, subj_date, _ = _parse_session_id(session_id)
-                output_dir = str(Path(video_dir) / subj / subj_date)
+                # A non-standard session id (no subj_date_num shape) records flat under
+                # video_dir instead of crashing on Path / None.
+                output_dir = str(Path(video_dir) / subj / subj_date if subj
+                                 else Path(video_dir))
                 dev.start_recording(session_id=session_id, output_dir=output_dir)
             else:
                 dev.start_preview(downsample=bool(data.get("downsample", False)))
@@ -532,9 +554,11 @@ def camera_preview_stop():
         with _devices_lock:
             dev = _devices.pop(name, None)
         if dev:
-            if hasattr(dev, "stop_recording"):
-                dev.stop_recording()
-            dev.close()
+            try:
+                if hasattr(dev, "stop_recording"):
+                    dev.stop_recording()
+            finally:
+                dev.close()   # always release the pipeline, even if the flush raised
     return jsonify({"ok": True})
 
 

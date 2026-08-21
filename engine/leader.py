@@ -44,6 +44,7 @@ class Leader:
         self.devices = {}
         self.trial_num = 0
         self.running = False
+        self._terminated = False   # SIGTERM/STOP before the session started
         self.hdf5_file = None
         self._trial_ctx = {}
 
@@ -67,7 +68,7 @@ class Leader:
                 continue
             if not dev_config.get("enabled", True):
                 continue
-            dev_type = dev_config["type"]
+            dev_type = dev_config.get("type", dev_name)   # same default as pi_api/app.py
             if dev_type not in DEVICE_REGISTRY:
                 # Devices self-register on import; module name == device type.
                 try:
@@ -175,10 +176,9 @@ class Leader:
 
         self._publish({"type": "experiment_start", "t": time.time()})
 
-        trial_num = -1
+        completed = 0   # trials actually WRITTEN (so session_end always matches the HDF5 rows)
         for trial_num in range(n_trials):
             if not self.running:
-                trial_num -= 1  # this trial never ran
                 break
             self.trial_num = trial_num
 
@@ -228,11 +228,12 @@ class Leader:
             trial_end_t = time.time()
             self._trial_ctx["trial_end_t"] = trial_end_t
             self._write_trial()
+            completed += 1
             self._publish({"type": "trial", "trial_num": trial_num,
                            "t": trial_end_t, "stim_on_t": stim_on_t,
                            "duration_s": round(trial_end_t - trial_start_t, 3)})
 
-        self._finalize_session(data_dir, trial_num + 1, n_trials)
+        self._finalize_session(data_dir, completed, n_trials)
 
     def _finalize_session(self, data_dir: Path, n_completed: int, n_planned: int):
         """Clean up after session: write session-level device data, close HDF5, save metadata."""
@@ -248,13 +249,18 @@ class Leader:
                 except Exception:
                     pass
 
-        # Write session-level device data (honor the per-session save gate, like the per-trial paths)
+        # Write session-level device data (honor the per-session save gate, like the per-trial
+        # paths). Guard per device so one bad hdf5_session_data() can't skip the close() below
+        # (an unclosed file loses everything after the last flush) or the metadata.yaml.
         if self.hdf5_file:
             for name, dev in self.devices.items():
                 if name in self._skip_save:
                     continue
-                for ds_name, arr in dev.hdf5_session_data().items():
-                    self.hdf5_file.create_dataset(ds_name, data=arr)
+                try:
+                    for ds_name, arr in dev.hdf5_session_data().items():
+                        self.hdf5_file.create_dataset(ds_name, data=arr)
+                except Exception as e:
+                    print(f"  session data from {name} failed: {e}", flush=True)
             self.hdf5_file.close()
 
         self._publish({"type": "session_end", "n_completed": n_completed,
@@ -373,9 +379,9 @@ class Leader:
                 return
             subj = self.session["subject_id"]
             subj_date = f"{subj}_{self.session['date']}"
-            session_dir = Path(leader_dir) / subj / subj_date / self.session_id
+            session_dir = Path(leader_dir).expanduser() / subj / subj_date / self.session_id
             vd = d.get("video_dir") or leader_dir
-            video_dir = Path(vd) / subj / subj_date / self.session_id
+            video_dir = Path(vd).expanduser() / subj / subj_date / self.session_id
             from shared.consolidate import consolidate_session
             res = consolidate_session(session_dir, video_dir if video_dir.exists() else None)
             print(f"[consolidate] session end: {res}", flush=True)
@@ -418,9 +424,12 @@ def main():
     skip_save = {s.strip() for s in args.no_save.split(",") if s.strip()}
     leader = Leader(rig_config, task_config, session, skip_save=skip_save)
 
-    # Handle SIGTERM gracefully (from pi_api stop)
+    # Handle SIGTERM gracefully (from pi_api stop) — including BEFORE the session starts,
+    # so /api/stop on a leader still waiting for START exits cleanly instead of being
+    # SIGKILLed 10 s later with its devices never closed.
     def _sigterm(sig, frame):
         print("SIGTERM received — stopping gracefully")
+        leader._terminated = True
         leader.running = False
     signal.signal(signal.SIGTERM, _sigterm)
 
@@ -428,21 +437,26 @@ def main():
     leader.init_devices()
 
     print("Waiting for START command...")
-    # Block until we receive START from the Controller
-    while True:
+    # Block until we receive START from the Controller (or SIGTERM/STOP aborts the wait)
+    while not leader._terminated:
         try:
             data, addr = leader._cmd_sock.recvfrom(4096)
             leader._mac_addr = (addr[0], rig_config["network"]["event_port"])
             msg = json.loads(data)
             if msg.get("cmd") == "START":
                 break
+            if msg.get("cmd") == "STOP":
+                leader._terminated = True
         except BlockingIOError:
             time.sleep(0.01)
         except json.JSONDecodeError:
             pass  # malformed packet — ignore
 
     try:
-        leader.run_session()
+        if not leader._terminated:
+            leader.run_session()
+        else:
+            print("Stopped before START — shutting down")
     except KeyboardInterrupt:
         print("\nInterrupted")
     finally:

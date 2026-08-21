@@ -2,8 +2,8 @@
 shared/config.py
 
 Config loaders for the two config files:
-  - Rig config (YAML): hardware, pins, calibrations, Pi roles
-  - Task config (YAML): stimulus / reward / session / adaptive params (no `states`;
+  - Rig config (YAML): hardware, device configs, Pi roles
+  - Task config (YAML): session (trial timing) + per-device params (no `states`;
     the trial engine is the imperative loop in engine/leader.py)
 
 Also: subject database (session history tracking).
@@ -114,22 +114,17 @@ def register_session(subject_id: str, session_id: str, session_num: int,
               "sessions": []}
 
     sess = task_config.get("session", {})
-    stim = task_config.get("stimulus", {})
-    contrast = stim.get("contrast", {})
-    contrast_values = contrast.get("values", [])
 
     db["sessions"].append({
         "session_id": session_id,
         "date": f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}",
         "session_num": session_num,
-        "level": task_config.get("reward", {}).get("level", "0"),
-        "n_trials_planned": sess.get("n_blocks", 6) * sess.get("block_size", 25),
+        "n_trials_planned": sess.get("n_trials", 0),
         "n_trials_completed": n_trials_completed,
-        "block_sequence": sess.get("block_sequence", []),
-        "stim_size_deg": stim.get("size_deg", 0),
-        "contrast_values": contrast_values,
         "notes": notes,
         "timestamp": datetime.now().isoformat(),
+        # Full task config, so the paradigm details are queryable without schema assumptions.
+        "task_config": task_config,
     })
 
     with open(db_file, "w") as f:

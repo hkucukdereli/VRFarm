@@ -60,6 +60,9 @@ def _remux_mjpeg_dir(vdir):
         return {"skipped": "already avi"}
     if not raw.exists():
         return {"skipped": "no raw video"}
+    if raw.stat().st_size == 0:
+        raw.unlink()   # a device that captured nothing (e.g. sensor offline) — nothing to keep
+        return {"skipped": "empty raw (0 frames) — removed"}
     if shutil.which("ffmpeg") is None:
         return {"error": "ffmpeg not found; kept raw .mjpeg"}
 
@@ -78,8 +81,11 @@ def _remux_mjpeg_dir(vdir):
 
     tmp = vdir / "video.avi.part"
     raw_size = raw.stat().st_size
+    # Output -r is required: without it ffmpeg's mjpeg demuxer stamps the AVI header with
+    # DOUBLE the rate/frame count (field-rate quirk) — the data is fine but players and
+    # DLC would read 2x fps. With -r the header matches the real frames (verified on-rig).
     cmd = ["ffmpeg", "-y", "-v", "error", "-framerate", str(fps),
-           "-i", str(raw), "-c:v", "copy", "-an", "-f", "avi", str(tmp)]
+           "-i", str(raw), "-c:v", "copy", "-an", "-r", str(fps), "-f", "avi", str(tmp)]
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=3600)
     except Exception as e:
@@ -102,6 +108,50 @@ def _remux_mjpeg_dir(vdir):
     raw.unlink()
     return {"remuxed": str(Path(vdir.name) / "video.avi"), "fps": fps,
             "removed_raw": True, "avi_bytes": got}
+
+
+def _merge_subdir_sidecars(h5_path, video_session_dir):
+    """Merge any per-device sidecars (frame_timestamps.npy / camera_metadata.json in
+    <session>/<device>/) that are NOT yet in the h5, then delete the merged files.
+
+    Exists because the leader's exit-time consolidation can run while pi_api is still
+    flushing the video sidecars (the devices are pi_api-owned): those files appear
+    AFTER the h5 was consolidated, and the transfer-time re-consolidate must pick
+    them up instead of skipping on 'already consolidated'."""
+    import h5py
+    import numpy as np
+
+    merged = {}
+    subs = _video_subdirs(video_session_dir)
+    if not subs:
+        return merged
+    with h5py.File(h5_path, "r+") as f:
+        for sub in subs:
+            sts = sub / "frame_timestamps.npy"
+            if sts.exists() and f"{sub.name}/frame_timestamps" not in f:
+                d = f.create_dataset(f"{sub.name}/frame_timestamps", data=np.load(sts))
+                d.attrs["columns"] = ["frame_idx", "wall_clock_s", "sensor_ts_ns"]
+                merged[f"{sub.name}_timestamps"] = True
+            smeta = sub / "camera_metadata.json"
+            if smeta.exists() and (sub.name not in f or "measured_fps" not in f[sub.name].attrs):
+                try:
+                    sg = f.require_group(sub.name)
+                    for k, v in json.loads(smeta.read_text()).items():
+                        if isinstance(v, (list, dict)):
+                            sg.attrs[k] = json.dumps(v)
+                        elif v is None:
+                            sg.attrs[k] = ""
+                        else:
+                            sg.attrs[k] = v
+                    merged[f"{sub.name}_metadata"] = True
+                except Exception as e:
+                    print(f"[consolidate] {sub.name}/camera_metadata.json unreadable ({e}); skipping")
+    # delete only what was actually merged (metadata is deleted after the remux caller
+    # is done with it — see the callers)
+    for sub in subs:
+        if merged.get(f"{sub.name}_timestamps"):
+            (sub / "frame_timestamps.npy").unlink(missing_ok=True)
+    return merged
 
 
 def _remux_and_prune_video(video_session_dir, h5_path):
@@ -196,14 +246,20 @@ def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=Tru
     with h5py.File(h5_path, "r") as f:
         already = f.attrs.get("format_version", 0) == FORMAT_VERSION or "trials" in f
     if already:
-        # h5 is already consolidated, but still (re)try the video remuxes — a prior run may have
-        # been unable to (ffmpeg missing, interrupted), and we'd rather finish it on a re-transfer
-        # than leave a raw video stranded.
+        # h5 is already consolidated, but (a) per-device sidecars may have landed AFTER the
+        # exit-time consolidation (pi_api owns the video devices and flushes them on its own
+        # schedule) — merge any that aren't in the h5 yet; (b) still (re)try the video
+        # remuxes — a prior run may have been unable to (ffmpeg missing, interrupted).
+        late = _merge_subdir_sidecars(h5_path, video_session_dir)
         vres = _remux_and_prune_video(video_session_dir, h5_path) if remux_video else {"skipped": "disabled"}
         vsubs = ({d.name: _remux_mjpeg_dir(d) for d in _video_subdirs(video_session_dir)}
                  if remux_video else {})
+        # metadata jsons were kept for the remuxes (fps source) — drop the merged ones now
+        for sub in _video_subdirs(video_session_dir):
+            if late.get(f"{sub.name}_metadata"):
+                (sub / "camera_metadata.json").unlink(missing_ok=True)
         return {"ok": True, "skipped": "already consolidated", "h5": str(h5_path),
-                "video": vres, "video_dirs": vsubs}
+                "merged": late, "video": vres, "video_dirs": vsubs}
 
     meta_path = session_dir / "metadata.yaml"
     tslog_path = Path(video_session_dir) / "frame_timestamps.npy" if video_session_dir else None
@@ -306,11 +362,17 @@ def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=Tru
 
     removed = []
     if delete_sidecars:
-        paths = [meta_path, tslog_path, geom_path]
+        # NEVER delete a sidecar that wasn't merged: the video devices are pi_api-owned and
+        # may flush their files after this (exit-time) consolidation ran — an unmerged file
+        # must survive so the transfer-time re-consolidate can pick it up.
+        paths = [(meta_path, merged.get("metadata")),
+                 (tslog_path, merged.get("camera")),
+                 (geom_path, merged.get("camera_geometry"))]
         for sub in _video_subdirs(video_session_dir):
-            paths += [sub / "frame_timestamps.npy", sub / "camera_metadata.json"]
-        for p in paths:
-            if p and Path(p).exists():
+            paths += [(sub / "frame_timestamps.npy", merged.get(f"{sub.name}_timestamps")),
+                      (sub / "camera_metadata.json", merged.get(f"{sub.name}_metadata"))]
+        for p, was_merged in paths:
+            if p and was_merged and Path(p).exists():
                 Path(p).unlink()
                 removed.append(Path(p).name)
 

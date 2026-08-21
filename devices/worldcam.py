@@ -49,6 +49,12 @@ class WorldCam(PipeCameraBase):
             "-c:v", "copy", "-f", "mjpeg", "pipe:1",
         ]
 
+    def _pkill_pattern(self):
+        # Reap an orphaned capture ffmpeg (e.g. left by a pi_api restart) that would
+        # otherwise hold the V4L2 device. Matching on the device path keeps this
+        # narrow — it can never kill an unrelated ffmpeg (like a consolidation remux).
+        return self.video_device
+
     def check(self) -> dict:
         if not Path(self.video_device).exists():
             return {"ok": False, "message": f"{self.video_device} not found"}

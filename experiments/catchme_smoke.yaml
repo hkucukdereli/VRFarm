@@ -1,0 +1,9 @@
+last_saved: '2026-08-21'
+session:
+  grace_period_s: 2
+  n_trials: 3
+  iti_s: 1
+  prestim_s: 0.5
+  stim_s: 0.5
+  poststim_s: 0.5
+devices: {}

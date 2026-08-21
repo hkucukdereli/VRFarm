@@ -10,7 +10,7 @@
   h1 { font-size: 18px; margin-bottom: 8px; color: #fff; }
   h3 { font-size: 13px; margin-bottom: 6px; color: #aaa; text-transform: uppercase; letter-spacing: 1px; }
 
-  .grid { display: grid; grid-template-columns: 500px 1fr; gap: 12px; }
+  .grid { display: grid; grid-template-columns: 420px 1fr; gap: 12px; }
   .sidebar { display: flex; flex-direction: column; gap: 10px; }
 
   .card { background: #16213e; border-radius: 8px; padding: 12px; }
@@ -50,56 +50,27 @@
   .session-bar .clock { font-size: 18px; font-weight: 700; font-family: monospace; color: #1a73e8; }
   .session-bar .trial-clock { font-size: 16px; font-weight: 600; font-family: monospace; color: #ff9800; }
 
-  /* Video / Stim row */
-  .video-row { display: grid; grid-template-columns: 0.9fr 1.1fr; gap: 10px; margin-bottom: 10px; }
-  .video-col { display: grid; grid-template-rows: auto auto; gap: 10px; align-content: start; }
-  .video-box { background: #0a0a1a; border-radius: 8px; overflow: hidden; position: relative; min-height: 320px; }
-  .video-box.half { min-height: 160px; }
-  .video-box.half .box-content { min-height: 130px; }
-  /* Live plots must be exactly as tall as the camera+stimulus stack, never taller. The plot canvases
-     carry an intrinsic height that the grid's auto-sizing uses to size this column, which inflated it
-     past the camera+stim stack (min-height:0 alone can't stop it — it permits shrinking but doesn't
-     reduce the intrinsic size the track sizing reads). Fix: take the plot grid OUT OF FLOW
-     (position:absolute), so it contributes 0 to the panel's intrinsic height — the LEFT column then
-     drives the grid row and align-items:stretch matches this panel to it (verified diff=0, viewport-
-     independent, via headless render). */
-  #panel-liveplots { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
-  #panel-liveplots .box-content { flex: 1; min-height: 0; padding: 0; position: relative; }
-  .plot-quad { position: absolute; inset: 4px; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; min-height: 0; }
-  .plot-col { display: grid; gap: 4px; min-width: 0; min-height: 0; }
-  .plot-col.left { grid-template-rows: 1fr 1fr; }        /* RT hist + Performance */
-  .plot-col.right { grid-template-rows: 4fr 1fr; }       /* lick raster (4) : PSTH (1) */
-  .plot-cell { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #0a0a1a; border: 1px solid #16213e; border-radius: 4px; overflow: hidden; }
-  .plot-cell .plot-title { font-size: 10px; color: #888; padding: 2px 5px; }
-  .plot-cell canvas { flex: 1; min-height: 0; width: 100%; display: block; }
-  .plot-cell.empty { align-items: center; justify-content: center; color: #2a2a3a; font-size: 11px; }
+  /* Video row: one box per video device */
+  .video-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+               gap: 10px; margin-bottom: 10px; }
+  .video-box { background: #0a0a1a; border-radius: 8px; overflow: hidden; position: relative; min-height: 280px; }
   .video-box .box-header { display: flex; justify-content: space-between; align-items: center;
                             padding: 6px 10px; background: #16213e; }
   .video-box .box-header h3 { margin: 0; }
   .video-box .box-content { display: flex; align-items: center; justify-content: center;
-                             min-height: 300px; background: #0a0a1a; }
+                             min-height: 250px; background: #0a0a1a; }
   .video-box img { max-width: 100%; max-height: 480px; display: block; }
   .video-box .placeholder { color: #444; font-size: 12px; }
-
-  /* Raster panels */
-  .raster-panel { background: #16213e; border-radius: 8px; margin-bottom: 8px; overflow: hidden; }
-  .raster-header { display: flex; justify-content: space-between; align-items: center;
-                    padding: 6px 10px; }
-  .raster-header h3 { margin: 0; }
-  .raster-header .info { font-size: 11px; color: #888; font-family: monospace; }
-  .raster-canvas { width: 100%; height: 50px; display: block; background: #0a0a1a; }
 
   /* Trial table */
   .trial-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
   .trial-table th { text-align: left; padding: 4px 6px; color: #888; border-bottom: 1px solid #333; }
   .trial-table td { padding: 3px 6px; border-bottom: 1px solid #1a1a2e; }
   .trial-table tr:hover { background: #0f3460; }
-  .outcome-hit { color: #4caf50; }
-  .outcome-miss { color: #f44336; }
 
   /* Log */
   #log { background: #0a0a1a; border-radius: 4px; padding: 8px; font-family: monospace;
-         font-size: 11px; max-height: 150px; overflow-y: auto; margin-top: 8px; color: #888; }
+         font-size: 11px; max-height: 220px; overflow-y: auto; margin-top: 8px; color: #888; }
 
   /* Phase indicator */
   .phase-bar { display: flex; gap: 4px; margin-bottom: 12px; }
@@ -107,18 +78,6 @@
                 background: #333; color: #888; }
   .phase-step.active { background: #1a73e8; color: #fff; }
   .phase-step.done { background: #2e7d32; color: #fff; }
-
-  .notes-wrap { position: relative; }
-  .notes-wrap textarea {
-    width: 100%; padding: 5px 8px; border: 1px solid #333; border-radius: 4px;
-    background: #0f3460; color: #e0e0e0; font-size: 13px; font-family: inherit;
-    height: 28px; resize: none; overflow: hidden;
-    transition: height 0.15s;
-  }
-  .notes-wrap textarea:focus {
-    height: 120px; position: absolute; z-index: 10; width: 100%;
-    resize: vertical; overflow: auto;
-  }
 
   .quit-btn { position: fixed; top: 12px; right: 12px; width: 32px; height: 32px;
               border-radius: 50%; border: none; background: #c62828; color: #fff;
@@ -178,116 +137,19 @@
       </div>
 
       <div id="experiment-subsections" style="display:none;">
-        <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0 8px;">
-          <div><label>Grace Period (s)</label><input type="number" id="grace-period" value="10" min="0" max="60" step="1" class="task-param"></div>
-        </div>
-        <h3 style="font-size:11px; color:#888; margin:10px 0 6px;">STIMULUS</h3>
-        <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0 8px;">
-          <div><label>Size (deg)</label><input type="number" id="p-size_deg" step="0.5" min="0.5" class="task-param"></div>
-          <div><label>Shape</label><select id="p-shape" class="task-param"><option value="square">square</option><option value="circle">circle</option></select></div>
-          <div><label>Duration (s)</label><input type="number" id="p-duration_s" step="0.1" min="0.1" class="task-param"></div>
-          <div><label>Altitude (deg)</label><input type="number" id="p-altitude_deg" step="1" class="task-param"></div>
-        </div>
+        <h3 style="font-size:11px; color:#888; margin:10px 0 6px;">SESSION</h3>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0 8px;">
-          <div>
-            <label>Contrast <span id="contrast-metric-label" style="color:#7bd">(Weber)</span> <span id="contrast-ceiling-hint" style="color:#888; font-size:10px"></span></label>
-            <div style="display:flex; gap:4px; align-items:center;">
-              <input type="text" id="p-contrast_values" class="task-param" title="values in the active metric, 0..1 — e.g. [0.25, 0.15, 0.125]" style="flex:1; min-width:0;">
-              <button type="button" id="btn-correct-contrast" class="btn btn-sm btn-blue" onclick="correctContrast()" title="Clamp values to the achievable ceiling (uniform across the session's azimuths)">Correct</button>
-            </div>
-          </div>
-          <div><label>Proportions</label><input type="text" id="p-contrast_proportions" class="task-param" title="e.g. [0.34, 0.33, 0.33]"></div>
-          <div><label>Background</label><input type="number" id="p-background_gray" step="0.01" min="0" max="1" class="task-param" oninput="updateContrastHint()"></div>
+          <div><label>Grace period (s)</label><input type="number" id="p-grace_period_s" value="10" min="0" step="1" class="task-param"></div>
+          <div><label>N trials</label><input type="number" id="p-n_trials" min="1" step="1" class="task-param" oninput="updateSessionHint()"></div>
+          <div><label>ITI (s)</label><input type="text" id="p-iti_s" class="task-param" title="number or [min, max]" oninput="updateSessionHint()"></div>
         </div>
-        <div id="photodiode-sync-row" style="display:none; align-items:center; gap:12px; margin-top:4px;">
-          <label style="margin:0; display:inline-flex; align-items:center; gap:4px; cursor:pointer;">
-            <input type="checkbox" id="p-photodiode_sync_enabled" class="task-param"> Photodiode stim sync
-          </label>
-          <div style="display:inline-flex; align-items:center; gap:4px;">
-            <label style="margin:0;">every</label>
-            <input type="number" id="p-photodiode_sync_every_n" step="1" min="1" max="60" class="task-param" style="width:50px;">
-            <label style="margin:0;">frames</label>
-          </div>
+        <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">TRIAL STRUCTURE <span style="color:#666; text-transform:none; letter-spacing:0;">(ITI &rarr; pre-stim &rarr; stim &rarr; post-stim)</span></h3>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0 8px;">
+          <div><label>Pre-stim (s)</label><input type="number" id="p-prestim_s" min="0" step="0.1" class="task-param" oninput="updateSessionHint()"></div>
+          <div><label>Stim (s)</label><input type="number" id="p-stim_s" min="0" step="0.1" class="task-param" title="Placeholder stimulus window — timed only, no display in the barebones rig" oninput="updateSessionHint()"></div>
+          <div><label>Post-stim (s)</label><input type="number" id="p-poststim_s" min="0" step="0.1" class="task-param" oninput="updateSessionHint()"></div>
         </div>
-
-        <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">REWARD</h3>
-        <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:0 8px;">
-          <div><label>Level</label><select id="p-level" class="task-param" onchange="onLevelChange()" title="Reward rule (GO trials only): L1 = free reward at response-window start; L2 = operant + Pavlovian rescue at Pav delay; L3 = pure operant (no rescue); L2.5 = adaptive, draws L2/L3 per trial (forces Adaptive on)."><option value="1">1</option><option value="2">2</option><option value="2.5">2.5</option><option value="3">3</option></select></div>
-          <div><label>Amount</label><select id="p-amount_mode" class="task-param" onchange="updateAmountLabel()" title="Volume: pulse duration from the reward calibration. Count: N repeats of the base pulse (first calibration row in the setup UI)."><option value="volume">Volume</option><option value="count">Count</option></select></div>
-          <div><label id="amount-value-label">Volume (uL)</label><input type="number" id="p-amount_value" step="0.5" min="0" class="task-param"></div>
-          <div><label id="gap-label">Gap (ms)</label><input type="number" id="p-pulse_gap_ms" step="10" min="0" class="task-param" title="Off-time between pulses in Count mode, so the valve fully closes between pulses. Only used in Count mode."></div>
-        </div>
-        <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:0 8px; margin-top:4px;">
-          <div><label>Resp delay (s)</label><input type="text" inputmode="decimal" id="p-resp_delay_s" class="task-param" title="Time to delay the response-window start, measured from stim onset (accepts 0.6 or 0,6)"></div>
-          <div><label>Resp win (s)</label><input type="number" id="p-response_window" step="0.1" min="0" class="task-param" title="Response window duration, after the Resp delay"></div>
-          <div><label>Pav delay (s)</label><input type="number" id="p-pav_delay_s" step="0.1" min="0" class="task-param" title="L2 only: seconds from response-window start to wait for a lick before delivering a free Pavlovian rescue reward. 0 = no rescue (pure operant). L3 ignores this."></div>
-        </div>
-
-        <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">TIMEOUT</h3>
-        <div style="display:grid; grid-template-columns:1fr 1fr auto; gap:0 8px; align-items:end;">
-          <div><label>Type</label><select id="p-timeout_rule" class="task-param" title="Over-lick rule applied to the checked phases: none, rate (restart the phase if lick rate exceeds Max lick/s), or count (restart if total phase licks exceed budget)."><option value="none">None</option><option value="rate">Rate</option><option value="count">Count</option></select></div>
-          <div><label>Max lick/s</label><input type="number" id="p-max_lick_rate" step="0.05" min="0" class="task-param" title="Lick-rate threshold for the Type rule"></div>
-          <div><label title="Which trial phases the Type/Max-lick timeout rule enforces">Timeout on</label>
-            <div style="display:flex; gap:8px; font-size:11px; padding-bottom:5px; white-space:nowrap;">
-              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-timeout_prestim" class="task-param">Pre-stim</label>
-              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-timeout_poststim" class="task-param">Post-stim</label>
-              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-timeout_iti" class="task-param">ITI</label>
-            </div>
-          </div>
-        </div>
-
-        <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">TRIAL STRUCTURE</h3>
-        <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0 8px;">
-          <div><label>N blocks</label><input type="number" id="p-n_blocks" min="1" class="task-param" oninput="_updateNTrials()"></div>
-          <div><label>Block size</label><input type="number" id="p-block_size" min="1" class="task-param" oninput="_updateNTrials()"></div>
-          <div><label>N trials</label><input type="number" id="p-n_trials" readonly style="background:#2a2a2a; color:#888"></div>
-          <div><label>Block sequence (deg)</label><input type="text" id="p-block_sequence" class="task-param" title="e.g. [80, -40, 40]"></div>
-        </div>
-        <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0 8px;">
-          <div><label>Pre-stim (s)</label><input type="text" id="p-prestim_duration" class="task-param" title="number or [min, max]"></div>
-          <div><label>Post-stim (s)</label><input type="text" id="p-poststim_duration" class="task-param" title="number or [min, max]"></div>
-          <div><label>ITI (s)</label><input type="text" id="p-iti" class="task-param" title="number or [min, max]"></div>
-          <div><label>Go rule</label><select id="p-go_rule" class="task-param"><option value="all">all</option><option value="left">left</option><option value="right">right</option></select></div>
-        </div>
-        <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0 8px;">
-          <div><label>Global delay (s)</label><input type="text" id="p-global_delay" class="task-param" title="number or [min, max]"></div>
-          <div><label>Block delay (s)</label><input type="text" id="p-block_delay" class="task-param" title="number or [min, max]"></div>
-          <div style="display:flex; align-items:flex-end; padding-bottom:6px;">
-            <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:#aaa; cursor:pointer;">
-              <input type="checkbox" id="p-block_delay_skip_first" class="task-param"> Skip 1st block delay
-            </label>
-          </div>
-          <div style="display:flex; align-items:flex-end; padding-bottom:6px;">
-            <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:#aaa; cursor:pointer;">
-              <input type="checkbox" id="p-randomize_blocks" class="task-param"> Randomize blocks
-            </label>
-          </div>
-        </div>
-
-        <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">ADAPTIVE</h3>
-        <div style="display:grid; grid-template-columns:auto 1fr 1fr 1fr; gap:0 8px; align-items:end;">
-          <div style="display:flex; align-items:flex-end; padding-bottom:6px;">
-            <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:#aaa; cursor:pointer;">
-              <input type="checkbox" id="p-adaptive_enabled" class="task-param"> Enabled
-            </label>
-          </div>
-          <div><label>Initial</label><input type="number" id="p-adaptive_initial" step="0.1" min="0" max="1" class="task-param"></div>
-          <div><label>Step up</label><input type="number" id="p-adaptive_step_up" step="0.05" min="0" class="task-param"></div>
-          <div><label>Step down</label><input type="number" id="p-adaptive_step_down" step="0.05" min="0" class="task-param"></div>
-        </div>
-
-        <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">GLOBAL TIMEOUT</h3>
-        <div style="display:grid; grid-template-columns:1fr auto; gap:0 8px; align-items:end;">
-          <div><label title="Abort the session (as if STOP) when the mouse produces no licks in the checked phases for this many consecutive trials. 0 = off.">Num of trials</label><input type="number" id="p-global_timeout_trials" min="0" step="1" class="task-param" title="0 disables the global timeout"></div>
-          <div><label title="A trial counts toward the abort streak when it has no licks in any of the checked phases">Abort if no licks in</label>
-            <div style="display:flex; gap:8px; font-size:11px; padding-bottom:5px; white-space:nowrap;">
-              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-gt_prestim" class="task-param">Pre-stim</label>
-              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-gt_stim" class="task-param">Stim</label>
-              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-gt_poststim" class="task-param">Post-stim</label>
-              <label style="display:inline-flex; align-items:center; gap:3px; color:#bbb;"><input type="checkbox" id="p-gt_iti" class="task-param">ITI</label>
-            </div>
-          </div>
-        </div>
+        <div id="session-hint" style="font-size:11px; color:#7bd; margin-top:6px;"></div>
       </div>
     </div>
 
@@ -318,8 +180,8 @@
         <span class="trial-clock" id="trial-clock">--:-- / --:--</span>
       </div>
       <div>
-        <span class="label">ITI Timer</span><br>
-        <span class="trial-clock" id="iti-clock" style="color:#888;">--:-- / --:--</span>
+        <span class="label">Phase</span><br>
+        <span class="trial-clock" id="trial-phase" style="color:#888;">--</span>
       </div>
       <div style="margin-left:auto; text-align:right;">
         <span id="session-start-time" style="font-size:11px; color:#888;"></span>
@@ -342,125 +204,22 @@
                style="flex:1; min-width:160px; padding:4px 6px; background:#2a2a2a; color:#ddd; border:1px solid #444; border-radius:3px;">
         <button class="btn btn-sm btn-blue" id="btn-browse-dest" onclick="browseDest()">Browse…</button>
         <span style="display:inline-flex; align-items:center; gap:8px; font-size:11px; color:#888; white-space:nowrap;">
-          <span title="Which device data to record this session. Unchecked = not saved (Camera still livestreams).">Save:</span>
+          <span title="Which device data to record this session. Unchecked = not saved (video devices still livestream).">Save:</span>
           <span id="save-devices" style="display:inline-flex; gap:8px;"></span>
         </span>
       </div>
     </div>
 
-    <!-- Camera (+ half-height Stimulus) | Live plots -->
-    <div class="video-row">
-      <div class="video-col">
-        <div class="video-box" id="panel-camera">
-          <div class="box-header">
-            <h3><label style="margin:0; display:inline-flex; align-items:center; gap:4px; cursor:pointer;"><input type="checkbox" id="cb-camera" checked> Camera</label></h3>
-            <div id="cam-exp" style="display:flex; align-items:center; gap:8px; margin-left:auto; margin-right:8px; font-size:11px; color:#bcd;"
-                 title="Camera exposure/gain — live-adjustable before GO, locked during a recording. Runtime only: reverts to the rig on reload.">
-              <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer;">
-                <input type="checkbox" id="exp-auto" onchange="onExpAutoToggle(this.checked)"> Auto</label>
-              <label style="margin:0; display:inline-flex; align-items:center; gap:3px;">ms
-                <input type="number" id="exp-ms" min="0.1" step="0.5" style="width:62px" onchange="onExpChange()"></label>
-              <label style="margin:0; display:inline-flex; align-items:center; gap:3px;">gain
-                <input type="number" id="exp-gain" min="1" max="16" step="0.1" style="width:46px" onchange="onExpChange()"></label>
-            </div>
-            <button id="btn-camera-reset" onclick="resetCamera()" title="Recover a frozen/wedged camera: rebinds the sensor driver on the Pi and re-mounts the feed"
-                    style="font-size:11px; padding:2px 8px; background:#16213e; color:#8fa; border:1px solid #2a3a5e; border-radius:4px; cursor:pointer;">⟳ Reset</button>
-          </div>
-          <div class="box-content" id="camera-content">
-            <span class="placeholder">Camera off</span>
-          </div>
-        </div>
-        <div class="video-box half" id="panel-stim">
-          <div class="box-header">
-            <h3><label style="margin:0; display:inline-flex; align-items:center; gap:4px; cursor:pointer;"><input type="checkbox" id="cb-stim" checked> Stimulus</label></h3>
-          </div>
-          <div class="box-content" id="stim-content">
-            <span class="placeholder">No stimulus</span>
-          </div>
-        </div>
-      </div>
-      <div class="video-box" id="panel-liveplots">
-        <div class="box-header">
-          <h3>Live plots</h3>
-          <span style="font-size:11px; color:#888">updates each trial</span>
-        </div>
-        <div class="box-content" id="liveplots-content">
-          <div class="plot-quad">
-            <div class="plot-col left">
-              <div class="plot-cell"><div class="plot-title">RT histogram · hit trials · 100 ms bins</div><canvas id="rt-hist-canvas"></canvas></div>
-              <div class="plot-cell"><div class="plot-title" id="perf-title">Performance</div><canvas id="hitrate-canvas"></canvas></div>
-            </div>
-            <div class="plot-col right">
-              <div class="plot-cell"><div class="plot-title">Licks aligned to stim onset</div><canvas id="lickraster-canvas"></canvas></div>
-              <div class="plot-cell"><div class="plot-title">Lick PSTH</div><canvas id="psth-canvas"></canvas></div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Unified Raster -->
-    <div class="raster-panel" id="panel-raster">
-      <div class="raster-header">
-        <div style="display:flex; align-items:center; gap:10px;">
-          <h3 style="margin:0; font-size:11px; letter-spacing:0.5px; color:#aaa;">EVENTS</h3>
-          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#4caf50;">
-            <input type="checkbox" id="cb-lick" checked> Licks
-          </label>
-          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#2196f3;">
-            <input type="checkbox" id="cb-reward" checked> Rewards
-          </label>
-          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#ab47bc;">
-            <input type="checkbox" id="cb-timeout" checked> Timeouts
-          </label>
-          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#2196f3;">
-            <input type="checkbox" id="cb-stim-events" checked> Stim
-          </label>
-          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#ffc107;">
-            <input type="checkbox" id="cb-respwin" checked> Resp win
-          </label>
-        </div>
-        <span class="info" id="raster-info"></span>
-      </div>
-      <canvas class="raster-canvas" id="canvas-raster" style="height:40px;"></canvas>
-    </div>
-
-    <div class="raster-panel" id="panel-raster-sync">
-      <div class="raster-header">
-        <div style="display:flex; align-items:center; gap:10px;">
-          <h3 style="margin:0; font-size:11px; letter-spacing:0.5px; color:#aaa;">SYNC</h3>
-          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#ff5722;">
-            <input type="checkbox" id="cb-photodiode" checked> Photodiode
-          </label>
-          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#2196f3;">
-            <input type="checkbox" id="cb-stim-sync" checked> Stim
-          </label>
-        </div>
-        <span class="info" id="raster-info-sync"></span>
-      </div>
-      <canvas class="raster-canvas" id="canvas-raster-sync" style="height:40px;"></canvas>
-    </div>
-
-    <div class="raster-panel" id="panel-raster-run">
-      <div class="raster-header">
-        <div style="display:flex; align-items:center; gap:10px;">
-          <h3 style="margin:0; font-size:11px; letter-spacing:0.5px; color:#aaa;">RUNNING</h3>
-          <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#26c6da;">
-            <input type="checkbox" id="cb-run" checked> Speed (cm/s)
-          </label>
-        </div>
-        <span class="info" id="raster-info-run"></span>
-      </div>
-      <canvas class="raster-canvas" id="canvas-raster-run" style="height:44px;"></canvas>
-    </div>
+    <!-- Video devices (one box per rig device with video: true) -->
+    <div class="video-row" id="video-panels" style="display:none;"></div>
 
     <!-- Trial table -->
     <div class="card" style="margin-top: 10px">
       <h3>Trials</h3>
-      <div style="max-height: 200px; overflow-y: auto;">
+      <div style="max-height: 260px; overflow-y: auto;">
         <table class="trial-table">
           <thead><tr>
-            <th>#</th><th>Az</th><th>Contrast</th><th>Level</th><th>Adaptive</th><th>Type</th><th>Outcome</th><th>RT (ms)</th><th title="licks within the response window">Licks</th>
+            <th>#</th><th>Start</th><th>Stim on</th><th>Duration (s)</th>
           </tr></thead>
           <tbody id="trial-tbody"></tbody>
         </table>
@@ -480,88 +239,18 @@ let uiBusy = false;
 let eventSource = null;
 let sessionStartTime = null;
 let trialStartTime = null;
-let itiStartTime = null;
 let currentTrialNum = 0;
-// Phase 2: session ETA + per-phase planned durations (shown as elapsed/total).
-let sessionEstimateMs = null;   // baseline session ETA from the trial table
-let timeoutExtraMs = 0;         // extra time accrued from phase-restart timeouts
-let phaseStartTime = null;      // start of the current enforced phase (ITI/prestim/poststim)
-let currentTrialTotalS = null;  // planned duration of the current trial phase (excl. ITI)
-let currentItiTotalS = null;    // planned duration of the current ITI
-let estRemainingMs = null;      // Estimated time LEFT (countdown): full at start, -= (ITI+trial) per trial
-let nextTrialTotalS = null;     // upcoming trial-phase duration (shown when trial not active)
-let nextItiTotalS = null;       // upcoming ITI duration (shown when ITI not active)
+let currentTrialTotalS = null;  // planned duration of the current trial (ITI + phases)
+let currentItiS = null;         // this trial's actual ITI draw (from the trial_start event)
+let phaseOverride = null;       // 'stim' / 'post-stim' set by real stim events (beats the timing estimate)
+let sessionEstimateMs = null;   // whole-session ETA from the session form
+let estRemainingMs = null;      // countdown: full at start, -= trial duration per trial
 let sessionShown = false;       // Session # + Estimated shown (set after Deploy)
-// Phase 4: predicted upcoming events drawn in the future region of the raster.
-let predStim = null;      // predicted upcoming stim window {t_on, t_off} (leader clock)
-let predReward = null;    // predicted pavlovian reward {t} (L1/L2 only; not adaptive/conditional)
-let predTrialIdx = null;  // trial index currently being predicted
 let clockInterval = null;
 
-// Live data
-let cameraLive = false;
-let lickEvents = [], lickOffset = null;  // lickOffset is the shared Pi→browser time offset
-let _offsetSamples = [];  // collect first N offsets, use median
-let photodiodeEvents = [];
-let rewardEvents = [];
-let timeoutEvents = [];  // over-lick phase restarts (iti/prestim/poststim) — purple markers
-let runEvents = [];      // running-wheel {t, speed_cms, distance_cm} for the RUNNING trace panel
-let rasterLive = false, rasterAnimFrame = null;
-
-// Stim events from SSE
-let stimEvents = [];  // [{trial, t_on, t_off}]
-let rtHits = [];      // hit-trial response times (ms) for the Live-plots RT histogram
-const RT_BIN_MS = 100;
-// Performance plot series (one point per completed trial, x = trial 1..N; null before the relevant
-// trial type appears). For go-only tasks the go-hit-rate == responded/total and FA/d' stay absent.
-let hitRateSeries = [];   // cumulative GO-trial hit rate = go hits / go trials
-let slideHitSeries = [];  // sliding go-trial hit rate over the last SLIDE_N go trials
-let faSeries = [];        // false-alarm rate = nogo licks / nogo trials
-let dprimeSeries = [];    // d' (go/nogo sensitivity), null before both go & nogo seen
-let _goRespHist = [];     // responded (bool) per GO trial, for the sliding window
-let _goN = 0, _goHit = 0, _nogoN = 0, _nogoFA = 0;   // go/nogo tallies
-const SLIDE_N = 10;       // sliding hit-rate window (last 10 go trials)
-// Lick raster + PSTH (pooled licks relative to stim onset):
-const PSTH_PRE = 5.0, PSTH_POST = 10.0, PSTH_BIN = 0.05;   // lick raster + PSTH share x ∈ [−5,+10] s
-let psthBins = [], psthNStim = 0, psthRaster = [], _psthFrame = 0;   // psthRaster: {trial, rel:[dt]} per completed trial
-
-// The PSTH/lick-raster are coupled to LIVE lick DATA: they run whenever a lick device exists and the
-// live stream is on. They are independent of the events-raster "Licks" checkbox (cb-lick) — that box
-// only toggles whether lick ticks SHOW in the events raster; the data is always received/buffered, so
-// the Live-plots lick raster still plots with cb-lick unchecked.
-function _hasLickDevice() {
-  const dev = config && config.rig && config.rig.devices && config.rig.devices.lick_sensor;
-  return !!dev && dev.enabled !== false;
-}
-function _liveLicksOn() {
-  return _hasLickDevice() && rasterLive;
-}
-
-// Inverse normal CDF (Acklam) — for d' = z(hit rate) - z(false-alarm rate).
-function _zinv(p) {
-  if (p <= 0) return -Infinity;
-  if (p >= 1) return Infinity;
-  const a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02, 1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00];
-  const b = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02, 6.680131188771972e+01, -1.328068155288572e+01];
-  const c = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00, -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00];
-  const d = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00, 3.754408661907416e+00];
-  const plow = 0.02425, phigh = 1 - plow;
-  let q, r;
-  if (p < plow) { q = Math.sqrt(-2 * Math.log(p)); return (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) / ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1); }
-  if (p <= phigh) { q = p - 0.5; r = q*q; return (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q / (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1); }
-  q = Math.sqrt(-2 * Math.log(1 - p)); return -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) / ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1);
-}
-// d' with log-linear correction (Hautus) so 0/1 rates don't blow up.
-function _dprime(hits, go, fa, nogo) {
-  const H = (hits + 0.5) / (go + 1), F = (fa + 0.5) / (nogo + 1);
-  return _zinv(H) - _zinv(F);
-}
-let trialTable = [];  // populated from /api/trial_table after deploy
-const RASTER_PAST = 20;    // seconds of history shown left of the "now" play-head (−20→0)
-const RASTER_FUTURE = 10;  // seconds of future shown right of it (0→+10; scheduled stim/reward)
-const RASTER_WINDOW = RASTER_PAST + RASTER_FUTURE;  // total span (s)
-const STIM_COLOR = 'rgba(33, 150, 243, 0.15)';  // blue translucent (stim window, full height)
-const RESPWIN_COLOR = 'rgba(255, 193, 7, 0.28)';  // amber (response window, top 1/3)
+// Live video state
+let liveOn = false;
+let videoRetries = {};          // per-device <img> retry timers
 
 // Today's date as yyyymmdd (LOCAL, not UTC — avoids the evening off-by-one). Set once at load;
 // stays editable and is not reset when an experiment is loaded.
@@ -587,24 +276,15 @@ async function loadRig() {
     const data = await r.json();
     if (data.error) { log('Error: ' + data.error); return; }
 
-    // Keep any experiment that is already loaded. /api/load_rig deliberately leaves
-    // state["task_config"] alone on the server, so nulling it here only desynced the
-    // browser: the populated parameter form stayed on screen while Deploy/Save/Save As/
-    // Correct silently went dead, and the session estimate + reward prediction (which read
-    // config.task) lost their inputs. Deploy is still invalidated — the server clears the
-    // deployed flag and the phase drops to connected — so GO correctly needs a re-Deploy.
+    // Keep any experiment that is already loaded (the server leaves task_config alone too).
     config = {rig: data.rig, task: (config && config.task) || null};
-    // A different rig may author contrast in a different metric (Weber/Michelson/
-    // Normalized), so re-derive the label and ceiling hint against the rig just loaded.
-    refreshContrastMetric();
     // Pre-fill the transfer destination with the rig default (only if the user hasn't set one)
     const _destField = document.getElementById('transfer-dest');
     if (_destField && !_destField.value && data.data_dir) {
       _destField.value = data.data_dir;
     }
-    updateDevicePanels();
+    renderVideoPanels();
     renderSaveDevices();
-    _initCamExp();          // seed the camera exposure/gain fields from the rig (runtime-only)
     buildPiStatus();
     for (const [name, res] of Object.entries(data.pi_results)) {
       const dot = document.getElementById('dot-' + name);
@@ -624,31 +304,22 @@ async function loadRig() {
   }
 }
 
-function _updateNTrials() {
-  const nb = parseInt(document.getElementById('p-n_blocks').value) || 0;
-  const bs = parseInt(document.getElementById('p-block_size').value) || 0;
-  document.getElementById('p-n_trials').value = nb * bs;
-}
-
-// Format/parse duration fields (scalar or [min, max])
-function _fmtDur(v) {
-  if (v == null) return '0';
-  return Array.isArray(v) ? JSON.stringify(v) : String(v);
-}
+// Parse a duration field that accepts a scalar or [min, max]
 function _parseDur(id) {
   const s = document.getElementById(id).value.trim();
   try { const v = JSON.parse(s); return v; } catch(e) { return parseFloat(s) || 0; }
 }
-// Robust numeric read for decimal fields. Accepts comma OR period decimals (so a
-// locale like de-AT that types "0,37" is read correctly) and, when the field is blank
-// or unparseable, returns `fallback` — NEVER a hardcoded default. This is why saving no
-// longer silently reverts a value (e.g. Resp delay) to a constant: an empty/invalid read
-// preserves the last stored value instead of clobbering it.
+// Robust numeric read: accepts comma OR period decimals; blank/unparseable -> fallback.
 function _numField(id, fallback) {
   const raw = String(document.getElementById(id).value).trim().replace(',', '.');
   if (raw === '') return fallback;
   const v = parseFloat(raw);
   return isFinite(v) ? v : fallback;
+}
+// Mean of a scalar-or-[min,max] duration value
+function _durMean(v) {
+  if (Array.isArray(v)) return v.length === 2 ? (v[0] + v[1]) / 2 : (parseFloat(v[0]) || 0);
+  return parseFloat(v) || 0;
 }
 
 async function loadTask() {
@@ -682,162 +353,64 @@ async function loadTask() {
 }
 
 function populateTaskFields(t) {
-  const stim = t.stimulus || {};
-  const rew = t.reward || {};
   const sess = t.session || {};
-  const adp = t.adaptive || {};
-
-  // Stimulus
-  document.getElementById('p-size_deg').value = stim.size_deg ?? '';
-  document.getElementById('p-shape').value = stim.shape || 'square';
-  document.getElementById('p-duration_s').value = stim.duration_s ?? '';
-  document.getElementById('p-altitude_deg').value = stim.altitude_deg ?? '';
-  document.getElementById('p-go_rule').value = stim.go_rule || 'all';
-  document.getElementById('p-background_gray').value = stim.background_gray ?? 0;
-  // Contrast: always dict with values + proportions
-  const c = stim.contrast || {};
-  document.getElementById('p-contrast_values').value = JSON.stringify(c.values || [1.0]);
-  document.getElementById('p-contrast_proportions').value = JSON.stringify(c.proportions || [1]);
-  document.getElementById('p-photodiode_sync_enabled').checked = !!stim.photodiode_sync_enabled;
-  document.getElementById('p-photodiode_sync_every_n').value = stim.photodiode_sync_every_n ?? 5;
-  refreshContrastMetric();
-
-  // Reward
-  document.getElementById('p-level').value = String(rew.level ?? 1);
-  document.getElementById('p-amount_mode').value = rew.amount_mode || 'volume';
-  document.getElementById('p-amount_value').value = (rew.amount_mode === 'count')
-      ? (rew.amount_count ?? 1) : (rew.amount_ul ?? '');
-  document.getElementById('p-pulse_gap_ms').value = rew.pulse_gap_ms ?? 150;
-  updateAmountLabel();
-  document.getElementById('p-resp_delay_s').value = rew.resp_delay_s ?? rew.reward_delay_s ?? '';
-  document.getElementById('p-response_window').value = rew.response_window ?? 1.4;
-  document.getElementById('p-pav_delay_s').value = rew.pav_delay_s ?? 0;
-  document.getElementById('p-timeout_rule').value = rew.timeout_rule || 'none';
-  document.getElementById('p-max_lick_rate').value = rew.max_lick_rate ?? 0;
-  const tphases = rew.timeout_phases || ['iti'];
-  document.getElementById('p-timeout_prestim').checked = tphases.includes('prestim');
-  document.getElementById('p-timeout_poststim').checked = tphases.includes('poststim');
-  document.getElementById('p-timeout_iti').checked = tphases.includes('iti');
-
-  // Session
-  document.getElementById('grace-period').value = sess.grace_period_s ?? 10;
-  document.getElementById('p-block_size').value = sess.block_size ?? 25;
-  document.getElementById('p-n_blocks').value = sess.n_blocks ?? '';
-  const iti = sess.iti;
-  document.getElementById('p-iti').value = Array.isArray(iti) ? JSON.stringify(iti) : (iti ?? '');
-  document.getElementById('p-block_sequence').value = JSON.stringify(sess.block_sequence || []);
-  document.getElementById('p-randomize_blocks').checked = !!sess.randomize_blocks;
-  document.getElementById('p-prestim_duration').value = _fmtDur(sess.prestim_duration);
-  document.getElementById('p-poststim_duration').value = _fmtDur(sess.poststim_duration);
-  document.getElementById('p-global_delay').value = _fmtDur(sess.global_delay);
-  document.getElementById('p-block_delay').value = _fmtDur(sess.block_delay);
-  document.getElementById('p-block_delay_skip_first').checked = !!sess.block_delay_skip_first;
-  const gtphases = sess.global_timeout_phases || [];
-  document.getElementById('p-global_timeout_trials').value = sess.global_timeout_trials ?? 0;
-  document.getElementById('p-gt_prestim').checked = gtphases.includes('prestim');
-  document.getElementById('p-gt_stim').checked = gtphases.includes('stim');
-  document.getElementById('p-gt_poststim').checked = gtphases.includes('poststim');
-  document.getElementById('p-gt_iti').checked = gtphases.includes('iti');
-  _updateNTrials();
-
-  // Adaptive
-  document.getElementById('p-adaptive_enabled').checked = !!adp.enabled;
-  document.getElementById('p-adaptive_initial').value = adp.initial_state ?? 0;
-  document.getElementById('p-adaptive_step_up').value = adp.step_up ?? 0.2;
-  document.getElementById('p-adaptive_step_down').value = adp.step_down ?? 0.2;
-  onLevelChange();   // L2.5 forces Adaptive on/locked
+  document.getElementById('p-grace_period_s').value = sess.grace_period_s ?? 10;
+  document.getElementById('p-n_trials').value = sess.n_trials ?? 60;
+  const iti = sess.iti_s;
+  document.getElementById('p-iti_s').value = Array.isArray(iti) ? JSON.stringify(iti) : (iti ?? 5);
+  document.getElementById('p-prestim_s').value = sess.prestim_s ?? 2;
+  document.getElementById('p-stim_s').value = sess.stim_s ?? 2;
+  document.getElementById('p-poststim_s').value = sess.poststim_s ?? 2;
+  updateSessionHint();
 }
 
 function collectTaskFields() {
-  // Parse contrast values + proportions
-  let contrastValues, contrastProportions;
-  try { contrastValues = JSON.parse(document.getElementById('p-contrast_values').value); } catch(e) { contrastValues = [1.0]; }
-  try { contrastProportions = JSON.parse(document.getElementById('p-contrast_proportions').value); } catch(e) { contrastProportions = [1]; }
-
-  // Parse ITI: try JSON array, then number
-  let iti;
-  const iStr = document.getElementById('p-iti').value.trim();
-  try { iti = JSON.parse(iStr); } catch(e) { iti = parseFloat(iStr) || 8; }
-
-  // Parse block_sequence
-  let blockSeq;
-  try { blockSeq = JSON.parse(document.getElementById('p-block_sequence').value); } catch(e) { blockSeq = [0]; }
-
   const _fields = {
-    stimulus: {
-      background_gray: parseFloat(document.getElementById('p-background_gray').value) || 0,
-      size_deg: parseFloat(document.getElementById('p-size_deg').value) || 8,
-      shape: document.getElementById('p-shape').value || 'square',
-      duration_s: parseFloat(document.getElementById('p-duration_s').value) || 2,
-      altitude_deg: _numField('p-altitude_deg', 10),
-      go_rule: document.getElementById('p-go_rule').value,
-      contrast: { values: contrastValues, proportions: contrastProportions },
-      photodiode_sync_enabled: document.getElementById('p-photodiode_sync_enabled').checked,
-      photodiode_sync_every_n: parseInt(document.getElementById('p-photodiode_sync_every_n').value) || 5,
-    },
-    reward: {
-      // One value box serves both modes: it writes the ACTIVE mode's key and the
-      // other key keeps its previous task value (so switching modes is lossless).
-      amount_mode: document.getElementById('p-amount_mode').value,
-      amount_ul: document.getElementById('p-amount_mode').value === 'volume'
-          ? (parseFloat(document.getElementById('p-amount_value').value) || 4)
-          : (((config.task || {}).reward || {}).amount_ul ?? 4),
-      amount_count: document.getElementById('p-amount_mode').value === 'count'
-          ? (parseInt(document.getElementById('p-amount_value').value) || 1)
-          : (((config.task || {}).reward || {}).amount_count ?? 1),
-      pulse_gap_ms: _numField('p-pulse_gap_ms', 150),
-      level: parseFloat(document.getElementById('p-level').value) || 1,
-      resp_delay_s: _numField('p-resp_delay_s',
-          (((config || {}).task || {}).reward || {}).resp_delay_s
-          ?? (((config || {}).task || {}).reward || {}).reward_delay_s ?? 0.6),
-      response_window: _numField('p-response_window', 1.4),
-      // Pav delay 0 = disabled; preserve an explicit 0 (don't fall back to a default)
-      pav_delay_s: (function(){const v = parseFloat(document.getElementById('p-pav_delay_s').value); return isFinite(v) ? v : 0;})(),
-      timeout_rule: document.getElementById('p-timeout_rule').value,
-      max_lick_rate: parseFloat(document.getElementById('p-max_lick_rate').value) || 0,
-      timeout_phases: ['prestim', 'poststim', 'iti'].filter(
-          p => document.getElementById('p-timeout_' + p).checked),
-    },
     session: {
-      grace_period_s: parseInt(document.getElementById('grace-period').value) || 10,
-      n_blocks: parseInt(document.getElementById('p-n_blocks').value) || 6,
-      block_size: parseInt(document.getElementById('p-block_size').value) || 25,
-      block_sequence: blockSeq,
-      iti: iti,
-      prestim_duration: _parseDur('p-prestim_duration'),
-      poststim_duration: _parseDur('p-poststim_duration'),
-      global_delay: _parseDur('p-global_delay'),
-      block_delay: _parseDur('p-block_delay'),
-      block_delay_skip_first: document.getElementById('p-block_delay_skip_first').checked,
-      randomize_blocks: document.getElementById('p-randomize_blocks').checked,
-      global_timeout_trials: parseInt(document.getElementById('p-global_timeout_trials').value) || 0,
-      global_timeout_phases: ['prestim', 'stim', 'poststim', 'iti'].filter(
-          p => document.getElementById('p-gt_' + p).checked),
-    },
-    adaptive: {
-      // L2.5 IS the adaptive mode -> always enabled, independent of the (disabled) checkbox
-      enabled: (parseFloat(document.getElementById('p-level').value) === 2.5)
-               || document.getElementById('p-adaptive_enabled').checked,
-      initial_state: parseFloat(document.getElementById('p-adaptive_initial').value) || 0,
-      step_up: _numField('p-adaptive_step_up', 0.2),
-      step_down: _numField('p-adaptive_step_down', 0.2),
+      grace_period_s: parseInt(document.getElementById('p-grace_period_s').value) || 0,
+      n_trials: parseInt(document.getElementById('p-n_trials').value) || 60,
+      iti_s: _parseDur('p-iti_s'),
+      prestim_s: _numField('p-prestim_s', 2),
+      stim_s: _numField('p-stim_s', 2),
+      poststim_s: _numField('p-poststim_s', 2),
     },
   };
-  // Keep the JS-side task copy current so nothing goes stale between saves — specifically the
-  // Amount dual-key (volume/count), whose inactive value is read back from config.task. Every
-  // other field is read straight from the DOM, so this makes the whole form save losslessly.
+  // Keep the JS-side task copy current (the `devices:` section, untouched by this form,
+  // rides along in config.task and is preserved by the server-side section merge).
   if (config) config.task = Object.assign(config.task || {}, _fields);
   return _fields;
 }
 
+// Planned wall-clock of one trial (s): ITI (mean if a range) + the three phases.
+function trialPlannedS() {
+  return _durMean(_parseDur('p-iti_s')) + _numField('p-prestim_s', 0)
+       + _numField('p-stim_s', 0) + _numField('p-poststim_s', 0);
+}
+
+function computeSessionEstimate() {
+  const n = parseInt(document.getElementById('p-n_trials').value) || 0;
+  const per = trialPlannedS();
+  if (!n || !per) return null;
+  return n * per * 1000;
+}
+
+function updateSessionHint() {
+  const el = document.getElementById('session-hint');
+  if (!el) return;
+  const n = parseInt(document.getElementById('p-n_trials').value) || 0;
+  const per = trialPlannedS();
+  if (!n || !per) { el.textContent = ''; return; }
+  const total = n * per;
+  const m = Math.floor(total / 60), s = Math.round(total % 60);
+  el.textContent = `session ≈ ${n} × ${per.toFixed(1)} s = ${m} min ${s} s (+ grace)`;
+}
+
 async function saveTask() {
   const fields = collectTaskFields();
-  // Update server-side config
   await fetch('/api/update_task', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(fields)
   });
-  // Save to YAML file
   const r = await fetch('/api/save_task', {method: 'POST'});
   const data = await r.json();
   if (data.ok) {
@@ -865,7 +438,6 @@ async function saveTaskAs() {
   const data = await r.json();
   if (data.ok) {
     document.getElementById('task-last-saved').textContent = 'Last saved: ' + (data.last_saved || '--');
-    // Add to dropdown if new, and select it
     const sel = document.getElementById('task-select');
     let found = false;
     for (const opt of sel.options) { if (opt.value === data.name) { found = true; break; } }
@@ -898,151 +470,42 @@ async function updateSession() {
 }
 
 // ── Per-device "save data" checkboxes (Actions row 2) ──
-// One checkbox per data-producing device present+enabled in the rig; default checked (= save all,
-// current behavior). Read at GO by startSession(). Camera unchecked = livestream but no video file;
-// a behavioral device unchecked = its detailed HDF5 datasets are skipped (core outcomes still save).
+// One checkbox per enabled rig device; default checked (= save everything). Read at GO by
+// startSession(). A video device unchecked = livestream but no file; any other device
+// unchecked = its HDF5 datasets are skipped by the Leader.
 function renderSaveDevices() {
   const host = document.getElementById('save-devices');
   if (!host) return;
   const devs = (config && config.rig && config.rig.devices) || {};
-  const DATA_DEVICES = [['camera', 'Camera'], ['lick_sensor', 'Lick'],
-                        ['reward', 'Reward'], ['photodiode', 'Photodiode'], ['encoder', 'Run']];
-  host.innerHTML = DATA_DEVICES
-    .filter(([name]) => devs[name] && devs[name].enabled)
-    .map(([name, label]) =>
+  host.innerHTML = Object.entries(devs)
+    .filter(([, cfg]) => cfg && cfg.enabled)
+    .map(([name]) =>
       `<label style="display:inline-flex; align-items:center; gap:3px; color:#bbb; cursor:pointer;">` +
-      `<input type="checkbox" class="save-dev" data-dev="${name}" checked>${label}</label>`)
+      `<input type="checkbox" class="save-dev" data-dev="${name}" checked>${name}</label>`)
     .join('');
 }
 
-// ── Device panel visibility ──
+// ── Video panels: one box per rig device with video: true ──
 
-function updateDevicePanels() {
-  if (!config || !config.rig) return;
-  const devs = config.rig.devices || {};
-  // Show/hide camera and stimulus panels
-  const panels = {'camera': 'panel-camera', 'display': 'panel-stim'};
-  for (const [devName, panelId] of Object.entries(panels)) {
-    const el = document.getElementById(panelId);
-    if (el) el.style.display = (devs[devName] && devs[devName].enabled) ? '' : 'none';
-  }
-  // Show/hide raster checkboxes based on enabled devices
-  const cbMap = {'lick_sensor': 'cb-lick', 'reward': 'cb-reward', 'photodiode': 'cb-photodiode'};
-  for (const [devName, cbId] of Object.entries(cbMap)) {
-    const label = document.getElementById(cbId)?.parentElement;
-    if (label) label.style.display = (devs[devName] && devs[devName].enabled) ? '' : 'none';
-  }
-  // Photodiode stim-sync controls only available when the rig has a photodiode
-  const pdOn = !!(devs['photodiode'] && devs['photodiode'].enabled);
-  const syncRow = document.getElementById('photodiode-sync-row');
-  if (syncRow) syncRow.style.display = pdOn ? 'flex' : 'none';
-  // Running-speed panel only when the rig has an encoder
-  const runPanel = document.getElementById('panel-raster-run');
-  if (runPanel) runPanel.style.display = (devs['encoder'] && devs['encoder'].enabled) ? '' : 'none';
-  refreshContrastMetric();
+function _videoDeviceNames() {
+  const devs = (config && config.rig && config.rig.devices) || {};
+  return Object.entries(devs)
+    .filter(([, cfg]) => cfg && cfg.enabled && cfg.video)
+    .map(([name]) => name);
 }
 
-// ── Contrast metric ──
-
-function _activeMetric() {
-  return (config && config.rig && config.rig.devices && config.rig.devices.display
-          && config.rig.devices.display.contrast_metric) || 'weber';
-}
-
-// Normalized headroom fraction f -> value in `metric` units (mirrors shared/stim_generator.py).
-function fractionToMetric(f, bg, metric) {
-  if (metric === 'normalized' || bg < 0.004) return f;
-  if (metric === 'weber') return f * (1 - bg) / bg;
-  if (metric === 'michelson') { const d = 2 * bg + f * (1 - bg); return d > 0 ? f * (1 - bg) / d : 0; }
-  return f;
-}
-
-function refreshContrastMetric() {
-  const metric = _activeMetric();
-  const name = {weber: 'Weber', michelson: 'Michelson', normalized: 'Normalized'}[metric] || metric;
-  const lbl = document.getElementById('contrast-metric-label');
-  if (lbl) lbl.textContent = '(' + name + ')';
-  updateContrastHint();
-}
-
-// Live hint: the display ceiling (f=1) in the active metric at the current background.
-function updateContrastHint() {
-  const el = document.getElementById('contrast-ceiling-hint');
-  if (!el) return;
-  const bg = parseFloat(document.getElementById('p-background_gray')?.value);
-  if (!isFinite(bg)) { el.textContent = ''; return; }
-  // Input is capped at 1.0; the metric display ceiling only matters when it falls BELOW 1
-  // (upper part of 0..1 would clip to white). When it's >=1 the whole 0..1 range is usable.
-  const cmax = Math.min(fractionToMetric(1, bg, _activeMetric()), 1);
-  el.textContent = (cmax < 0.999) ? ('max ' + cmax.toFixed(2) + ' @ this bg') : '';
-}
-
-// "Correct" button: clamp entered contrast(s) to the achievable uniform ceiling (server-computed
-// from the geometry's per-azimuth luminance falloff), and write the corrected values back.
-function onLevelChange() {
-  // Level 2.5 IS the adaptive mode: force the Adaptive checkbox on and lock it so it
-  // can't be turned off; any other level unlocks it (restores manual control).
-  const isL25 = parseFloat(document.getElementById('p-level').value) === 2.5;
-  const cb = document.getElementById('p-adaptive_enabled');
-  if (isL25) { cb.checked = true; cb.disabled = true; }
-  else { cb.disabled = false; }
-}
-
-function updateAmountLabel() {
-  const mode = document.getElementById('p-amount_mode').value;
-  const lbl = document.getElementById('amount-value-label');
-  const inp = document.getElementById('p-amount_value');
-  const gap = document.getElementById('p-pulse_gap_ms');
-  const gapLbl = document.getElementById('gap-label');
-  const isCount = (mode === 'count');
-  if (isCount) {
-    lbl.textContent = 'Count (#)';
-    inp.step = 1; inp.min = 1;
-    inp.title = 'Number of base pulses per reward (base pulse = first calibration row in the setup UI); 1 = 1 pulse, 2 = 2 pulses';
-    if (inp.value) inp.value = Math.max(1, Math.round(parseFloat(inp.value)) || 1);
-  } else {
-    lbl.textContent = 'Volume (uL)';
-    inp.step = 0.5; inp.min = 0;
-    inp.title = 'Volume per reward; pulse duration interpolated from the reward calibration';
-  }
-  // Gap only applies in Count mode
-  gap.disabled = !isCount;
-  gap.style.opacity = gapLbl.style.opacity = isCount ? '1' : '0.4';
-}
-
-async function correctContrast() {
-  let values;
-  try { values = JSON.parse(document.getElementById('p-contrast_values').value); }
-  catch (e) { log('Correct: contrast must be a list, e.g. [0.25, 0.15]'); return; }
-  if (!Array.isArray(values)) values = [values];
-  const bg = parseFloat(document.getElementById('p-background_gray').value) || 0;
-  let blockSeq;
-  try { blockSeq = JSON.parse(document.getElementById('p-block_sequence').value); }
-  catch (e) { blockSeq = [0]; }
-  try {
-    const r = await fetch('/api/correct_contrast', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({values, background_gray: bg, block_sequence: blockSeq})
-    });
-    const data = await r.json();
-    if (data.ok) {
-      document.getElementById('p-contrast_values').value = JSON.stringify(data.corrected);
-      log(`Contrast corrected -> ${JSON.stringify(data.corrected)} `
-          + `(ceiling ${data.ceiling}, ${data.metric})` + (data.note ? ' — ' + data.note : ''));
-      // Corrected values change the stimuli -> sync to the server (sets deployed=False) so a prior
-      // Deploy is invalidated and Go greys out until the user re-deploys.
-      try {
-        await fetch('/api/update_task', {method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify(collectTaskFields())});
-      } catch (e) {}
-      if (phase === 'deployed') setPhase('connected');
-      updateButtons();
-    } else {
-      log('Correct failed: ' + (data.error || ''));
-    }
-  } catch (e) {
-    log('Correct error: ' + e.message);
-  }
+function renderVideoPanels() {
+  const host = document.getElementById('video-panels');
+  if (!host) return;
+  const names = _videoDeviceNames();
+  host.style.display = names.length ? '' : 'none';
+  host.innerHTML = names.map(name =>
+    `<div class="video-box" id="panel-video-${name}">
+       <div class="box-header"><h3>${name}</h3></div>
+       <div class="box-content" id="video-content-${name}">
+         <span class="placeholder">${name} off</span>
+       </div>
+     </div>`).join('');
 }
 
 // ── Pi status ──
@@ -1096,19 +559,13 @@ async function deployExperiment() {
     const data = await r.json();
     (data.steps || []).forEach(s => log('  ' + s));
     if (data.ok) {
-      try {
-        const tt = await fetch('/api/trial_table');
-        const ttData = await tt.json();
-        trialTable = ttData.trials || [];
-      } catch(e) { trialTable = []; }
       log('Deploy complete.');
-      // Deploy restarts pi_api on the Pi, which drops the camera. If the preview was live,
-      // re-establish it fresh once the API is back up (a plain re-point would 400).
-      if (cameraLive) {
-        cameraLive = false;
-        setTimeout(() => { if (document.getElementById('cb-camera').checked) _startCamera(); }, 2500);
+      // Deploy restarts pi_api on the Pi, which drops any live preview. If Live was on,
+      // re-establish it fresh once the API is back up.
+      if (liveOn) {
+        setTimeout(() => { if (liveOn) _startVideos(); }, 2500);
       }
-      // Show the estimated session time + session number now that the trial table is known.
+      // Show the estimated session time + session number.
       sessionEstimateMs = computeSessionEstimate();
       estRemainingMs = null;
       sessionShown = true;
@@ -1116,7 +573,6 @@ async function deployExperiment() {
       const _estEl = document.getElementById('est-clock');
       if (_estEl) _estEl.textContent = (sessionEstimateMs != null) ? formatHMS(sessionEstimateMs) : '00:00:00';
       setPhase('deployed');
-      initStimCanvas();
     } else {
       log('Deploy failed: ' + (data.error || ''));
     }
@@ -1133,25 +589,15 @@ async function startSession() {
   const btn = document.getElementById('btn-go');
   btn.textContent = 'Starting...';
   log('Starting session...');
-  lickEvents = []; photodiodeEvents = []; rewardEvents = []; stimEvents = []; timeoutEvents = []; runEvents = []; rtHits = []; hitRateSeries = []; slideHitSeries = []; faSeries = []; dprimeSeries = []; _goRespHist = []; _goN = _goHit = _nogoN = _nogoFA = 0; psthBins = []; psthNStim = 0; psthRaster = [];
-  lickOffset = null;
   currentTrialNum = 0;
   sessionStartTime = null;
   trialStartTime = null;
-  itiStartTime = null;
-  timeoutExtraMs = 0;
-  phaseStartTime = null;
   currentTrialTotalS = null;
-  currentItiTotalS = null;
-  predStim = null;
-  predReward = null;
-  predTrialIdx = null;
+  currentItiS = null;
+  phaseOverride = null;
   document.getElementById('trial-tbody').innerHTML = '';
-  clearAllCanvases();
-  currentStimAz = null;
-  drawStimScene();
 
-  // Per-device save choices (Actions row 2). Unchecked -> not recorded (camera still livestreams).
+  // Per-device save choices (Actions row 2). Unchecked -> not recorded.
   const save = {};
   document.querySelectorAll('.save-dev').forEach(cb => { save[cb.dataset.dev] = cb.checked; });
 
@@ -1164,17 +610,15 @@ async function startSession() {
     (data.steps || []).forEach(s => log('  ' + s));
     if (data.ok) {
       setPhase('running');
-      startClock();                      // resets the run-timers; set the run state AFTER it
+      startClock();
       startSSE();
-      _refreshCameraFeed(2000);          // GO swaps the Pi camera preview->record; reconnect the feed
+      _refreshVideoFeeds(2000);          // GO swaps previews -> recordings; reconnect the feeds
       estRemainingMs = sessionEstimateMs;                     // countdown starts full
-      nextItiTotalS = (trialTable[0] || {}).iti_s ?? null;    // grace: preview the first ITI total
-      nextTrialTotalS = null;
       renderSessionNum();
       document.getElementById('session-start-time').textContent = '';   // stamped after grace (experiment_start)
       // Seed the grace-period countdown inside the GO button; 'countdown' SSE
       // events tick it down and 'experiment_start' restores it to GO.
-      const grace = parseInt(document.getElementById('grace-period').value) || 0;
+      const grace = parseInt(document.getElementById('p-grace_period_s').value) || 0;
       btn.textContent = grace > 0 ? String(grace) : 'GO';
     } else {
       log('Start failed: ' + (data.error || ''));
@@ -1187,37 +631,15 @@ async function startSession() {
   _unlockUI();
 }
 
-// Render the 4 live plots and POST them as PNGs to the session folder (created at Go) so they
-// persist for later review regardless of whether the data is transferred.
-async function saveLivePlots() {
-  drawRtHist(); drawPerformance(); computePSTH(); drawLickRaster(); drawLickPSTH();   // ensure fresh
-  const map = { rt_histogram: 'rt-hist-canvas', performance: 'hitrate-canvas',
-                lick_raster: 'lickraster-canvas', lick_psth: 'psth-canvas' };
-  const plots = {};
-  for (const [name, id] of Object.entries(map)) {
-    const c = document.getElementById(id);
-    if (c && c.width && c.height) { try { plots[name] = c.toDataURL('image/png'); } catch (e) {} }
-  }
-  if (!Object.keys(plots).length) return;
-  try {
-    const r = await fetch('/api/save_plots', {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({plots})
-    });
-    const data = await r.json();
-    log(data.ok ? ('Saved live plots to ' + data.dir) : ('Save plots failed: ' + (data.error || '')));
-  } catch (e) { log('Save plots error: ' + e); }
-}
-
 async function stopSession() {
   _lockUI();
   const btn = document.getElementById('btn-stop');
   btn.textContent = 'Stopping...';
   log('Stopping session...');
   try { await fetch('/api/stop', {method: 'POST'}); } catch(e) {}
-  await saveLivePlots();
   setPhase('ended');
   stopClock();
-  stopAllLive();
+  stopLiveAll();
   if (eventSource) { eventSource.close(); eventSource = null; }
   btn.textContent = 'STOP';
   document.getElementById('btn-go').textContent = 'GO';  // clear any leftover countdown
@@ -1281,56 +703,20 @@ function startSSE() {
 }
 
 function handleEvent(evt) {
-  // Anchor the Pi→browser time offset on the FIRST timestamped event so the rasters (events/sync/
-  // running) go live immediately at Go — not blank until 10 events accrue. Keep refining toward the
-  // median of the first 10 samples (robust to jitter); the sub-frame shift as it converges is
-  // imperceptible. The grace-period 'grace_period'/'countdown' events carry t, so the axis anchors
-  // within the first ~Go; the first-ITI stim box then approaches from the very start of that ITI.
-  if (rasterLive && evt.t && _offsetSamples.length < 10) {
-    _offsetSamples.push(Date.now() / 1000 - evt.t);
-    const sorted = [..._offsetSamples].sort((a, b) => a - b);
-    lickOffset = sorted[Math.floor(sorted.length / 2)];
-  }
-
   switch (evt.type) {
-    case 'lick':
-      if (rasterLive) { lickEvents.push({t: evt.t}); updateRasterInfo(); }
-      break;
-    case 'reward':
-      if (rasterLive) { rewardEvents.push({t: evt.t, duration_ms: evt.pulse_ms || 0}); updateRasterInfo(); }
-      predReward = null;   // real reward fired — drop its prediction
-      break;
-    case 'stim':
-      if (evt.on) {
-        const dur = trialTable[evt.trial] ? trialTable[evt.trial].duration_s : 2.0;
-        if (rasterLive) stimEvents.push({trial: evt.trial, t_on: evt.t, t_off: evt.t + dur, ..._respWindow(evt.t)});
-        showStimThumb(evt.trial, evt.az);
-        // Real stim replaces the predicted window; re-anchor the pavlovian-reward prediction
-        // to the true onset (evt.t).
-        predStim = null;
-        const _roff = _predRewardOffset(evt.trial);
-        predReward = _roff != null ? {t: evt.t + _roff} : null;
-      } else {
-        // Stim off from leader — don't override t_off: leader fires this after
-        // resp_delay_s but the Follower renders for the full duration_s.
-        // The trialTable-based t_off set on stim ON is the ground truth.
-        clearStimThumb();
-      }
-      break;
-    case 'stim_onset':
-      // Follower ack — ignore for raster (leader's stim on already handled)
-      break;
     case 'grace_period':
       log('Grace period: ' + evt.duration + 's');
+      break;
+    case 'countdown':
+      // Grace-period tick — show whole seconds remaining inside the GO button.
+      document.getElementById('btn-go').textContent =
+        String(Math.max(0, Math.ceil(evt.remaining)));
       break;
     case 'experiment_start':
       sessionStartTime = Date.now();
       trialStartTime = null;
-      itiStartTime = null;
       if (sessionEstimateMs == null) sessionEstimateMs = computeSessionEstimate();
-      estRemainingMs = sessionEstimateMs;    // Estimated = time left; full now, counts down per trial
-      timeoutExtraMs = 0;
-      predStim = null; predReward = null; predTrialIdx = null;
+      estRemainingMs = sessionEstimateMs;    // Estimated = time left; counts down per trial
       renderSessionNum();
       document.getElementById('btn-go').textContent = 'GO';  // grace done
       log('Experiment started.');
@@ -1339,68 +725,22 @@ function handleEvent(evt) {
     case 'trial_start':
       currentTrialNum = evt.trial + 1;
       trialStartTime = Date.now();
-      phaseStartTime = Date.now();   // pre-stim phase begins here
-      currentTrialTotalS = trialPhaseDur(trialTable[evt.trial]);
-      nextItiTotalS = (trialTable[evt.trial + 1] || {}).iti_s ?? null;   // ITI before the next trial
-      // Refine the prediction now that pre-stim actually begins: onset = now + pre-stim.
-      predTrialIdx = evt.trial;
-      setPrediction(evt.trial, evt.t + ((trialTable[evt.trial] || {}).prestim_s || 0));
-      itiStartTime = null;
+      currentItiS = evt.iti ?? null;
+      currentTrialTotalS = (evt.iti || 0) + _numField('p-prestim_s', 0)
+                         + _numField('p-stim_s', 0) + _numField('p-poststim_s', 0);
+      phaseOverride = null;
+      break;
+    case 'stim':
+      phaseOverride = evt.on ? 'stim' : 'post-stim';
       break;
     case 'trial':
       addTrialRow(evt);
       trialStartTime = null;
-      // Estimated time-left countdown: subtract this trial's (ITI + trial-phase) duration.
-      if (estRemainingMs != null) {
-        const _t = trialTable[evt.trial_num];
-        if (_t) estRemainingMs = Math.max(0,
-          estRemainingMs - (((_t.iti_s || 0) + (trialPhaseDur(_t) || 0)) * 1000));
+      phaseOverride = null;
+      // Estimated time-left countdown: subtract this trial's actual duration.
+      if (estRemainingMs != null && evt.duration_s) {
+        estRemainingMs = Math.max(0, estRemainingMs - evt.duration_s * 1000);
       }
-      predStim = null; predReward = null;   // trial done — clear its predictions
-      break;
-    case 'iti_start':
-      itiStartTime = Date.now();
-      phaseStartTime = Date.now();
-      currentItiTotalS = (evt.duration != null) ? evt.duration : null;
-      nextTrialTotalS = trialPhaseDur(trialTable[evt.trial]);   // trial that follows this ITI
-      // Predict the upcoming trial's stim window/reward: onset = ITI end + pre-stim.
-      predTrialIdx = evt.trial;
-      setPrediction(evt.trial, evt.t + (evt.duration || 0) + ((trialTable[evt.trial] || {}).prestim_s || 0));
-      trialStartTime = null;
-      break;
-    case 'poststim_start':
-      phaseStartTime = Date.now();   // post-stim phase begins here
-      break;
-    case 'sync_pulse':
-      if (rasterLive) { photodiodeEvents.push({t: evt.t}); updateRasterInfo(); }
-      break;
-    case 'running':
-      if (rasterLive) {
-        runEvents.push({t: evt.t, speed_cms: evt.speed_cms, distance_cm: evt.distance_cm});
-        if (runEvents.length > 600) runEvents.shift();   // ~40s at 15 Hz; bounds the per-frame draw
-      }
-      break;
-    case 'countdown':
-      // Grace-period tick — show whole seconds remaining inside the GO button.
-      document.getElementById('btn-go').textContent =
-        String(Math.max(0, Math.ceil(evt.remaining)));
-      break;
-    case 'iti_restart':
-      if (phaseStartTime) timeoutExtraMs += Date.now() - phaseStartTime;  // wasted time repeats
-      phaseStartTime = Date.now();
-      itiStartTime = Date.now();
-      if (rasterLive) { timeoutEvents.push({t: evt.t}); updateRasterInfo(); }
-      // ITI restarted → push the predicted onset later (uses the ITI event's leader-clock time).
-      if (predTrialIdx != null)
-        setPrediction(predTrialIdx, evt.t + (currentItiTotalS || 0) + ((trialTable[predTrialIdx] || {}).prestim_s || 0));
-      log('ITI restarted (excess licking)');
-      break;
-    case 'prestim_restart':
-    case 'poststim_restart':
-      if (phaseStartTime) timeoutExtraMs += Date.now() - phaseStartTime;
-      phaseStartTime = Date.now();
-      if (rasterLive) { timeoutEvents.push({t: evt.t}); updateRasterInfo(); }
-      log((evt.type === 'prestim_restart' ? 'Pre-stim' : 'Post-stim') + ' restarted (excess licking)');
       break;
     case 'shepherd_alert': {
       // Health alert from the shepherd monitor on a rig Pi. Orange = warning,
@@ -1409,509 +749,108 @@ function handleEvent(evt) {
       log(`🐑 ${host}${evt.message}`, evt.level);
       break;
     }
-    case 'photodiode_warning':
-      // V-range warning from the photodiode device (top/bottom 1% of the Teensy V stream out of
-      // range). 'warning' = orange, 'ok' = recovery. Same log channel as shepherd.
-      log(`📉 ${evt.message}`, evt.level);
-      break;
-    case 'global_timeout':
-      log(`Global timeout: no licks in ${(evt.phases || []).join('/')} for ${evt.n_dry} trials — aborting.`);
-      break;
     case 'session_end':
       document.getElementById('btn-go').textContent = 'GO';  // clear any leftover countdown
       log(`Session ended (${evt.n_completed}/${evt.n_planned} trials).`);
-      saveLivePlots();   // persist the plots into the session folder
       setPhase('ended');
       stopClock();
-      stopAllLive();
+      stopLiveAll();
       if (eventSource) { eventSource.close(); eventSource = null; }
       updateButtons();
+      break;
+    default:
+      // Unknown device events (generic republish from the engine) land in the log so a new
+      // device's stream is visible without a bespoke UI panel.
+      if (evt.type && evt.message) log(`${evt.type}: ${evt.message}`, evt.level);
       break;
   }
 }
 
-// ── Camera helpers ──
+// ── Video feed helpers ──
 
-let stimLive = false;
+function _videoSrc(name) { return '/api/camera_feed?device=' + encodeURIComponent(name) + '&ts=' + Date.now(); }
 
-let cameraRetry = null;
-function _cameraSrc() { return '/api/camera_feed?ts=' + Date.now(); }
-
-// (Re)mount the MJPEG <img>. The stream ends on any Pi-side camera teardown (Deploy/GO swap,
-// driver reset); on a *clean* end the browser just freezes on the last frame without firing
-// onerror, so we also re-point proactively at those known points (see _refreshCameraFeed).
-function _mountCameraImg() {
-  const el = document.getElementById('camera-content');
+// (Re)mount the MJPEG <img> for one device. The stream ends on any Pi-side teardown
+// (Deploy/GO swap); on a *clean* end the browser freezes on the last frame without firing
+// onerror, so we also re-point proactively at those known points (see _refreshVideoFeeds).
+function _mountVideoImg(name) {
+  const el = document.getElementById('video-content-' + name);
+  if (!el) return;
   el.innerHTML = '';
   const img = document.createElement('img');
-  img.id = 'camera-img';
-  img.alt = 'Camera';
-  img.style.cssText = 'max-width:100%; max-height:480px; filter:grayscale(1)';
+  img.id = 'video-img-' + name;
+  img.alt = name;
+  img.style.cssText = 'max-width:100%; max-height:480px;';
   img.onerror = () => {              // backstop for hard errors (Pi restart / 5xx)
-    if (!cameraLive) return;
-    clearTimeout(cameraRetry);
-    cameraRetry = setTimeout(() => { if (cameraLive) img.src = _cameraSrc(); }, 1500);
+    if (!liveOn) return;
+    clearTimeout(videoRetries[name]);
+    videoRetries[name] = setTimeout(() => { if (liveOn) img.src = _videoSrc(name); }, 1500);
   };
-  img.src = _cameraSrc();
+  img.src = _videoSrc(name);
   el.appendChild(img);
 }
 
-// Re-point the live feed (cache-busted). Call after a Pi-side teardown/reopen so the frozen
-// <img> reconnects to the fresh stream.
-function _refreshCameraFeed(delayMs) {
-  if (!cameraLive) return;
-  clearTimeout(cameraRetry);
-  cameraRetry = setTimeout(() => {
-    if (!cameraLive) return;
-    const img = document.getElementById('camera-img');
-    if (img) img.src = _cameraSrc(); else _mountCameraImg();
-  }, delayMs || 0);
-}
-
-async function _startCamera() {
-  if (cameraLive) { _refreshCameraFeed(); return; }
-  const r = await fetch('/api/camera_start', {method: 'POST'});
-  const data = await r.json();
-  if (!data.ok) { log('Camera start failed: ' + (data.error || '')); return; }
-  cameraLive = true;
-  _mountCameraImg();
-}
-
-async function _stopCamera() {
-  if (!cameraLive) return;
-  clearTimeout(cameraRetry);
-  await fetch('/api/camera_stop', {method: 'POST'});
-  cameraLive = false;
-  document.getElementById('camera-content').innerHTML = '<span class="placeholder">Camera off</span>';
-}
-
-// ── Camera exposure / gain (runtime-only) ──
-// Seeded from the rig config; NEVER saved to the yaml (reverts on reload / Load Rig). Editable during
-// Live before GO; LOCKED once recording starts — updateButtons() disables the fields at phase 'running',
-// and the server refuses /api/camera_controls while running. Each change pushes to the Pi (applies live
-// if the preview is up) and updates the server-side override that GO's recording start reads.
-function _initCamExp() {
-  const cam = (config && config.rig && config.rig.devices && config.rig.devices.camera) || {};
-  const a = document.getElementById('exp-auto');
-  const u = document.getElementById('exp-ms');
-  const g = document.getElementById('exp-gain');
-  if (a) a.checked = cam.auto_exposure ?? true;
-  if (u) u.value = cam.exposure_ms ?? 10;
-  if (g) g.value = cam.gain ?? 1.0;
-  updateButtons();   // sync enabled/disabled (auto hides the manual fields; a run locks everything)
-}
-function _pushCamExp() {
-  const a = document.getElementById('exp-auto');
-  const u = document.getElementById('exp-ms');
-  const g = document.getElementById('exp-gain');
-  if (!a) return;
-  const cam = (config && config.rig && config.rig.devices && config.rig.devices.camera) || {};
-  const maxMs = 1000 / (cam.fps || 50);   // exposure (ms) can't exceed the frame period
-  const rawExp = parseFloat(u.value);     // a typed 0 must clamp to the 0.1 floor, not reset to 10
-  const body = {
-    auto_exposure: a.checked,
-    exposure_ms: Math.min(Math.max(isNaN(rawExp) ? 10 : rawExp, 0.1), maxMs),
-    gain: Math.min(Math.max(parseFloat(g.value) || 1.0, 1), 16),
-  };
-  if (u) u.value = body.exposure_ms;   // reflect the clamp back into the field
-  if (g) g.value = body.gain;
-  fetch('/api/camera_controls', {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
-  }).catch(() => {});
-}
-function onExpAutoToggle(checked) { updateButtons(); _pushCamExp(); }
-function onExpChange() { _pushCamExp(); }
-
-// Driver-level recovery for a wedged sensor (libcamera hung mid-capture): the Pi rebinds the
-// camera's i2c driver, then we bring the preview back up.
-async function resetCamera() {
-  const btn = document.getElementById('btn-camera-reset');
-  if (btn) { btn.disabled = true; btn.textContent = '⟳ …'; }
-  log('Resetting camera driver on the Pi…');
-  try {
-    const r = await fetch('/api/camera_reset', {method: 'POST'});
-    const data = await r.json();
-    if (!data.ok) { log('Camera reset failed: ' + (data.error || '')); return; }
-    log('Camera driver rebound (' + (data.driver || '?') + ' ' + (data.node || '') + ')');
-    // The reset closed the Pi camera; restart the preview and re-mount the feed.
-    cameraLive = false;
-    if (document.getElementById('cb-camera').checked) await _startCamera();
-  } catch (e) {
-    log('Camera reset error: ' + e);
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '⟳ Reset'; }
+// Re-point the live feeds (cache-busted) after a Pi-side teardown/reopen.
+function _refreshVideoFeeds(delayMs) {
+  if (!liveOn) return;
+  for (const name of _videoDeviceNames()) {
+    clearTimeout(videoRetries[name]);
+    videoRetries[name] = setTimeout(() => {
+      if (!liveOn) return;
+      const img = document.getElementById('video-img-' + name);
+      if (img) img.src = _videoSrc(name); else _mountVideoImg(name);
+    }, delayMs || 0);
   }
 }
 
-// ── Stim canvas visualization ──
-
-let currentStimAz = null;
-const SCREEN_AZ_HALF = 105;
-const SCREEN_ALT_CENTER = 49.5; // midpoint of screen altitude range (25-74°)
-
-function initStimCanvas() {
-  const el = document.getElementById('stim-content');
-  el.innerHTML = '';
-  const canvas = document.createElement('canvas');
-  canvas.id = 'stim-canvas';
-  canvas.style.display = 'block';
-  el.appendChild(canvas);
-  let w = el.clientWidth || 400;
-  let h = Math.round(w * 9 / 16);
-  const maxH = el.clientHeight;               // letterbox into the half-height card (keep 16:9)
-  if (maxH && h > maxH) { h = maxH; w = Math.round(h * 16 / 9); }
-  canvas.width = w;
-  canvas.height = h;
-  canvas.style.width = w + 'px';
-  canvas.style.height = h + 'px';
-  currentStimAz = null;
-  drawStimScene();
-}
-
-function drawStimScene() {
-  const canvas = document.getElementById('stim-canvas');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const w = canvas.width, h = canvas.height;
-  if (w === 0 || h === 0) return;
-  const ppd = w / (2 * SCREEN_AZ_HALF);
-
-  // Grey background
-  const bg = parseFloat(document.getElementById('p-background_gray')?.value) || 0;
-  const v = Math.round(bg * 255);
-  ctx.fillStyle = `rgb(${v},${v},${v})`;
-  ctx.fillRect(0, 0, w, h);
-
-  // Stim square
-  if (currentStimAz !== null) {
-    const alt = parseFloat(document.getElementById('p-altitude_deg')?.value) || SCREEN_ALT_CENTER;
-    const sz = parseFloat(document.getElementById('p-size_deg')?.value) || 8;
-    const cx = w / 2 + currentStimAz * ppd;
-    const cy = h / 2 - (alt - SCREEN_ALT_CENTER) * ppd;
-    const side = sz * ppd;
-    const shape = document.getElementById('p-shape')?.value || 'square';
-    ctx.fillStyle = '#ffffff';
-    if (shape === 'circle') {
-      ctx.beginPath();
-      ctx.arc(cx, cy, side / 2, 0, 2 * Math.PI);
-      ctx.fill();
-    } else {
-      ctx.fillRect(cx - side / 2, cy - side / 2, side, side);
-    }
+async function _startVideos() {
+  for (const name of _videoDeviceNames()) {
+    try {
+      const r = await fetch('/api/camera_start', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({device: name})
+      });
+      const data = await r.json();
+      if (!data.ok) { log(`${name} start failed: ` + (data.error || '')); continue; }
+      _mountVideoImg(name);
+    } catch (e) { log(`${name} start error: ` + e.message); }
   }
-
-  // Rulers on top
-  _drawStimRulers(ctx, w, h, ppd);
 }
 
-function _drawStimRulers(ctx, w, h, ppd) {
-  let azAngles = [];
-  try { azAngles = [...new Set(JSON.parse(document.getElementById('p-block_sequence').value))]; } catch (e) {}
-  const alt = parseFloat(document.getElementById('p-altitude_deg')?.value) || SCREEN_ALT_CENTER;
-  ctx.font = '12px monospace';
-  ctx.textBaseline = 'middle';
-  const rH = 20;
-
-  // ── Azimuth ruler (bottom) ──
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.fillRect(0, h - rH, w, rH);
-  ctx.strokeStyle = '#555';
-  ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(0, h - rH); ctx.lineTo(w, h - rH); ctx.stroke();
-
-  // 0° reference
-  const x0 = w / 2;
-  ctx.strokeStyle = '#555';
-  ctx.beginPath(); ctx.moveTo(x0, h - rH); ctx.lineTo(x0, h - rH + 6); ctx.stroke();
-  ctx.fillStyle = '#555';
-  ctx.textAlign = 'center';
-  ctx.fillText('0\u00b0', x0, h - rH / 2);
-
-  // Experiment angle ticks
-  for (const az of azAngles) {
-    const x = w / 2 + az * ppd;
-    ctx.strokeStyle = '#ddd';
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(x, h - rH); ctx.lineTo(x, h - rH + 6); ctx.stroke();
-    ctx.fillStyle = '#ddd';
-    ctx.fillText(az + '\u00b0', x, h - rH / 2);
+async function _stopVideos() {
+  for (const name of _videoDeviceNames()) {
+    clearTimeout(videoRetries[name]);
+    try { await fetch('/api/camera_stop', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({device: name})
+    }); } catch (e) {}
+    const el = document.getElementById('video-content-' + name);
+    if (el) el.innerHTML = `<span class="placeholder">${name} off</span>`;
   }
-
-  // ── Altitude ruler (center vertical, forms upside-down T with azimuth ruler) ──
-  const cx = w / 2;
-  ctx.strokeStyle = '#555';
-  ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, h - rH); ctx.stroke();
-
-  // Altitude tick
-  const yAlt = h / 2 - (alt - SCREEN_ALT_CENTER) * ppd;
-  ctx.strokeStyle = '#ddd';
-  ctx.beginPath(); ctx.moveTo(cx - 6, yAlt); ctx.lineTo(cx + 6, yAlt); ctx.stroke();
-  ctx.fillStyle = '#ddd';
-  ctx.textAlign = 'left';
-  ctx.fillText(alt + '\u00b0', cx + 8, yAlt);
 }
 
-function showStimThumb(trialNum, az) {
-  if (!stimLive) return;
-  currentStimAz = az;
-  drawStimScene();
-}
-
-function clearStimThumb() {
-  if (!stimLive) return;
-  currentStimAz = null;
-  drawStimScene();
-}
-
-// ── Unified Live toggle ──
+// ── Live toggle ──
 
 function toggleLive() {
-  if (rasterLive) stopLive(); else startLive();
+  if (liveOn) stopLive(); else startLive();
 }
 
 async function startLive() {
-  // Clear only the RASTER + PSTH arrays (they show recent data). The cumulative performance/RT/
-  // reward series are trial-driven and must SURVIVE a Live restart — reset them only per session.
-  lickEvents = []; rewardEvents = []; photodiodeEvents = []; stimEvents = []; timeoutEvents = []; runEvents = []; psthBins = []; psthNStim = 0;
-  lickOffset = null;
-  _offsetSamples = [];
-  // Flush server-side event queue so we only see new events
-  await fetch('/api/drain_events', {method: 'POST'}).catch(() => {});
-  rasterLive = true;
+  liveOn = true;
   document.getElementById('btn-live').textContent = 'Stop';
   document.getElementById('btn-live').className = 'btn btn-sm btn-red';
-  // Raster
-  if (!rasterAnimFrame) {
-    (function frame() { drawUnifiedRaster(); drawRtHist(); drawPerformance(); if ((_psthFrame = (_psthFrame + 1) % 8) === 0) computePSTH(); drawLickRaster(); drawLickPSTH(); rasterAnimFrame = requestAnimationFrame(frame); })();
-  }
-  // Camera (if checked)
-  if (document.getElementById('cb-camera').checked) await _startCamera();
-  // Stimulus (if checked)
-  if (document.getElementById('cb-stim').checked) stimLive = true;
+  await _startVideos();
 }
 
 async function stopLive() {
-  rasterLive = false;
+  liveOn = false;
   document.getElementById('btn-live').textContent = 'Live';
   document.getElementById('btn-live').className = 'btn btn-sm btn-blue';
-  if (rasterAnimFrame) { cancelAnimationFrame(rasterAnimFrame); rasterAnimFrame = null; }
-  // Camera
-  await _stopCamera();
-  // Stimulus
-  stimLive = false;
-  currentStimAz = null;
-  drawStimScene();
+  await _stopVideos();
 }
 
-// ── Unified raster drawing ──
-
-// Draw both stacked rasters each frame. They share one time axis (same RASTER_PAST/FUTURE +
-// play-head), so they stay synced. EVENTS: licks/rewards/timeouts + stim + response window +
-// the next-trial preview. SYNC: photodiode + stim (+ future sync in/out).
-function drawUnifiedRaster() {
-  drawRaster('canvas-raster', {
-    stimCb: 'cb-stim-events', respWinCb: 'cb-respwin', showPredicted: true,
-    traces: [
-      {cb: 'cb-lick', events: lickEvents, color: '#4caf50'},
-      {cb: 'cb-reward', events: rewardEvents, color: '#2196f3'},
-      {cb: 'cb-timeout', events: timeoutEvents, color: '#ab47bc'},   // over-lick restarts (purple)
-    ],
-  });
-  drawRaster('canvas-raster-sync', {
-    stimCb: 'cb-stim-sync', respWinCb: null, showPredicted: false,
-    traces: [
-      {cb: 'cb-photodiode', events: photodiodeEvents, color: '#ff5722'},
-      // future: sync in/out traces
-    ],
-  });
-  drawSpeed('canvas-raster-run');
-}
-
-// Running-wheel speed as a continuous line on the shared raster time axis (past region), so it
-// lines up with licks/stim/rewards. Toggled by #cb-run; y auto-scales to the window's max speed.
-function drawSpeed(canvasId) {
-  const canvas = document.getElementById(canvasId);
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
-    canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight;
-  }
-  const w = canvas.width, h = canvas.height, plotH = h - 12;
-  ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
-  if (lickOffset === null) return;
-  const now = Date.now() / 1000 - lickOffset;
-  const xForAge = age => ((RASTER_PAST - age) / RASTER_WINDOW) * w;
-  const x0 = xForAge(0);
-  ctx.fillStyle = 'rgba(255,255,255,0.03)'; ctx.fillRect(x0, 0, w - x0, plotH);   // future shade
-  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1;                                     // "now" play-head
-  ctx.beginPath(); ctx.moveTo(x0, 0); ctx.lineTo(x0, plotH); ctx.stroke();
-  ctx.fillStyle = '#444'; ctx.font = '9px monospace';
-  for (let tau = -RASTER_PAST; tau <= RASTER_FUTURE; tau += 5) {
-    const x = xForAge(-tau);
-    ctx.fillText(tau === 0 ? '0' : (tau > 0 ? '+' + tau : '' + tau) + 's', x + 1, h - 2);
-  }
-  if (!document.getElementById('cb-run')?.checked || !runEvents.length) return;
-  const win = runEvents.filter(e => { const age = now - e.t; return age >= 0 && age <= RASTER_PAST; });
-  if (!win.length) return;
-  let maxV = 1; for (const e of win) { const v = Math.abs(e.speed_cms || 0); if (v > maxV) maxV = v; }
-  ctx.strokeStyle = '#26c6da'; ctx.lineWidth = 1.5; ctx.beginPath();
-  let started = false;
-  for (const e of win) {
-    const x = xForAge(now - e.t);
-    const y = plotH - (Math.abs(e.speed_cms || 0) / maxV) * (plotH - 3);
-    if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
-  }
-  ctx.stroke();
-  const last = runEvents[runEvents.length - 1];
-  ctx.fillStyle = '#26c6da'; ctx.font = '9px monospace';
-  ctx.fillText((last.speed_cms || 0).toFixed(1) + ' cm/s · ' + (last.distance_cm || 0).toFixed(0) +
-               ' cm (max ' + maxV.toFixed(0) + ')', 2, 9);
-}
-
-// Draw one raster into `canvasId`. opts: {stimCb, respWinCb, showPredicted, traces:[{cb,events,color}]}.
-function drawRaster(canvasId, opts) {
-  const canvas = document.getElementById(canvasId);
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
-    canvas.width = canvas.clientWidth;
-    canvas.height = canvas.clientHeight;
-  }
-  const w = canvas.width, h = canvas.height, plotH = h - 12;   // bottom 12px = time labels
-  ctx.fillStyle = '#0a0a1a';
-  ctx.fillRect(0, 0, w, h);
-
-  if (lickOffset === null) return;   // no time sync yet
-  const now = Date.now() / 1000 - lickOffset;
-
-  // Shared time axis: "now" play-head RASTER_PAST s from the left; past left, future right.
-  const xForAge = age => ((RASTER_PAST - age) / RASTER_WINDOW) * w;
-  const x0 = xForAge(0);
-
-  // Future-region shade.
-  ctx.fillStyle = 'rgba(255,255,255,0.03)';
-  ctx.fillRect(x0, 0, w - x0, plotH);
-
-  const stimOn = opts.stimCb && document.getElementById(opts.stimCb)?.checked;
-  const rwOn = opts.respWinCb && document.getElementById(opts.respWinCb)?.checked;
-
-  // Stim windows — full height, from onset with the trial-table duration (extend into the future).
-  if (stimOn) {
-    ctx.fillStyle = STIM_COLOR;
-    for (const stim of stimEvents) {
-      const x1 = Math.max(0, xForAge(now - stim.t_on));
-      const x2 = Math.min(w, xForAge(now - stim.t_off));
-      if (x2 > x1) ctx.fillRect(x1, 0, x2 - x1, plotH);
-    }
-  }
-  // Response windows — top 1/3, amber (opens resp_delay after onset).
-  if (rwOn) {
-    ctx.fillStyle = RESPWIN_COLOR;
-    for (const stim of stimEvents) {
-      if (stim.rw_on == null) continue;
-      const x1 = Math.max(0, xForAge(now - stim.rw_on));
-      const x2 = Math.min(w, xForAge(now - stim.rw_off));
-      if (x2 > x1) ctx.fillRect(x1, 0, x2 - x1, plotH / 3);
-    }
-  }
-
-  // Next-trial preview: predicted stim window (dashed) + response window, cleared once real.
-  if (opts.showPredicted && predStim) {
-    if (stimOn) {
-      const x1 = Math.max(0, xForAge(now - predStim.t_on));
-      const x2 = Math.min(w, xForAge(now - predStim.t_off));
-      if (x2 > x1) {
-        ctx.fillStyle = 'rgba(33,150,243,0.05)';
-        ctx.fillRect(x1, 0, x2 - x1, plotH);
-        ctx.strokeStyle = 'rgba(33,150,243,0.5)';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([3, 3]);
-        ctx.strokeRect(x1 + 0.5, 0.5, (x2 - x1) - 1, plotH - 1);
-        ctx.setLineDash([]);
-      }
-    }
-    if (rwOn && predStim.rw_on != null) {
-      const r1 = Math.max(0, xForAge(now - predStim.rw_on));
-      const r2 = Math.min(w, xForAge(now - predStim.rw_off));
-      if (r2 > r1) { ctx.fillStyle = 'rgba(255,193,7,0.12)'; ctx.fillRect(r1, 0, r2 - r1, plotH / 3); }
-    }
-  }
-
-  // Time-axis ticks: negative left of 0, positive (future) right of it.
-  ctx.fillStyle = '#444';
-  ctx.font = '9px monospace';
-  for (let tau = -RASTER_PAST; tau <= RASTER_FUTURE; tau += 5) {
-    const x = xForAge(-tau);
-    ctx.fillText(tau === 0 ? '0' : (tau > 0 ? '+' + tau : '' + tau) + 's', x + 1, h - 2);
-  }
-
-  // "Now" play-head at 0.
-  ctx.strokeStyle = '#aaa';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(x0, 0);
-  ctx.lineTo(x0, plotH);
-  ctx.stroke();
-
-  // Predicted pavlovian reward in the future — drawn DIMMED (alpha); the trace loop then draws the
-  // real reward at full colour once it's delivered, so the mark "solidifies" in place. Gated on the
-  // reward checkbox; not shown for conditional/adaptive trials (predReward is null there).
-  if (opts.showPredicted && predReward && predReward.t > now
-      && document.getElementById('cb-reward')?.checked) {
-    const x = xForAge(now - predReward.t);
-    if (x >= 0 && x <= w) {
-      ctx.strokeStyle = 'rgba(33,150,243,0.35)';   // dim blue = predicted (full #2196f3 once real)
-      ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, plotH); ctx.stroke();
-    }
-  }
-
-  // Traces (real events as vertical ticks).
-  for (const tr of opts.traces) {
-    if (!document.getElementById(tr.cb)?.checked) continue;
-    ctx.strokeStyle = tr.color;
-    ctx.lineWidth = 1.5;
-    for (const evt of tr.events) {
-      const age = now - evt.t;
-      if (age > RASTER_PAST || age < -RASTER_FUTURE) continue;
-      const x = xForAge(age);
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, plotH);
-      ctx.stroke();
-    }
-  }
-}
-
-function clearAllCanvases() {
-  for (const id of ['canvas-raster', 'canvas-raster-sync']) {
-    const c = document.getElementById(id);
-    if (c) {
-      c.width = c.clientWidth;
-      c.height = c.clientHeight;
-      const ctx = c.getContext('2d');
-      ctx.fillStyle = '#0a0a1a';
-      ctx.fillRect(0, 0, c.width, c.height);
-    }
-  }
-}
-
-function stopAllLive() {
-  if (rasterLive || cameraLive || stimLive) stopLive();
-}
-
-function updateRasterInfo() {
-  const ev = [];
-  if (lickEvents.length) ev.push(lickEvents.length + ' licks');
-  if (rewardEvents.length) ev.push(rewardEvents.length + ' rewards');
-  if (timeoutEvents.length) ev.push(timeoutEvents.length + ' timeouts');
-  const e1 = document.getElementById('raster-info');
-  if (e1) e1.textContent = ev.join(' | ');
-  const sy = [];
-  if (photodiodeEvents.length) sy.push(photodiodeEvents.length + ' pulses');
-  const e2 = document.getElementById('raster-info-sync');
-  if (e2) e2.textContent = sy.join(' | ');
+function stopLiveAll() {
+  if (liveOn) stopLive();
 }
 
 // ── Clocks ──
@@ -1930,8 +869,8 @@ function formatMS(ms) {
 
 function startClock() {
   stopClock();
-  // Auto-start live when session begins
-  if (!rasterLive) startLive();
+  // Auto-start live video when the session begins
+  if (!liveOn) startLive();
   clockInterval = setInterval(updateClocks, 500);
   updateClocks();
 }
@@ -1940,23 +879,16 @@ function stopClock() {
   if (clockInterval) { clearInterval(clockInterval); clockInterval = null; }
   sessionStartTime = null;
   trialStartTime = null;
-  itiStartTime = null;
-  timeoutExtraMs = 0;
-  phaseStartTime = null;
   currentTrialTotalS = null;
-  currentItiTotalS = null;
+  currentItiS = null;
+  phaseOverride = null;
   estRemainingMs = null;
-  nextTrialTotalS = null;
-  nextItiTotalS = null;
-  predStim = null;
-  predReward = null;
-  predTrialIdx = null;
   document.getElementById('session-clock').textContent = '00:00:00';
   // Estimated keeps showing the deploy-time baseline (sessionEstimateMs) between runs.
   document.getElementById('est-clock').textContent =
     (sessionEstimateMs != null) ? formatHMS(sessionEstimateMs) : '00:00:00';
   document.getElementById('trial-clock').textContent = '--:-- / --:--';
-  document.getElementById('iti-clock').textContent = '--:-- / --:--';
+  document.getElementById('trial-phase').textContent = '--';
   document.getElementById('trial-num').textContent = '--';
 }
 
@@ -1972,15 +904,16 @@ function _startedAtText() {
   return `started at ${d.toLocaleTimeString()} on ${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
-// "elapsed / total" for a phase timer. Active -> "MM:SS / <current total>"; idle -> "--:-- /
-// <upcoming total>" (or "--:-- / --:--" when the upcoming duration isn't known yet).
-function _timerHTML(startTime, curTotalS, nextTotalS, now, dim) {
-  if (startTime) {
-    const tot = curTotalS ? formatMS(curTotalS * 1000) : '--:--';
-    return `${formatMS(now - startTime)}<span style="color:${dim}"> / ${tot}</span>`;
-  }
-  const tot = (nextTotalS != null) ? formatMS(nextTotalS * 1000) : '--:--';
-  return `--:--<span style="color:${dim}"> / ${tot}</span>`;
+// Current trial phase from elapsed time (ITI -> pre-stim -> stim -> post-stim); a real stim
+// event overrides the estimate while it applies.
+function _trialPhaseName(elapsedS) {
+  if (phaseOverride) return phaseOverride;
+  if (currentItiS == null) return '--';
+  const pre = _numField('p-prestim_s', 0), stim = _numField('p-stim_s', 0);
+  if (elapsedS < currentItiS) return 'ITI';
+  if (elapsedS < currentItiS + pre) return 'pre-stim';
+  if (elapsedS < currentItiS + pre + stim) return 'stim';
+  return 'post-stim';
 }
 
 function updateClocks() {
@@ -1994,365 +927,38 @@ function updateClocks() {
     estEl.textContent = (ms != null) ? formatHMS(Math.max(0, ms)) : '00:00:00';
   }
   const trialEl = document.getElementById('trial-clock');
-  if (trialEl) trialEl.innerHTML = _timerHTML(trialStartTime, currentTrialTotalS, nextTrialTotalS, now, '#888');
-  const itiEl = document.getElementById('iti-clock');
-  if (itiEl) itiEl.innerHTML = _timerHTML(itiStartTime, currentItiTotalS, nextItiTotalS, now, '#666');
+  if (trialEl) {
+    if (trialStartTime) {
+      const tot = currentTrialTotalS ? formatMS(currentTrialTotalS * 1000) : '--:--';
+      trialEl.innerHTML = `${formatMS(now - trialStartTime)}<span style="color:#888"> / ${tot}</span>`;
+    } else {
+      trialEl.textContent = '--:-- / --:--';
+    }
+  }
+  const phEl = document.getElementById('trial-phase');
+  if (phEl) phEl.textContent = trialStartTime ? _trialPhaseName((now - trialStartTime) / 1000) : '--';
   const trialNum = document.getElementById('trial-num');
   if (trialNum) {
-    const totalTrials = trialTable.length || null;   // planned total, known after deploy
-    trialNum.textContent = (currentTrialNum || '--') + (totalTrials ? '/' + totalTrials : '');
+    const total = parseInt(document.getElementById('p-n_trials').value) || null;
+    trialNum.textContent = (currentTrialNum || '--') + (total ? '/' + total : '');
   }
-}
-
-// ── Phase 2: session-time estimate ──
-// Planned wall-clock (seconds) of one trial's phases, EXCLUDING its ITI. Mirrors the engine:
-// pre-stim, then max(resp_delay + response_window, visual duration) for stim+response, then
-// post-stim (the engine waits 0.5s when there is no post-stim period).
-function trialPhaseDur(t) {
-  if (!t) return null;
-  const rew = (config.task && config.task.reward) || {};
-  const respDelay = rew.resp_delay_s ?? rew.reward_delay_s ?? 0.6;
-  const respWin = rew.response_window ?? 1.4;
-  const stim = Math.max(respDelay + respWin, t.duration_s || 0);
-  const post = (t.poststim_s > 0) ? t.poststim_s : 0.5;
-  return (t.prestim_s || 0) + stim + post;
-}
-
-// Baseline session ETA (ms) from the trial table + task timing, referenced to experiment_start
-// (post-grace). Approximate: response windows may end early on a lick (shorter), and block/global
-// delays use range midpoints (exact sampled values live in the NPZ, not the client). Timeouts are
-// added live via timeoutExtraMs. Returns null when no trial table is loaded.
-function computeSessionEstimate() {
-  if (!trialTable || !trialTable.length) return null;
-  const sess = (config.task && config.task.session) || {};
-  // [min,max] => midpoint; single value 5 or [5] => that value; else 0.
-  const mid = v => Array.isArray(v)
-    ? (v.length === 2 ? (v[0] + v[1]) / 2 : (parseFloat(v[0]) || 0))
-    : (parseFloat(v) || 0);
-  let total = 0, itiSum = 0;
-  for (const t of trialTable) {
-    total += (t.iti_s || 0) + trialPhaseDur(t);
-    itiSum += (t.iti_s || 0);
-  }
-  total += itiSum / trialTable.length;               // trailing ITI after the last trial ≈ mean
-  total += mid(sess.global_delay);
-  const nBlocks = trialTable.reduce((m, t) => Math.max(m, t.block || 0), 0) + 1;
-  const skip = sess.block_delay_skip_first ? 1 : 0;
-  total += mid(sess.block_delay) * Math.max(0, nBlocks - skip);
-  return total * 1000;
-}
-
-// ── Phase 4: predicted upcoming events (drawn dimmed in the raster's future region) ──
-function _respDelayS() {
-  const rew = (config.task && config.task.reward) || {};
-  return rew.resp_delay_s ?? rew.reward_delay_s ?? 0.6;
-}
-function _responseWindowS() {
-  const rew = (config.task && config.task.reward) || {};
-  return rew.response_window ?? 1.4;
-}
-// Response window [rw_on, rw_off] for a stim starting at `onset`: opens resp_delay after onset.
-function _respWindow(onset) {
-  const on = onset + _respDelayS();
-  return {rw_on: on, rw_off: on + _responseWindowS()};
-}
-// Go/no-go per the engine's go_rule (stimulus.go_rule): all=go, right=az>0, else az<0.
-function _isGo(az) {
-  const rule = (config.task && config.task.stimulus && config.task.stimulus.go_rule) || 'left';
-  if (rule === 'all') return true;
-  if (rule === 'right') return az > 0;
-  return az < 0;
-}
-function _pavDelayS() {
-  const rew = (config.task && config.task.reward) || {};
-  return rew.pav_delay_s ?? 0;
-}
-// Offset (s) from stim onset at which a SCHEDULED (free/rescue) reward is predictable, else null.
-// L1 (GO): free reward at window start = resp_delay. L2 (GO, pav>0): Pavlovian rescue at window
-// start + pav_delay. L3 / L2.5 / no-go / L2 with pav=0: operant only (or per-trial draw) → not predictable.
-function _predRewardOffset(i) {
-  const t = trialTable[i]; if (!t || !_isGo(t.az)) return null;
-  const lvl = parseFloat(((config.task && config.task.reward) || {}).level) || 1;
-  if (lvl === 1) return _respDelayS();
-  if (lvl === 2) return _pavDelayS() > 0 ? _respDelayS() + _pavDelayS() : null;
-  return null;
-}
-// Predict trial i's stim window + (if pavlovian) reward, given its stim onset (leader clock, s).
-function setPrediction(i, stimOnset) {
-  const t = trialTable[i];
-  if (!t) { predStim = null; predReward = null; return; }
-  predStim = {t_on: stimOnset, t_off: stimOnset + (t.duration_s || 0), ..._respWindow(stimOnset)};
-  const _roff = _predRewardOffset(i);
-  predReward = _roff != null ? {t: stimOnset + _roff} : null;
 }
 
 // ── Trial table ──
 
+function _clockTime(unixS) {
+  if (unixS == null || !isFinite(unixS)) return '--';
+  return new Date(unixS * 1000).toLocaleTimeString();
+}
+
 function addTrialRow(evt) {
   const tbody = document.getElementById('trial-tbody');
-  const outCls = evt.outcome === 'hit' ? 'outcome-hit' : 'outcome-miss';
-  const typeCls = evt.reward_type === 'operant' ? 'color:#ab47bc' : 'color:#ff9800';
-  const rt = (evt.rt_ms != null && isFinite(evt.rt_ms)) ? evt.rt_ms.toFixed(0) : '--';
-  // Level: effective level for this trial (L1/L2/L3). Adaptive: P(L3) for adaptive
-  // L2.5, else 1 (deterministic level).
-  const lvl = (evt.level != null) ? 'L' + (+evt.level).toFixed((+evt.level % 1) ? 1 : 0) : '--';
-  const adp = (evt.adaptive_state != null)
-    ? (+evt.adaptive_state === 1 ? '1' : (+evt.adaptive_state).toFixed(2)) : '--';
+  const startT = (evt.t != null && evt.duration_s != null) ? evt.t - evt.duration_s : null;
   tbody.insertAdjacentHTML('afterbegin',
-    `<tr><td>${evt.trial_num + 1}</td><td>${evt.stim_az?.toFixed(0) || '--'}&deg;</td>` +
-    `<td>${evt.contrast?.toFixed(3) || '--'}</td>` +
-    `<td>${lvl}</td><td>${adp}</td>` +
-    `<td style="${typeCls}">${evt.reward_type || '--'}</td>` +
-    `<td class="${outCls}">${evt.outcome}</td>` +
-    `<td>${rt}</td>` +
-    `<td>${evt.resp_licks ?? '--'}</td></tr>`);
-  // Performance series (per trial). responded = licked in the response window (outcome 'hit').
-  // go = should lick (hit/miss); nogo = should withhold (nogo + responded = FALSE ALARM).
-  if (evt.outcome === 'hit' || evt.outcome === 'miss') {
-    const responded = (evt.outcome === 'hit');
-    const az = (evt.stim_az != null) ? evt.stim_az : 0;
-    const isGo = _isGo(az);
-    // RT histogram: GO-trial hits only (a nogo lick is a false alarm, not a hit).
-    if (isGo && responded && evt.rt_ms != null && isFinite(evt.rt_ms)) rtHits.push(evt.rt_ms);
-    if (isGo) { _goN++; if (responded) _goHit++; _goRespHist.push(responded); }
-    else { _nogoN++; if (responded) _nogoFA++; }
-    hitRateSeries.push(_goN > 0 ? _goHit / _goN : null);            // go-trial hit rate
-    const win = _goRespHist.slice(-SLIDE_N);
-    slideHitSeries.push(win.length ? win.filter(Boolean).length / win.length : null);  // sliding go-HR
-    faSeries.push(_nogoN > 0 ? _nogoFA / _nogoN : null);           // false-alarm rate
-    dprimeSeries.push((_goN > 0 && _nogoN > 0) ? _dprime(_goHit, _goN, _nogoFA, _nogoN) : null);
-  }
-  drawRtHist();
-  drawPerformance();
-  computePSTH();
-  drawLickRaster();
-  drawLickPSTH();
-}
-
-// Live-plots cumulative hit-rate line — y 0..1, x trial 1..N (N = total trials from the trial
-// table, else trials-so-far). One point per completed trial; redrawn each trial + in the rAF loop.
-// Performance plot: cumulative + sliding hit rate (left axis 0..1), d' (right axis, go/nogo only),
-// cumulative reward count (own scale, shown in the legend). x = trial 1..N.
-function drawPerformance() {
-  const canvas = document.getElementById('hitrate-canvas'); if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) { canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight; }
-  const w = canvas.width, h = canvas.height;
-  ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
-  const padL = 24, padR = 22, padT = 16, padB = 16;
-  const plotW = w - padL - padR, plotH = h - padT - padB;
-  if (plotW <= 6 || plotH <= 6) return;
-  ctx.font = '8px monospace'; ctx.textAlign = 'left';
-  const C = { hr: '#26a69a', slide: '#ffb74d', fa: '#ef5350', dp: '#ce93d8' };
-  const yHR = v => padT + (1 - v) * plotH;               // y fixed 0..1
-  // gridlines: dashed at .25/.5/.75, solid at 0 and 1
-  for (const yv of [0, 0.25, 0.5, 0.75, 1.0]) {
-    const y = yHR(yv);
-    ctx.strokeStyle = (yv === 0 || yv === 1) ? '#2a3550' : '#1c2740';
-    ctx.lineWidth = 1; ctx.setLineDash(yv === 0 || yv === 1 ? [] : [3, 3]);
-    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y); ctx.stroke(); ctx.setLineDash([]);
-    ctx.fillStyle = '#5a6b8c'; ctx.textAlign = 'right'; ctx.fillText(yv.toFixed(2).replace(/0$/, '').replace(/\.$/, ''), padL - 2, y + 3); ctx.textAlign = 'left';
-  }
-  ctx.strokeStyle = '#556'; ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, padT + plotH); ctx.stroke();
-  const n = hitRateSeries.length;
-  if (!n) { ctx.fillStyle = '#556'; ctx.fillText('no trials yet', padL + 4, padT + plotH / 2); return; }
-  const xMax = Math.max(n, 2);                            // x grows with the trials completed so far
-  const xOf = i => padL + (i / (xMax - 1)) * plotW;
-  const line = (series, color, yfn) => {                 // draws a series; breaks at nulls; dots lone points
-    ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 1.5;
-    ctx.beginPath(); let started = false, segLen = 0, lastX = 0, lastY = 0;
-    const dotIfLone = () => { if (segLen === 1) ctx.fillRect(lastX - 1, lastY - 1, 2.5, 2.5); };
-    for (let i = 0; i < series.length; i++) {
-      const v = series[i];
-      if (v == null || !isFinite(v)) { dotIfLone(); started = false; segLen = 0; continue; }
-      lastX = xOf(i); lastY = yfn(v);
-      if (!started) { ctx.moveTo(lastX, lastY); started = true; segLen = 1; }
-      else { ctx.lineTo(lastX, lastY); segLen++; }
-    }
-    ctx.stroke(); dotIfLone();
-  };
-  line(hitRateSeries, C.hr, yHR);
-  line(slideHitSeries, C.slide, yHR);
-  const faVals = faSeries.filter(v => v != null && isFinite(v));
-  const hasFA = faVals.length > 0;                       // false-alarm line only if nogo trials exist
-  if (hasFA) line(faSeries, C.fa, yHR);
-  // d' (right axis) — only when the task has both go & nogo trials
-  const dvals = dprimeSeries.filter(v => v != null && isFinite(v));
-  const hasDp = dvals.length > 0;
-  if (hasDp) {
-    let dMin = Math.min(0, Math.floor(Math.min(...dvals))), dMax = Math.max(2, Math.ceil(Math.max(...dvals)));
-    if (dMax === dMin) dMax += 1;
-    const yDP = v => padT + (1 - (v - dMin) / (dMax - dMin)) * plotH;
-    line(dprimeSeries, C.dp, yDP);
-    ctx.fillStyle = C.dp; ctx.textAlign = 'left'; ctx.fillText("d'" + dMax, padL + plotW + 1, padT + 6); ctx.fillText(String(dMin), padL + plotW + 1, padT + plotH);
-  }
-  // x ticks (trial numbers)
-  ctx.fillStyle = '#5a6b8c'; ctx.textAlign = 'center';
-  const xStep = Math.max(1, Math.ceil(xMax / 5));
-  for (let t = 1; t <= xMax; t += xStep) ctx.fillText(String(t), xOf(t - 1), h - 4);
-  ctx.fillText(String(xMax), xOf(xMax - 1), h - 4);
-  ctx.textAlign = 'left';
-  // legend + current values across the top
-  const lastFinite = a => { for (let i = a.length - 1; i >= 0; i--) if (a[i] != null && isFinite(a[i])) return a[i]; return null; };
-  const fmt = v => (v == null ? '--' : v.toFixed(2));
-  const segs = [['Cumulative HR ' + fmt(lastFinite(hitRateSeries)), C.hr], ['Sliding HR ' + fmt(lastFinite(slideHitSeries)), C.slide]];
-  if (hasFA) segs.push(['FA ' + fmt(lastFinite(faSeries)), C.fa]);
-  if (hasDp) segs.push(["d′ " + fmt(lastFinite(dvals)), C.dp]);
-  let lx = padL; for (const [txt, col] of segs) { ctx.fillStyle = col; ctx.fillText(txt, lx, 8); lx += ctx.measureText(txt).width + 5; }
-}
-
-// Shared onset-aligned x for the lick raster + PSTH (identical padL/padR so the two stay aligned).
-const _AX_PADL = 26, _AX_PADR = 8;
-function _xOnset(t, padL, plotW) { return padL + ((t + PSTH_PRE) / (PSTH_PRE + PSTH_POST)) * plotW; }
-
-// Pool licks around each stim onset. Builds psthBins (pooled histogram) and psthRaster (one
-// {trial, rel:[dt,...]} per completed trial, so the raster can place each trial at its absolute row on
-// a y-axis scaled to the full planned trial count). Recomputed per trial (+ throttled in the rAF
-// loop), not per frame. Needs the raster Live.
-function computePSTH() {
-  if (!_liveLicksOn()) { psthBins = []; psthNStim = 0; psthRaster = []; return; }  // off: no live licks
-  const span = PSTH_PRE + PSTH_POST;
-  const nBins = Math.max(1, Math.round(span / PSTH_BIN));
-  const bins = new Array(nBins).fill(0);
-  const rows = [];                                // {trial, rel} per completed trial (for the raster)
-  let ns = 0;
-  const first = stimEvents.length ? stimEvents[0].t_on - PSTH_PRE : 0;
-  const licks = lickEvents.filter(lk => lk.t >= first);   // prune licks before the first pooled window
-  for (const s of stimEvents) {
-    if (s.t_on == null) continue;
-    ns++;
-    const rel = [];
-    for (const lk of licks) {
-      const dt = lk.t - s.t_on;
-      if (dt >= -PSTH_PRE && dt < PSTH_POST) {
-        bins[Math.min(nBins - 1, Math.floor((dt + PSTH_PRE) / PSTH_BIN))]++;
-        rel.push(dt);
-      }
-    }
-    rows.push({ trial: s.trial, rel });
-  }
-  psthBins = bins; psthNStim = ns; psthRaster = rows;
-}
-
-// Lick PSTH aligned to stim onset (t=0). Shares the raster x-axis [−PSTH_PRE, +PSTH_POST]; y auto-ranges.
-// Draws the same amber response-window box + dashed onset line as the raster above it.
-function drawLickPSTH() {
-  const canvas = document.getElementById('psth-canvas'); if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) { canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight; }
-  const w = canvas.width, h = canvas.height;
-  ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
-  const padL = _AX_PADL, padR = _AX_PADR, padT = 8, padB = 15;
-  const plotW = w - padL - padR, plotH = h - padT - padB;
-  if (plotW <= 6 || plotH <= 6) return;
-  ctx.font = '8px monospace'; ctx.textAlign = 'left';
-  const span = PSTH_PRE + PSTH_POST, nBins = psthBins.length || Math.max(1, Math.round(span / PSTH_BIN));
-  const xOf = t => _xOnset(t, padL, plotW);
-  // response-window box (stimulus context) behind the bars
-  const rd = _respDelayS(), rw = _responseWindowS();
-  ctx.fillStyle = 'rgba(255,193,7,0.16)'; ctx.fillRect(xOf(rd), padT, Math.max(0, xOf(rd + rw) - xOf(rd)), plotH);
-  let maxC = 1; for (const c of psthBins) if (c > maxC) maxC = c;
-  const bw = plotW / nBins; ctx.fillStyle = '#66bb6a';
-  for (let i = 0; i < nBins; i++) { const bh = (psthBins[i] / maxC) * plotH; if (bh > 0) ctx.fillRect(padL + i * bw, padT + plotH - bh, Math.max(1, bw), bh); }
-  ctx.strokeStyle = '#aaa'; ctx.lineWidth = 1; ctx.setLineDash([2, 2]);
-  ctx.beginPath(); ctx.moveTo(xOf(0), padT); ctx.lineTo(xOf(0), padT + plotH); ctx.stroke(); ctx.setLineDash([]);
-  ctx.strokeStyle = '#556'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, padT + plotH); ctx.lineTo(padL + plotW, padT + plotH); ctx.stroke();
-  ctx.fillStyle = '#8fa2c4'; ctx.textAlign = 'right';
-  ctx.fillText(String(maxC), padL - 3, padT + 7); ctx.fillText('0', padL - 3, padT + plotH);
-  ctx.textAlign = 'center';
-  for (const t of [-5, 0, 5, 10]) { const x = xOf(t); ctx.strokeStyle = '#1c2740'; ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + plotH); ctx.stroke(); ctx.fillStyle = '#8fa2c4'; ctx.fillText((t > 0 ? '+' + t : String(t)) + 's', x, h - 4); }
-  ctx.textAlign = 'left';
-  if (!_hasLickDevice()) { ctx.fillStyle = '#556'; ctx.fillText('no lick device', padL + 4, padT + plotH / 2); return; }
-  if (!_liveLicksOn()) { ctx.fillStyle = '#556'; ctx.fillText('lick detection off', padL + 4, padT + plotH / 2); return; }
-  if (!psthNStim || !psthBins.length) { ctx.fillStyle = '#556'; ctx.fillText('waiting for stim + licks…', padL + 4, padT + plotH / 2); }
-}
-
-// Full-session lick raster aligned to stim onset. y-axis = the planned trial count (trialTable.length),
-// so each completed trial's licks land at its absolute row and the plot fills top→down as the session
-// runs; ticks every 25 trials. Shares the PSTH x-axis [−PSTH_PRE, +PSTH_POST] (onset=0, − left, + right).
-function drawLickRaster() {
-  const canvas = document.getElementById('lickraster-canvas'); if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) { canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight; }
-  const w = canvas.width, h = canvas.height;
-  ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
-  const padL = _AX_PADL, padR = _AX_PADR, padT = 6, padB = 11;
-  const plotW = w - padL - padR, plotH = h - padT - padB;
-  if (plotW <= 6 || plotH <= 6) return;
-  ctx.font = '8px monospace'; ctx.textAlign = 'left';
-  const xOf = t => _xOnset(t, padL, plotW);
-  const N = (trialTable && trialTable.length) ? trialTable.length : Math.max(1, psthNStim);
-  const yOf = tr => padT + (tr / N) * plotH;          // trial 0 at top, N at bottom
-  // response-window box + dashed onset line (full height)
-  const rd = _respDelayS(), rw = _responseWindowS();
-  ctx.fillStyle = 'rgba(255,193,7,0.16)'; ctx.fillRect(xOf(rd), padT, Math.max(0, xOf(rd + rw) - xOf(rd)), plotH);
-  ctx.strokeStyle = '#888'; ctx.lineWidth = 1; ctx.setLineDash([2, 2]);
-  ctx.beginPath(); ctx.moveTo(xOf(0), padT); ctx.lineTo(xOf(0), padT + plotH); ctx.stroke(); ctx.setLineDash([]);
-  for (const t of [-5, 0, 5, 10]) { const x = xOf(t); ctx.strokeStyle = '#141d33'; ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + plotH); ctx.stroke(); }
-  // y-axis + trial ticks every 25
-  ctx.strokeStyle = '#556'; ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, padT + plotH); ctx.stroke();
-  ctx.fillStyle = '#8fa2c4'; ctx.textAlign = 'right';
-  for (let tr = 0; tr <= N; tr += 25) { const y = yOf(tr); ctx.fillText(String(tr), padL - 3, y + 3); ctx.strokeStyle = '#1c2740'; ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y); ctx.stroke(); }
-  if (N % 25) ctx.fillText(String(N), padL - 3, padT + plotH + 3);   // mark the total if not on a 25
-  ctx.textAlign = 'center'; ctx.fillStyle = '#5a6b8c';
-  for (const t of [-5, 0, 5, 10]) ctx.fillText((t > 0 ? '+' + t : String(t)) + 's', xOf(t), h - 2);
-  ctx.textAlign = 'left';
-  if (!_hasLickDevice()) { ctx.fillStyle = '#556'; ctx.fillText('no lick device', padL + 4, padT + plotH / 2); return; }
-  if (!_liveLicksOn()) { ctx.fillStyle = '#556'; ctx.fillText('lick detection off', padL + 4, padT + plotH / 2); return; }
-  // per-trial lick ticks at the trial's absolute row
-  const rowH = plotH / N, tick = Math.min(4, Math.max(1.2, rowH * 0.9));
-  ctx.strokeStyle = '#4caf50'; ctx.lineWidth = 1;
-  for (const r of psthRaster) {
-    const yc = yOf(r.trial + 0.5);
-    for (const dt of r.rel) { const x = xOf(dt); ctx.beginPath(); ctx.moveTo(x, yc - tick / 2); ctx.lineTo(x, yc + tick / 2); ctx.stroke(); }
-  }
-}
-
-// Live-plots RT histogram — GO-hit trials only, 100 ms bins. x-axis fixed 0..response_window (bins and
-// scale don't shift as data arrives); y auto-ranges with the counts. Redrawn each trial + in the raster
-// rAF loop (resize).
-function drawRtHist() {
-  const canvas = document.getElementById('rt-hist-canvas'); if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) { canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight; }
-  const w = canvas.width, h = canvas.height;
-  ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
-  const padL = 28, padR = 8, padT = 16, padB = 18;
-  const plotW = w - padL - padR, plotH = h - padT - padB;
-  if (plotW <= 4 || plotH <= 4) return;
-  ctx.font = '9px monospace'; ctx.textAlign = 'left';
-  const respS = _responseWindowS(), respMs = Math.max(RT_BIN_MS, respS * 1000);
-  const nBins = Math.max(1, Math.ceil(respMs / RT_BIN_MS));
-  const bins = new Array(nBins).fill(0);
-  for (const rt of rtHits) { let b = Math.floor(rt / RT_BIN_MS); if (b < 0) b = 0; if (b >= nBins) b = nBins - 1; bins[b]++; }
-  let maxCount = 1; for (const c of bins) if (c > maxCount) maxCount = c;
-  const bw = plotW / nBins;
-  ctx.fillStyle = '#26a69a';
-  for (let i = 0; i < nBins; i++) { const bh = (bins[i] / maxCount) * plotH; if (bh > 0) ctx.fillRect(padL + i * bw + 1, padT + plotH - bh, Math.max(1, bw - 2), bh); }
-  ctx.strokeStyle = '#556'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, padT + plotH); ctx.lineTo(padL + plotW, padT + plotH); ctx.stroke();
-  // y ticks 0..maxCount
-  ctx.fillStyle = '#8fa2c4'; ctx.textAlign = 'right';
-  const yT = Math.min(4, maxCount);
-  for (let k = 0; k <= yT; k++) { const v = Math.round(maxCount * k / yT); const y = padT + plotH - (v / maxCount) * plotH; ctx.fillText(String(v), padL - 3, y + 3); ctx.strokeStyle = '#141d33'; ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + plotW, y); ctx.stroke(); }
-  // x ticks (seconds); right edge = response-window value
-  ctx.textAlign = 'center'; const step = respS <= 1 ? 0.25 : 0.5;
-  const fmtS = v => v.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
-  for (let t = 0; t < respS - 1e-3; t += step) { const x = padL + (t * 1000 / respMs) * plotW; ctx.fillStyle = '#8fa2c4'; ctx.fillText(fmtS(t), x, h - 6); }
-  ctx.fillStyle = '#8fa2c4'; ctx.fillText(fmtS(respS) + 's', padL + plotW, h - 6);
-  ctx.textAlign = 'left';
-  // median RT — dashed vertical line + label, recomputed on each draw (i.e. every trial)
-  if (rtHits.length) {
-    const s = [...rtHits].sort((a, b) => a - b), m = s.length >> 1;
-    const med = s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
-    const mx = Math.min(padL + plotW, padL + (med / respMs) * plotW);
-    ctx.strokeStyle = '#ffca28'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
-    ctx.beginPath(); ctx.moveTo(mx, padT); ctx.lineTo(mx, padT + plotH); ctx.stroke(); ctx.setLineDash([]);
-    ctx.fillStyle = '#ffca28'; ctx.textAlign = 'right'; ctx.fillText('RT median ' + Math.round(med) + ' ms', padL + plotW, padT + 8); ctx.textAlign = 'left';
-  }
-  ctx.fillStyle = '#888'; ctx.fillText(rtHits.length + ' hits', padL + 4, padT + 8);
-  if (!rtHits.length) { ctx.fillStyle = '#556'; ctx.fillText('no hit trials yet', padL + 4, padT + plotH / 2); }
+    `<tr><td>${evt.trial_num + 1}</td>` +
+    `<td>${_clockTime(startT)}</td>` +
+    `<td>${_clockTime(evt.stim_on_t)}</td>` +
+    `<td>${(evt.duration_s != null) ? evt.duration_s.toFixed(1) : '--'}</td></tr>`);
 }
 
 // ── Phase / buttons ──
@@ -2366,7 +972,7 @@ function setPhase(p) {
   steps.forEach((el, i) => {
     el.className = 'phase-step' + (i < idx ? ' done' : i === idx ? ' active' : '');
   });
-  updateButtons();   // keep buttons + the camera exposure lock in sync with the phase (e.g. GO -> lock)
+  updateButtons();
 }
 
 function _lockUI() {
@@ -2398,23 +1004,11 @@ function updateButtons() {
   document.getElementById('btn-stop').disabled = !running;
   document.getElementById('btn-transfer').disabled = !ended || busy;
   document.getElementById('btn-browse-dest').disabled = busy;
-  document.getElementById('btn-correct-contrast').disabled = !taskLoaded || busy;
   document.getElementById('btn-live').disabled = !rigLoaded || busy;
   // Lock Quit only during a *running* session — Stop first (Stop stays enabled), then Quit.
   // Deliberately NOT during transfer/transient ops: those have no Cancel, so Quit must stay
   // available as the escape hatch (a stalled transfer would otherwise freeze the whole UI).
   document.getElementById('btn-quit').disabled = running;
-
-  // Camera exposure controls: live-adjustable pre-GO, LOCKED once recording starts (running).
-  const expAuto = document.getElementById('exp-auto');
-  if (expAuto) {
-    const expLocked = running || uiBusy || !rigLoaded;
-    expAuto.disabled = expLocked;
-    ['exp-ms', 'exp-gain'].forEach(id => {
-      const el = document.getElementById(id);
-      if (el) el.disabled = expLocked || expAuto.checked;   // manual fields off when auto-exposure or locked
-    });
-  }
 }
 
 // ── Log ──
@@ -2437,7 +1031,7 @@ async function quitApp() {
   if (!confirm('Quit VRFarm?')) return;
   if (phase === 'running') {
     await fetch('/api/stop', {method: 'POST'}).catch(() => {});
-    stopAllLive();
+    stopLiveAll();
   }
   await fetch('/api/quit', {method: 'POST'}).catch(() => {});
   document.title = 'VRFarm (closed)';
@@ -2446,16 +1040,13 @@ async function quitApp() {
 
 // ── Init ──
 
-// Editing a task parameter after a Deploy makes the deployed plan stale: the Pis still hold
-// the previously deployed YAML and the pre-generated stimulus NPZ, so GO would silently run
-// the OLD values. The server drops its deployed flag whenever the task is updated, but
-// nothing told it (or the user) that a field had changed, so GO stayed lit. Fall back to
+// Editing a task parameter after a Deploy makes the deployed plan stale: the Pi still holds
+// the previously deployed YAML, so GO would silently run the OLD values. Fall back to
 // 'connected' on the first edit — that greys GO and re-arms Deploy.
 //
 // 'change' rather than 'input': it fires on commit/blur for text and number fields and
 // immediately for selects and checkboxes, so a half-typed number can't invalidate the
-// deploy mid-keystroke. Programmatic writes (populateTaskFields, correctContrast,
-// _updateNTrials) assign .value directly and fire no event, so they can't trip this.
+// deploy mid-keystroke.
 document.getElementById('experiment-subsections')
   .addEventListener('change', (e) => {
     if (!e.target.classList || !e.target.classList.contains('task-param')) return;
@@ -2465,7 +1056,6 @@ document.getElementById('experiment-subsections')
   });
 
 updateButtons();
-clearAllCanvases();
 </script>
 </body>
 </html>

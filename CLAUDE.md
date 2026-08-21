@@ -1,257 +1,159 @@
-# VRFarm — Claude Code Handoff
+# VRFarm barebones — Claude Code Handoff
 
-This document is for Claude Code to pick up the VRFarm project.
-Read this entire file before touching anything.
+This is the **barebones template branch**: a leader-only, device-agnostic skeleton of the
+VRFarm system. The full attention-paradigm system (follower/display/stimulus, photodiode
+sync, lick/reward contingency) lives on `main`; this branch strips all of it and keeps the
+generic machinery — setup UI, experiment UI, session engine, data saving, livestreams,
+deploy/install — so new projects fork from here and add their own devices.
 
 ---
 
-## What is VRFarm
+## What is VRFarm (barebones)
 
-A behavioral neuroscience experiment system for mice. Two Raspberry Pi 4Bs
-per rig (Leader + Follower), controlled from the Controller via Flask web UIs.
-Paradigms are tuned via task YAML (stimulus/reward/session/adaptive params); the trial
-engine is the imperative loop in engine/leader.py. Devices are pluggable.
-Named after cheese.
+A behavioral-experiment scaffold: one Raspberry Pi 4 ("leader") per rig, controlled from a
+Controller machine via two Flask web UIs. The trial engine is a simple 4-phase loop
+(**ITI → pre-stim → stim → post-stim**) with no stimulus hardware and no response
+contingency — the stim phase is a timed placeholder window a real task grows into.
+Devices are pluggable and fully generic: this branch ships **zero** concrete devices.
 
-**Current rig:** cheese (Leader, Follower)
-**Controller:** the controller (hakan@the controller), conda env `vrfarm`, Python 3.11
-**Both Pis:** Debian 13 (trixie), conda env `rig`, user `vruser`. The `rig` env
-Python **must match the system Python** (3.13 on trixie) — the camera bindings
-(`python3-libcamera`/`python3-picamera2`) are apt-built for the system Python and are
-symlinked into the env, so a version mismatch breaks `import picamera2`. Create with
-`conda create -n rig python=$(python3 -c 'import sys;print(f"{sys.version_info[0]}.{sys.version_info[1]}")')`.
+**Controller:** Flask UIs (`app/` experiment, `setup/` rig setup), conda env `vrfarm`
+**Pi:** conda env `rig` (created by Install, pinned to the system python), pi_api on :5080
 
 ---
 
 ## Project structure
 
 ```
-~/VRFarm/                              <- project root on the Controller
-├── config/
-│   └── go_nogo_v1.yaml               <- task/paradigm config (stimulus/reward/session/adaptive)
-├── rigs/
-│   └── cheese.json                    <- rig hardware config (pins, cal, ports, roles)
+VRFarm/
+├── experiments/template.yaml   <- task config: session (trial timing) + devices (per-device params)
+├── rigs/demo.yaml              <- loopback mock rig (use with tools/mock_pi.py)
 ├── devices/
-│   ├── base.py                        <- Device base class, IOType, DEVICE_REGISTRY
-│   ├── lick_sensor.py                 <- MPR121 capacitive touch (I2C)
-│   ├── reward.py                      <- Reward valve (GPIO output)
-│   ├── reward_calibration.py          <- Reward pulse-volume calibration routine
-│   ├── camera.py                      <- picamera2 (CSI)
-│   ├── photodiode.py                  <- TTL sync input (GPIO input)
-│   └── display.py                     <- pygame fullscreen renderer (HDMI)
+│   └── base.py                 <- Device base class, IOType, DEVICE_REGISTRY (@register_device)
 ├── engine/
-│   ├── leader.py                      <- Leader Pi main process (imperative trial loop)
-│   └── follower.py                    <- Follower Pi main process
-├── app/
-│   ├── app.py                         <- Flask experiment UI localhost:5000
-│   └── templates/
-│       └── experiment.html            <- Experiment dashboard
-├── setup/
-│   ├── app.py                         <- Flask rig setup UI localhost:4999
-│   └── templates/
-│       └── setup.html                 <- Setup dashboard
+│   └── leader.py               <- 4-phase trial loop, generic device init/stream/HDF5
+├── app/                        <- experiment UI (localhost:5000)
+├── setup/                      <- rig setup UI (localhost:4999)
 ├── pi_api/
-│   ├── api.py                         <- Flask REST API (runs on each Pi, port 5080)
-│   └── vrfarm.service                 <- systemd unit file
+│   ├── api.py                  <- Flask REST API on the Pi (:5080) — generic device surface
+│   └── vrfarm.service          <- systemd unit
 ├── shared/
-│   ├── config.py                      <- Config loaders + subject database
-│   └── stim_generator.py              <- Pre-compute stimuli (NPZ output)
-├── display_calibration/               <- Display/projector calibration scripts
-│   ├── compute_warp_map.py
-│   ├── rig_geometry.yaml
-│   ├── display_test_patches.py
-│   ├── fit_luminance_correction.py
-│   └── validate_calibration.py
-├── data/
-│   └── subjects/                      <- Session history JSONs (auto-created)
-└── docs/
-    ├── FUTURE_WORK.md
-    ├── INITIAL_SETUP_REFERENCE.md
-    ├── EXPERIMENT_PROTOCOL.md
-    ├── CALIBRATION_PROTOCOL.md
-    └── AUDIT_20260331.md
+│   ├── config.py               <- rig/task loaders + subject DB
+│   ├── consolidate.py          <- fold sidecars into the session .h5, remux video
+│   ├── deploy_manifest.py      <- THE single list of files deployed to ~/rig (both UIs use it)
+│   ├── mjpeg_relay.py          <- reconnecting MJPEG proxy (controller-side)
+│   └── notify.py               <- Slack notifications
+├── shepherd/                   <- independent health monitor (leader; per-rig toggle)
+├── tools/mock_pi.py            <- fake Pi + fake leader for hardware-free end-to-end runs
+└── data/subjects/              <- session history JSONs (auto-created)
 ```
 
-**On the Leader Pi (192.168.10.101):**
-```
-~/rig/                                 <- engine/leader.py, devices/*.py, shared/*.py
-~/rig/pi_api/api.py                    <- REST API
-~/data/<session_id>/                   <- HDF5 + metadata (local, transferred after)
-/media/vruser/ssd/video/               <- video recordings (SSD)
-```
-
-**On the Follower Pi (192.168.10.102):**
-```
-~/rig/                                 <- engine/follower.py, devices/display.py
-~/rig/pi_api/api.py                    <- REST API
-~/rig/stims/<session_id>/stimuli.npz   <- pre-generated stim params
-```
-
----
-
-## Network
-
-```
-Gigabit ethernet switch (experiment traffic)
-├── the Controller    192.168.10.1   (en5)
-├── Leader            192.168.10.101 (eth0 static)
-└── Follower          192.168.10.102 (eth0 static)
-
-All Pis also on institute WiFi (wlan0) for internet/NTP.
-```
-
-SSH keys: the Controller `~/.ssh/id_rsa.pub` copied to both Pis. Passwordless SSH works.
+On the Pi: `~/rig/` (code, deployed), `~/data/` (HDF5 sessions), video under the rig's
+`data.video_dir`.
 
 ---
 
 ## Architecture
 
 ```
-the Controller (app/app.py Flask, localhost:5000)
-  ↔ REST API (HTTP, port 5080) for deploy, config, start/stop, data transfer
-  ← UDP :5571 events from Leader (trial, lick, reward, stim, sync)
-  → UDP :5572 commands to Leader (START, STOP, REWARD)
+Controller (app/app.py :5000, setup/app.py :4999)
+  ↔ pi_api REST (:5080)  — deploy, install, device init/monitor, start/stop, transfer
+  ← UDP :5571 events from the leader engine (trial, stim, session_end, device streams)
+  → UDP :5572 commands  (START, STOP)
 
-Leader (engine/leader.py)
-  - Imperative trial loop (ITI → pre-stim → stim → reward-delay → response window → post-stim)
-  - All GPIO devices: lick sensor, reward, camera, photodiode
-  - HDF5 data saved locally, transferred to the Controller after session
-  → UDP :5575 display commands to Follower (SHOW, QUIT)
-  → UDP :5571 events to the Controller
-
-Follower (engine/follower.py)
-  - pygame display (HDMI/DPI)
-  - Loads pre-generated stim NPZ at session start
-  - On SHOW: look up trial params, render, wait duration, blank
-  ← UDP :5575 commands from Leader
+Leader Pi (engine/leader.py)
+  - 4-phase trial loop, durations from the task yaml `session:` block
+  - devices from DEVICE_REGISTRY; per-trial + session-level HDF5 via the Device contract
+  - HDF5 written locally per trial; consolidated at session end; transferred after
 ```
 
-**Key design:** Leader sends `{"cmd": "SHOW", "trial": N}` — Follower handles
-the full show->duration->blank cycle from NPZ data.
+Session events: `grace_period`, `countdown`, `experiment_start`,
+`trial_start {trial, t, iti}`, `stim {on, trial, t}`, `trial {trial_num, t, stim_on_t,
+duration_s}`, `session_end {n_completed, n_planned}` — plus every device stream event,
+republished generically as `{type: <event-or-device-name>, ...}`.
 
-**Real-time:** All inter-Pi communication uses Python `socket` module (UDP
-datagrams, ~0.1ms on local gigabit). No ZMQ dependency.
+## Generic device surface (the core of this template)
 
-**Management:** Flask REST API on each Pi (port 5080) for file upload/download,
-process start/stop, stim generation. Replaces paramiko SSH.
+Devices self-register: `devices/<type>.py` defines a class with `@register_device` and
+**module name == device type**. Nothing else in the system knows device names:
 
----
+- **pi_api**: `POST /api/init_device {name, type, config}` (imports `devices/<type>.py`,
+  constructs from the registry, `init(config, {})`, stores it);
+  `POST /api/monitor_device {name}` / `GET /api/device_data?name=` /
+  `POST /api/stop_monitor_device {name}` — per-name event buffers for the setup-UI monitor.
+- **Camera-like devices** (rig config sets `video: true`): driven through the device-name-
+  keyed camera endpoints — `POST /api/camera_preview_start {device, type, config,
+  session_id?, video_dir?, downsample?}` (a session_id records; else preview),
+  `GET /api/camera_stream?device=`, `POST /api/camera_preview_stop {device, force?}`,
+  `POST /api/camera_controls {device}` (only if the device has `apply_exposure`).
+  `/api/status` reports `cameras: {name: {recording, frames}}` + aggregate
+  `camera_recording`/`camera_frames`.
+- **engine/leader.py**: iterates the rig yaml's enabled devices, imports by type, passes
+  `task.devices.<name>` as task_params, starts every stream through one generic callback,
+  and writes `hdf5_datasets()` per trial + `hdf5_session_data()` at session end.
+- **setup UI**: device cards are fully generic — editable rig-config fields + a Live
+  monitor (video devices get the MJPEG preview; everything else a JSON event readout).
+- **experiment UI**: one video panel per `video: true` device; a save-checkbox per enabled
+  device (video unchecked = livestream only; other devices unchecked = HDF5 skipped).
+
+### Adding a device — the whole checklist
+
+1. Write `devices/<type>.py` (`@register_device`, `DeviceInfo`, `init/check/close`,
+   optionally `start_stream/stop_stream`, `hdf5_datasets/hdf5_trial_data/
+   hdf5_session_data`, `reset_trial`; camera-likes add `start_preview/start_recording/
+   stop_recording/mjpeg_stream` and `_recording/_is_preview/_frame_idx` attrs).
+   The class must construct with no args and touch no hardware before `init()`.
+2. Add it to `shared/deploy_manifest.py` (or it never reaches the Pi).
+3. If it needs pip packages: add to `DEVICE_PACKAGES` in `setup/app.py` (and
+   `I2C_DEVICE_TYPES` if it needs the I2C bus). `DeviceInfo.required_packages` is
+   display-only.
+4. Rig yaml: `devices.<name>: {type: <type>, enabled: true, ...hardware config}`
+   (+ `video: true` for a camera-like) and add `<name>` to the Pi's `devices:` list.
+5. Optional: per-device tunables under the task yaml's `devices:` map.
+That's it — no new endpoints, no UI edits (a bespoke card body is optional polish).
 
 ## Config system
 
-Two config files with clean separation:
+| What                         | Where               |
+|------------------------------|---------------------|
+| Device hardware config       | rig yaml `devices:` |
+| Pi identity (ip, user, role) | rig yaml `pis:`     |
+| Trial timing                 | task yaml `session:` (grace_period_s, n_trials, iti_s, prestim_s, stim_s, poststim_s) |
+| Per-device tunables          | task yaml `devices:` |
+| Subject/date/session#        | runtime (UI fields) |
 
-| What                          | Where              | Example                              |
-|-------------------------------|--------------------|--------------------------------------|
-| Pin assignments, I2C addr     | Rig JSON           | `"gpio": 18`, `"i2c_address": "0x5A"` |
-| Calibration tables            | Rig JSON           | `"calibration": [[10,2.1],...]`       |
-| Pi roles, IPs                 | Rig JSON           | `"role": "leader"`                    |
-| Paradigm / trial params       | Task YAML          | stimulus/reward/session/adaptive sections |
-| Experiment-tunable params     | Task YAML `reward` | `amount_ul: 4.0`, `max_lick_rate: 0.3`|
-| Subject, date, session#       | Runtime (UI)       | set in experiment UI fields          |
-
-## Device abstraction
-
-Adding a new device = one file in `devices/`. Each device subclasses `Device`
-from `devices/base.py` and declares:
-- `info`: DeviceInfo (name, label, IOType, required_packages)
-- `init(rig_config, task_params)`: hardware init
-- `check()`: health check
-- `task_params_schema()`: experiment-tunable params (editable in UI)
-- `hdf5_datasets()` / `hdf5_trial_data()`: per-trial data saving
-- `start_stream(callback)` / `stop_stream()`: live data
-- `needs_calibration` / `calibrate()` / `load_calibration()`: optional
-
-`@register_device` decorator adds the class to `DEVICE_REGISTRY`.
-
----
+The rig FILENAME is the rig's identity (`load_rig` overrides a disagreeing `name:`).
+`pis[].user` is honored everywhere (SSH probe, install, reboot); pi_api resolves relative
+`--rig`/`--task` args against `~/rig`, so the controller never hardcodes a Pi's home path.
 
 ## Experiment workflow
 
-Setup -> Connect -> **Deploy** -> Running -> Ended -> Transfer
+Setup → Load Rig (init devices) → **Deploy** (code via `shared/deploy_manifest.py` + rig +
+task yamls; restarts pi_api) → GO (start engine, wait for the literal log line
+`"Waiting for START command..."`, start video recordings, UDP START) → Running → Ended
+(teardown stops recordings, saves logs) → Transfer (consolidate on the Pi, size-verified
+downloads preserving subdirectories, shepherd log mirror, subject DB record).
 
-- **Deploy** is required before Go: uploads configs, generates stims on Leader,
-  pushes NPZ to Follower, renders thumbnails on the Controller.
-- Any parameter change in UI invalidates deploy (Go grays out).
+## Dry-run without hardware
 
----
-
-## Packages
-
-**Controller (conda env vrfarm):**
-Conda base at `/opt/homebrew/Caskroom/miniforge/base`.
 ```bash
-conda activate vrfarm
-pip install flask requests scipy matplotlib numpy h5py pyyaml
-```
-No longer needed: `paramiko`, `pyzmq` (replaced by REST API + UDP).
-
-**Leader (conda env rig):**
-```bash
-pip install flask pyyaml numpy scipy h5py smbus2 pigpio
-```
-Optional: `picamera2` (camera, enable in rig JSON)
-
-**Follower (conda env rig):**
-```bash
-pip install flask pyyaml numpy pygame
+python tools/mock_pi.py           # fake pi_api :5080 + fake leader on UDP
+python app/app.py --no-browser    # rig = demo → Load Rig → Deploy → GO
 ```
 
-pigpiod daemon: on trixie the `pigpio` apt package is gone, so the daemon is built
-from source — already installed at `/usr/local/bin/pigpiod` with a unit at
-`/etc/systemd/system/pigpiod.service` (enabled). The Python client is `pip install
-pigpio` (in the `rig` env). pigpiod must be running: it's a service now
-(`systemctl status pigpiod`), or `sudo pigpiod` manually.
+## Known gotchas
 
-**Running the UIs:**
-```bash
-conda activate vrfarm
-export VRFARM_SLACK_WEBHOOK="https://hooks.slack.com/services/..."  # optional: Slack notifications (start/end/timeout); unset = off
-python app/app.py          # experiment UI, localhost:5000
-python setup/app.py        # rig setup UI, localhost:4999
-```
-
----
-
-## Known issues / gotchas
-
-- `conda` not in PATH for non-interactive SSH — use
+- `conda` not in PATH for non-interactive SSH — Install uses
   `source ~/miniforge3/etc/profile.d/conda.sh && conda activate rig`
-- On a macOS controller, port 5000 is taken by AirPlay Receiver — disable in System Settings
-  -> General -> AirDrop & Handoff -> AirPlay Receiver off
-- pigpio `sudo make install` fails on its Python step (distutils missing) —
-  harmless, C library + `pigpiod` install fine; use `pip install pigpio` for the client
-- The leader is on a tiny ~8 GB SD card (often >90% full) — reclaim with
-  `conda clean -a -y` / `pip cache purge`; a larger card is needed for sustained use
-- Pis are firewall-gated off the `public` WiFi (associated but no egress). To install
-  packages, run an HTTP proxy on the Controller (`python -m proxy --hostname 192.168.10.1
-  --port 8899`) and set `HTTPS_PROXY=http://192.168.10.1:8899` on the Pi
-- Projector startup sequence needed on the follower before display:
-  `~/rig/start_projector.sh` (sets GPIO ALT2, GPIO25 high, starts X :0)
-- Warp map not yet generated — stim_generator uses linear approximation fallback
-
----
-
-## Next steps
-
-1. Deploy new code to both Pis via setup UI (setup/app.py localhost:4999)
-2. Install systemd service on each Pi (pi_api/vrfarm.service)
-3. Test Connect in experiment UI — verify both Pis respond on REST API
-4. Deploy experiment, run 5-trial session (camera off, photodiode off)
-5. Test lick -> reward latency (should be <1ms, same-Pi GPIO)
-6. Generate warp map via display_calibration/
-7. Run full session with correct stimulus positions
-
----
+- On a macOS controller, port 5000 is taken by AirPlay Receiver — disable it
+- pi_api reload = `POST /api/restart` (self-kill; systemd `Restart=always` respawns) —
+  Deploy does this automatically; devices must be re-initialized after
+- Keep Pi-deployed code compatible with the OLDEST Pi python in the fleet (bullseye = 3.9:
+  no `match`, no runtime `X | Y` unions)
 
 ## Style / conventions
 
-- Flask SSE for real-time event streaming to browser
-- UDP datagrams for all real-time Pi communication
-- REST API (Flask on each Pi) for management operations
-- systemd services for Pi process lifecycle
-- HDF5 for trial data, written incrementally per trial on Leader
-- All timestamps: `time.time()` Unix seconds, NTP-synced
-- Config: rig JSON (hardware) + task YAML (paradigm params)
-- Trial engine: imperative loop in engine/leader.py, tuned by task-YAML params
-- Device abstraction: base class + one file per device type
+- Flask SSE to the browser; UDP datagrams for real-time Pi communication
+- REST (pi_api) for management; systemd for Pi process lifecycle
+- HDF5 per trial on the leader; all timestamps `time.time()` Unix seconds (NTP-synced)
+- Imperative trial loop in engine/leader.py, tuned by task-yaml `session:` params
+- Device abstraction: base class + one self-registering file per device type

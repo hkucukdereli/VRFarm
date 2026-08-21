@@ -34,6 +34,10 @@ devices:
     type: naneye
     enabled: true
     video: true
+    # BRING-UP after a power cycle: the vbridge FPGA must be (re)loaded before frames
+    # flow — the bridge MCU must ACK at 0x15 on i2c-1 (i2cdetect -y 1), then:
+    #   python3 ~/Projects/vbridge/cbi-upd.py --fpga -i /dev/i2c-1 -f ~/Projects/ams/naneyem.bit
+    # Enumeration in --list-cameras alone does NOT mean the sensor is streaming.
     libcamera_bin: /usr/local/bin/libcamera-vid
     camera_match: vbridge
     resolution: [320, 320]

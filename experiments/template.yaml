@@ -1,53 +1,15 @@
-last_saved: "2026-04-08"
-# ── What to show ──
-stimulus:
-  background_gray: 0.75
-  size_deg: 8.0
-  shape: square
-  duration_s: 2.0          # total projector on-time
-  altitude_deg: 10.0
-  go_rule: all              # all | left | right
-  contrast:
-    values: [1.0]            # contrast level(s)
-    proportions: [1]         # relative proportion per value (auto-normalized)
-  # switch_trial_contrast: lowest   # optional, for blocked designs
-  photodiode_sync_enabled: false   # photodiode stim-onset sync (needs photodiode in rig)
-  photodiode_sync_every_n: 5       # red patch ON every Nth display frame
-
-# ── When to reward ──
-reward:
-  amount_ul: 4.0
-  amount_mode: volume       # volume | count
-  amount_count: 1           # count mode: # of base pulses per reward
-  pulse_gap_ms: 150         # count mode: off-time (ms) between pulses
-  level: 1                    # 1=free@window-start, 2=operant+rescue, 2.5=adaptive(L2/L3), 3=pure operant (all GO-only)
-  resp_delay_s: 0.6         # delay after stim onset before response window opens
-  response_window: 1.4        # response window duration (can extend beyond stim)
-  pav_delay_s: 0.5          # L2 only: s from resp-win start to the Pavlovian rescue (0=off; L3 ignores it)
-  timeout_rule: rate             # none | rate | count
-  max_lick_rate: 0.3
-  timeout_phases: [iti]     # phases the timeout rule enforces: any of prestim, poststim, iti
-
-# ── Trial structure ──
+last_saved: ''
+# Barebones session: a simple 4-phase trial loop, no response contingency.
+# One trial = ITI -> pre-stim -> stim (timed placeholder window) -> post-stim.
 session:
-  grace_period_s: 10           # seconds to wait after GO before trials start
-  n_blocks: 6
-  block_size: 25
-  block_sequence: [80]      # azimuth per block, cycled
-  iti: [8, 16]              # [min, max] random or scalar for fixed
-  prestim_duration: 0        # baseline period before stimulus onset (0 = immediate)
-  poststim_duration: 0
-  global_delay: 0
-  block_delay: 0
-  block_delay_skip_first: false
-  # randomize_blocks: true  # optional, shuffles all trials
-  global_timeout_trials: 0            # abort session if dry for N consecutive trials (0 = off)
-  global_timeout_phases: []           # phases checked for licks: prestim/stim/poststim/iti
-
-# ── Adaptive (level 2.5 only) ──
-adaptive:
-  enabled: false
-  initial_state: 0.0
-  step_up: 0.2
-  step_down: 0.2
-    
+  grace_period_s: 10    # wait after GO before trial 0
+  n_trials: 60
+  iti_s: 5              # scalar, or [min, max] for a uniform draw per trial
+  prestim_s: 2
+  stim_s: 2
+  poststim_s: 2
+# Per-device tunables, consumed generically by the engine (Device.task_params_schema
+# contract): the map key is the rig device name, the value is passed to its init() as
+# task_params, e.g.:
+#   worldcam: {fps: 30}
+devices: {}

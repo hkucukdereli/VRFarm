@@ -26,6 +26,82 @@ FORMAT_VERSION = 2
 # flat dataset (engine output) -> destination group. Extend when a device family
 # should get its own group (e.g. a continuous stream); unknown names -> /trials.
 _GROUP = {}
+for _n in ("imu_t", "imu_accel_raw", "imu_gyro_raw",
+           "imu_accel_lsb_per_g", "imu_gyro_lsb_per_dps"):
+    _GROUP[_n] = "imu"     # gyroscope_nano / gyroscope_i2c continuous stream
+
+
+def _video_subdirs(video_session_dir):
+    """Per-device recording subdirs (<session>/<device>/ holding video.* +
+    frame_timestamps.npy + camera_metadata.json), as written by camera-like devices."""
+    if not video_session_dir:
+        return []
+    v = Path(video_session_dir)
+    if not v.exists():
+        return []
+    return sorted(d for d in v.iterdir() if d.is_dir()
+                  and ((d / "video.mjpeg").exists() or (d / "video.avi").exists()
+                       or (d / "frame_timestamps.npy").exists()
+                       or (d / "camera_metadata.json").exists()))
+
+
+def _remux_mjpeg_dir(vdir):
+    """Container-copy video.mjpeg -> video.avi in one device subdir and delete the raw
+    once verified. MJPEG-in-AVI is playable everywhere (incl. DeepLabCut) and the copy
+    is near-free — no re-encode on the Pi. Same never-raise / keep-raw-on-failure
+    semantics as the legacy h264 remux."""
+    import shutil
+    import subprocess
+
+    vdir = Path(vdir)
+    raw = vdir / "video.mjpeg"
+    avi = vdir / "video.avi"
+    if avi.exists() and not raw.exists():
+        return {"skipped": "already avi"}
+    if not raw.exists():
+        return {"skipped": "no raw video"}
+    if shutil.which("ffmpeg") is None:
+        return {"error": "ffmpeg not found; kept raw .mjpeg"}
+
+    # fps from the device's own metadata sidecar (read BEFORE the merge deletes it),
+    # else from the already-merged h5 attrs is not worth the plumbing — default 30.
+    fps = 30
+    meta = vdir / "camera_metadata.json"
+    try:
+        if meta.exists():
+            m = json.loads(meta.read_text())
+            fps = int(round(float(m.get("measured_fps") or m.get("fps") or 30)))
+    except Exception:
+        pass
+    if fps <= 0:
+        fps = 30
+
+    tmp = vdir / "video.avi.part"
+    raw_size = raw.stat().st_size
+    cmd = ["ffmpeg", "-y", "-v", "error", "-framerate", str(fps),
+           "-i", str(raw), "-c:v", "copy", "-an", "-f", "avi", str(tmp)]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=3600)
+    except Exception as e:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        err = getattr(e, "stderr", "") or str(e)
+        return {"error": f"remux failed ({str(err)[:120]}); kept raw .mjpeg", "fps": fps}
+
+    got = tmp.stat().st_size if tmp.exists() else 0
+    if got < raw_size * 0.95:   # a container copy must land ~the same size
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return {"error": f"remux output too small ({got}/{raw_size} bytes); kept raw .mjpeg",
+                "fps": fps}
+    os.replace(tmp, avi)
+    raw.unlink()
+    return {"remuxed": str(Path(vdir.name) / "video.avi"), "fps": fps,
+            "removed_raw": True, "avi_bytes": got}
 
 
 def _remux_and_prune_video(video_session_dir, h5_path):
@@ -120,11 +196,14 @@ def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=Tru
     with h5py.File(h5_path, "r") as f:
         already = f.attrs.get("format_version", 0) == FORMAT_VERSION or "trials" in f
     if already:
-        # h5 is already consolidated, but still (re)try the video remux — a prior run may have
+        # h5 is already consolidated, but still (re)try the video remuxes — a prior run may have
         # been unable to (ffmpeg missing, interrupted), and we'd rather finish it on a re-transfer
-        # than leave the raw .h264 stranded.
+        # than leave a raw video stranded.
         vres = _remux_and_prune_video(video_session_dir, h5_path) if remux_video else {"skipped": "disabled"}
-        return {"ok": True, "skipped": "already consolidated", "h5": str(h5_path), "video": vres}
+        vsubs = ({d.name: _remux_mjpeg_dir(d) for d in _video_subdirs(video_session_dir)}
+                 if remux_video else {})
+        return {"ok": True, "skipped": "already consolidated", "h5": str(h5_path),
+                "video": vres, "video_dirs": vsubs}
 
     meta_path = session_dir / "metadata.yaml"
     tslog_path = Path(video_session_dir) / "frame_timestamps.npy" if video_session_dir else None
@@ -190,19 +269,52 @@ def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=Tru
                 except Exception as e:
                     print(f"[consolidate] camera_metadata.json unreadable ({e}); skipping")
 
+            # 5) per-device recording subdirs (<session>/<device>/) — each device's
+            # frame_timestamps.npy -> /<device>/frame_timestamps and its
+            # camera_metadata.json -> /<device> attrs, mirroring the legacy /camera merge.
+            for sub in _video_subdirs(video_session_dir):
+                sts = sub / "frame_timestamps.npy"
+                if sts.exists():
+                    d = dst.create_dataset(f"{sub.name}/frame_timestamps", data=np.load(sts))
+                    d.attrs["columns"] = ["frame_idx", "wall_clock_s", "sensor_ts_ns"]
+                    merged[f"{sub.name}_timestamps"] = True
+                smeta = sub / "camera_metadata.json"
+                if smeta.exists():
+                    try:
+                        sg = dst.require_group(sub.name)
+                        for k, v in json.loads(smeta.read_text()).items():
+                            if isinstance(v, (list, dict)):
+                                sg.attrs[k] = json.dumps(v)
+                            elif v is None:
+                                sg.attrs[k] = ""
+                            else:
+                                sg.attrs[k] = v
+                        merged[f"{sub.name}_metadata"] = True
+                    except Exception as e:
+                        print(f"[consolidate] {sub.name}/camera_metadata.json unreadable ({e}); skipping")
+
         os.replace(tmp, h5_path)   # atomic swap only on full success
     except Exception:
         if tmp.exists():
             tmp.unlink()
         raise
 
+    # Remux each device subdir BEFORE deleting sidecars — _remux_mjpeg_dir reads the fps
+    # from the subdir's camera_metadata.json.
+    vsubs = ({d.name: _remux_mjpeg_dir(d) for d in _video_subdirs(video_session_dir)}
+             if remux_video else {})
+
     removed = []
     if delete_sidecars:
-        for p in (meta_path, tslog_path, geom_path):
+        paths = [meta_path, tslog_path, geom_path]
+        for sub in _video_subdirs(video_session_dir):
+            paths += [sub / "frame_timestamps.npy", sub / "camera_metadata.json"]
+        for p in paths:
             if p and Path(p).exists():
                 Path(p).unlink()
                 removed.append(Path(p).name)
 
-    # Turn the raw .h264 into a playable/DLC-ready video.mp4 (stream copy) and drop the raw.
+    # Turn the legacy raw .h264 into a playable/DLC-ready video.mp4 (stream copy) and drop the raw.
     vres = _remux_and_prune_video(video_session_dir, h5_path) if remux_video else {"skipped": "disabled"}
-    return {"ok": True, "h5": str(h5_path), "merged": merged, "removed": removed, "video": vres}
+    return {"ok": True, "h5": str(h5_path), "merged": merged, "removed": removed,
+            "video": vres, "video_dirs": vsubs}

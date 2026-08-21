@@ -710,11 +710,13 @@ async function pollDeviceData(name, ip) {
   if (events.length) {
     ds.monCount = (ds.monCount || 0) + events.length;
     ds.monLast = events[events.length - 1];
+    ds.trace = (ds.trace || []).concat(events).slice(-600);   // ~40 s at 15 Hz
   }
   const cntEl = document.getElementById('mon-count-' + name);
   const boxEl = document.getElementById('mon-box-' + name);
   if (cntEl) cntEl.textContent = String(ds.monCount || 0);
   if (boxEl && ds.monLast) boxEl.textContent = JSON.stringify(ds.monLast, null, 1);
+  if (document.getElementById('gyro-canvas-' + name)) drawGyroTrace(name);
 }
 
 // ── Video devices (rig config `video: true`): preview via the camera endpoints ──
@@ -941,7 +943,10 @@ function renderDeviceCard(name, dev, pisReady) {
   }).join('');
 
   const showControls = enabled && pisReady;
-  const controlsHtml = showControls ? renderGenericControls(name, dev) : '';
+  const devType = dev.type || name;
+  const controlsHtml = !showControls ? ''
+    : devType.startsWith('gyroscope') ? renderGyroControls(name, dev)
+    : renderGenericControls(name, dev);
 
   // Reinit lives in the header row (next to title/status) — one per device.
   const reinitBtn = showControls
@@ -968,12 +973,9 @@ function renderDeviceCard(name, dev, pisReady) {
     </div>`;
 }
 
-// Generic card body: the device's rig-yaml fields as editable inputs (persisted by Save Rig),
-// plus Live monitoring — a video device streams MJPEG, everything else streams its events into
-// a JSON readout via the generic monitor endpoints.
-function renderGenericControls(name, dev) {
-  const ds = deviceState[name] || {};
-  const fields = Object.entries(dev)
+// The device's rig-yaml fields as editable inputs (persisted by Save Rig).
+function _genericFields(name, dev) {
+  return Object.entries(dev)
     .filter(([k, v]) => !['type', 'enabled'].includes(k)
                         && (v === null || typeof v !== 'object' || Array.isArray(v)))
     .map(([k, v]) => {
@@ -987,6 +989,13 @@ function renderGenericControls(name, dev) {
         <input type="text" value='${String(val).replace(/'/g, "&#39;")}'
                onchange="updateDeviceField('${name}','${k}',this.value)"></div>`;
     }).join('');
+}
+
+// Generic card body: editable fields plus Live monitoring — a video device streams MJPEG,
+// everything else streams its events into a JSON readout via the generic monitor endpoints.
+function renderGenericControls(name, dev) {
+  const ds = deviceState[name] || {};
+  const fields = _genericFields(name, dev);
 
   const isVideo = !!dev.video;
   let liveHtml;
@@ -1020,6 +1029,62 @@ function renderGenericControls(name, dev) {
     <div class="device-controls">${fields}</div>
     <div style="font-size:10px; color:#666; margin-top:2px">Fields persist on Save Rig; Reinit applies them to the device.</div>
     ${liveHtml}`;
+}
+
+// Gyro card body: editable fields + Live monitor drawing the |a| trace on a canvas
+// (same monitor endpoints as the generic card; the device publishes ~15 Hz IMU events).
+function renderGyroControls(name, dev) {
+  const ds = deviceState[name] || {};
+  const monitoring = !!ds.monitoring;
+  const last = ds.monLast;
+  const readout = last
+    ? `|a| ${(last.mag ?? 0).toFixed(2)} g · acc ${last.ax}/${last.ay}/${last.az} · gyro ${last.gx}/${last.gy}/${last.gz}`
+    : 'waiting for samples…';
+  return `
+    <div class="device-controls">${_genericFields(name, dev)}</div>
+    <div style="font-size:10px; color:#666; margin-top:2px">Fields persist on Save Rig; Reinit applies them to the device.</div>
+    <div class="device-controls" style="margin-top:6px">
+      ${monitoring
+        ? `<button class="btn btn-red btn-sm" onclick="stopDeviceMonitor('${name}')">Stop</button>`
+        : `<button class="btn btn-blue btn-sm" onclick="startDeviceMonitor('${name}')" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
+      ${monitoring ? `<span style="font-size:11px; color:#888" id="gyro-readout-${name}">${readout}</span>` : ''}
+    </div>
+    ${monitoring ? `<canvas id="gyro-canvas-${name}" class="lick-canvas" width="440" height="90" style="background:#0a0a1a;border-radius:4px;margin-top:6px"></canvas>` : ''}`;
+}
+
+function drawGyroTrace(name) {
+  const canvas = document.getElementById('gyro-canvas-' + name);
+  const ds = deviceState[name];
+  if (!canvas || !ds || !(ds.trace || []).length) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height, plotH = h - 12;
+  ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
+  const WINDOW = 30;
+  const trace = ds.trace;
+  const tNow = trace[trace.length - 1].t;
+  const win = trace.filter(e => tNow - e.t <= WINDOW);
+  let maxV = 1.2;
+  for (const e of win) if ((e.mag || 0) > maxV) maxV = e.mag;
+  const y1g = plotH - (1.0 / maxV) * (plotH - 3);   // 1 g reference
+  ctx.strokeStyle = '#2a3550'; ctx.setLineDash([3, 3]);
+  ctx.beginPath(); ctx.moveTo(0, y1g); ctx.lineTo(w, y1g); ctx.stroke(); ctx.setLineDash([]);
+  ctx.strokeStyle = '#26c6da'; ctx.lineWidth = 1.5; ctx.beginPath();
+  let started = false;
+  for (const e of win) {
+    const x = ((WINDOW - (tNow - e.t)) / WINDOW) * w;
+    const y = plotH - ((e.mag || 0) / maxV) * (plotH - 3);
+    if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.fillStyle = '#444'; ctx.font = '9px monospace';
+  for (let tau = 0; tau <= WINDOW; tau += 10) {
+    const x = ((WINDOW - tau) / WINDOW) * w;
+    ctx.fillText(tau === 0 ? 'now' : '-' + tau + 's', Math.min(x + 1, w - 26), h - 2);
+  }
+  const el = document.getElementById('gyro-readout-' + name);
+  const last = win[win.length - 1];
+  if (el && last) el.textContent =
+    `|a| ${(last.mag ?? 0).toFixed(2)} g · acc ${last.ax}/${last.ay}/${last.az} · gyro ${last.gx}/${last.gy}/${last.gz}`;
 }
 
 function renderDeviceCatalog() {

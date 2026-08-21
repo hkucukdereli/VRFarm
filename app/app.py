@@ -720,8 +720,14 @@ def transfer():
             steps.append(f"Video: remuxed -> video.mp4 @ {v.get('fps')} fps, raw .h264 deleted")
         elif v.get("error"):
             steps.append(f"⚠️  Video remux: {v['error']} (raw .h264 will transfer instead)")
-        elif v.get("skipped") and v["skipped"] not in ("already mp4",):
+        elif v.get("skipped") and v["skipped"] not in ("already mp4", "no raw video", "no video dir"):
             steps.append(f"Video remux skipped: {v['skipped']}")
+        # Per-device recording subdirs (worldcam/, naneye/, ...)
+        for dev_name, dv in ((cj or {}).get("video_dirs") or {}).items():
+            if dv.get("remuxed"):
+                steps.append(f"{dev_name}: remuxed -> video.avi @ {dv.get('fps')} fps, raw deleted")
+            elif dv.get("error"):
+                steps.append(f"⚠️  {dev_name} remux: {dv['error']} (raw will transfer instead)")
     except Exception as e:
         steps.append(f"⚠️  Consolidate error (transferring raw files): {e}")
 

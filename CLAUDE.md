@@ -1,10 +1,25 @@
-# VRFarm barebones — Claude Code Handoff
+# VRFarm dev-catchme — Claude Code Handoff
 
-This is the **barebones template branch**: a leader-only, device-agnostic skeleton of the
-VRFarm system. The full attention-paradigm system (follower/display/stimulus, photodiode
-sync, lick/reward contingency) lives on `main`; this branch strips all of it and keeps the
-generic machinery — setup UI, experiment UI, session engine, data saving, livestreams,
-deploy/install — so new projects fork from here and add their own devices.
+This is the **catchme branch**: the barebones leader-only template plus the four catchme
+devices, running on rig **demo0** (`rigs/demo0.yaml`) — one Pi 4, hostname rpi-demo0,
+192.168.10.103, user **pi**, Debian 11 bullseye (system python 3.9 — keep Pi-deployed
+code 3.9-compatible). The full attention-paradigm system lives on `main`; the stripped
+template this builds on is branch `barebones`.
+
+## The catchme devices
+
+| device (type)     | hardware                                            | data |
+|-------------------|-----------------------------------------------------|------|
+| `worldcam`        | LogiLink USB grabber (MacroSilicon MS210x, UVC) — ffmpeg MJPEG stream-copy subprocess | video.mjpeg → video.avi + frame_timestamps + preview |
+| `naneye`          | NanEyeM via "vbridge" CSI bridge — CUSTOM libcamera at /usr/local/bin/libcamera-vid, MJPEG subprocess | same |
+| `gyroscope_nano`  | ICM-42670-P 6-axis IMU on an Arduino Nano (FT232 → /dev/ttyUSB0), CSV @ ~100 Hz — flash `arduino/gyroscope_nano/gyroscope_nano.ino` | /imu continuous (raw int16 + scale factors) |
+| `gyroscope_i2c`   | the SAME sensor rewired to the Pi's i2c-1, polled via smbus2 | same |
+
+Only ONE gyro variant is physically wired at a time — flip the two `enabled:` flags in
+`rigs/demo0.yaml` together with the wiring. Shared pieces: `devices/mjpeg_pipe.py`
+(subprocess MJPEG source + PipeCameraBase) and `devices/icm42670.py` (registers + ImuBase).
+Frame timestamps are pipe-arrival (`ts_source` in the metadata); NanEye fps is 30 for v1
+(sensor does 186 — raise after `measured_fps` proves headroom).
 
 ---
 

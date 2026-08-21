@@ -118,9 +118,12 @@ def api_check_pi():
 
 # pip packages needed per device TYPE, installed by /api/install_pi. (DeviceInfo.required_packages
 # is display-only in the catalog — THIS map is what actually installs.)
-DEVICE_PACKAGES: dict = {}
+DEVICE_PACKAGES: dict = {
+    "gyroscope_nano": ["pyserial"],
+    "gyroscope_i2c": ["smbus2"],
+}
 # device types that need the Pi's I2C bus enabled
-I2C_DEVICE_TYPES: set = set()
+I2C_DEVICE_TYPES: set = {"gyroscope_i2c"}
 
 
 @app.route("/api/install_pi", methods=["POST"])
@@ -139,11 +142,16 @@ def api_install_pi():
     conda_activate = ("source ~/miniforge3/etc/profile.d/conda.sh && "
                       "conda activate rig && ")
     needs_i2c = any(t in I2C_DEVICE_TYPES for t in dev_types.values())
+    # Video devices (rig config `video: true`) capture via ffmpeg / v4l2
+    needs_video = any((dev_cfgs.get(d, {}) or {}).get("video") for d in devices)
 
     try:
         # 1. Create directories
-        _ssh(ssh_prefix, "mkdir -p ~/rig ~/data")
-        steps.append("Created ~/rig ~/data")
+        _ssh(ssh_prefix, "mkdir -p ~/rig ~/data ~/video")
+        steps.append("Created ~/rig ~/data ~/video")
+
+        # 1a. Hardware-access groups for the Pi user (idempotent; usually already set)
+        _ssh(ssh_prefix, f"sudo usermod -aG dialout,i2c,video,gpio {user} || true", timeout=15)
 
         # 1b. Ensure the conda 'rig' env exists, pinned to the SYSTEM python version, so any
         #     apt-built bindings a device later needs can be symlinked in without an ABI
@@ -160,6 +168,14 @@ def api_install_pi():
         if needs_i2c:
             _ssh(ssh_prefix, "sudo raspi-config nonint do_i2c 0", timeout=20)
             steps.append("Enabled I2C")
+
+        # 2b. Video-capture tooling for camera-like devices (ffmpeg for capture +
+        #     consolidation remux; v4l-utils for format probing/diagnostics).
+        if needs_video:
+            _ssh(ssh_prefix,
+                 "sudo apt-get update -qq && sudo apt-get install -y ffmpeg v4l-utils",
+                 timeout=300)
+            steps.append("Installed ffmpeg + v4l-utils")
 
         # 3. Python packages (pip): base set + per-device-type extras.
         packages = {"flask", "pyyaml", "numpy"}
@@ -185,8 +201,8 @@ def api_install_pi():
             _scp(str(ROOT / local), f"{ssh_prefix}:~/rig/{remote}")
         steps.append(f"Deployed {len(files_to_deploy)} files")
 
-        # 5. Upload and enable systemd service
-        _scp(str(ROOT / "pi_api" / "vrfarm.service"),
+        # 5. Upload and enable systemd service (rendered for this Pi's user)
+        _scp(_render_unit(ROOT / "pi_api" / "vrfarm.service", user),
              f"{ssh_prefix}:/tmp/vrfarm.service")
         _ssh(ssh_prefix,
              "sudo cp /tmp/vrfarm.service /etc/systemd/system/ && "
@@ -205,7 +221,7 @@ def api_install_pi():
         #     brings shepherd UP (enable+restart) or takes it DOWN (stop+disable).
         if role == "leader":
             shepherd_on = data.get("shepherd_enabled", True)
-            _scp(str(ROOT / "shepherd" / "shepherd.service"),
+            _scp(_render_unit(ROOT / "shepherd" / "shepherd.service", user),
                  f"{ssh_prefix}:/tmp/shepherd.service")
             _scp(str(ROOT / "shepherd" / "config.yaml"),
                  f"{ssh_prefix}:/tmp/shepherd.config.yaml")
@@ -517,6 +533,18 @@ def api_device_schemas():
 
 
 # ── Helpers ──
+
+def _render_unit(local_path, user: str) -> str:
+    """Render a systemd unit template ({{USER}}/{{HOME}} tokens) for a Pi user and
+    return the temp-file path to scp. Assumes the standard /home/<user> layout."""
+    import tempfile
+    text = Path(local_path).read_text()
+    text = text.replace("{{USER}}", user).replace("{{HOME}}", f"/home/{user}")
+    fd, tmp = tempfile.mkstemp(suffix=".service")
+    os.close(fd)
+    Path(tmp).write_text(text)
+    return tmp
+
 
 def _ssh(target: str, cmd: str, timeout: int = 60):
     """Run a command on a Pi via SSH."""

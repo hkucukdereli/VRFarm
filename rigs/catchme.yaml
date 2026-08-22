@@ -1,4 +1,4 @@
-name: demo0
+name: catchme
 # The catchme rig: one Pi 4 leader (rpi-demo0), two cameras + one 6-axis IMU.
 # Only ONE gyro variant is physically wired at a time — flip the `enabled` flags
 # together with the wiring (nano = sensor on the Arduino, i2c = sensor on the Pi).

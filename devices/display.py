@@ -69,10 +69,21 @@ class Display(Device):
         self.sync_size_px = int(rig_config.get("sync_size_px", 0) or 0)   # 0 = auto (full dead band)
         self.sync_brightness = max(0.0, min(1.0, float(rig_config.get("sync_brightness", 1.0))))  # red LED level 0..1
 
-    def start_display(self):
+    def start_display(self, kms: bool = False):
         """Initialize pygame and open fullscreen window.
-        Retries up to 3 times with backoff if X11 is not ready.
+
+        Default (kms=False): the historic X11 path — FULLSCREEN|DOUBLEBUF|HWSURFACE with a
+        best-effort vsync, retried up to 3 times while X comes up. Behavior unchanged:
+        engine/follower.py runs this path until the displayd cutover (phase 4).
+
+        kms=True: the displayd renderer path — SDL's KMSDRM backend as sole DRM master, no
+        X11. FULLSCREEN|SCALED with vsync=1: SCALED is what makes SDL2 honor vsync under
+        KMSDRM — the bare DOUBLEBUF|HWSURFACE flags below silently grant an UNsynced flip
+        there (the historic vsync bug). Single attempt, hard-fail — see _start_display_kms.
         """
+        if kms:
+            self._start_display_kms()
+            return
         import time
         import pygame
         max_retries = 3
@@ -108,6 +119,34 @@ class Display(Device):
                         f"Display init failed after {max_retries} attempts: {e}. "
                         f"Is X11 running? Check start_projector.sh completed."
                     ) from e
+
+    def _start_display_kms(self):
+        """KMSDRM fullscreen init for displayd's renderer child (SDL_VIDEODRIVER=kmsdrm, no X).
+        No retry loop and no X hints: the renderer startup contract wants a loud immediate
+        failure that displayd can classify, not a backoff into a wrong backend. Verifies the
+        driver really is KMSDRM — without DRM master SDL can silently fall back to a
+        null/offscreen backend where every call succeeds and nothing reaches the glass."""
+        import pygame
+        pygame.init()
+        # pygame.init() swallows a failed video-subsystem init (it only counts pass/fail);
+        # display.init() re-raises it, so a broken KMSDRM setup fails here, not at set_mode.
+        pygame.display.init()
+        self._screen = pygame.display.set_mode(
+            self.resolution, pygame.FULLSCREEN | pygame.SCALED, vsync=1)
+        driver = pygame.display.get_driver()
+        if driver != "KMSDRM":
+            raise RuntimeError(
+                f"KMSDRM required, got video driver {driver!r} "
+                "(SDL fell back to a null/offscreen backend)")
+        # vsync=1 with SCALED is granted on KMSDRM; if the display can't actually sync, the
+        # renderer's 30-frame self-test catches it (fps out of range / flip not blocking).
+        self._vsync = True
+        print("Display: KMSDRM vsync-locked flip")
+        try:
+            pygame.mouse.set_visible(False)   # may fail with no pointer device under KMSDRM
+        except Exception:
+            pass
+        self.blank()
 
     def show_rect(self, px_x: float, px_y: float, px_size: float,
                   corr_contrast: float, bg_gray: float,
@@ -400,13 +439,17 @@ class Display(Device):
         self._screen.fill((0, 0, 0))
         pygame.display.flip()
 
-    def run_sync_burst(self, every_n: int, duration_s: float = 1.0) -> int:
+    def run_sync_burst(self, every_n: int, duration_s: float = 1.0,
+                       flash_times: list = None) -> int:
         """Bounded variant of run_sync_test for the photodiode INIT verify: flash the red sync square
         ON for one frame every `every_n` frames (black otherwise) for `duration_s` seconds, then
         blank, and RETURN the number of flashes (red-on frames) actually emitted. That count is the
         ground truth the photodiode compares its detected pulses against (±1). Runs on the pygame
         thread (blocking ~duration_s). `every_n` is floored at 2 so the flashes are always separated
-        by a black frame (every_n=1 = continuous red = a single edge, not countable pulses)."""
+        by a black frame (every_n=1 = continuous red = a single edge, not countable pulses).
+        `flash_times`, if a list, collects the wall-clock flip time of each red frame — displayd's
+        sync_burst result carries these so the optics check can correlate them against photodiode
+        pulse times; the count-only return stays for the existing follower/display_worker callers."""
         import pygame
         import time as _t
         if self._screen is None:
@@ -419,10 +462,13 @@ class Display(Device):
         flashes = 0
         while _t.monotonic() < t_end:
             self._screen.fill((0, 0, 0))
-            if frame % every_n == 0:
+            red_on = frame % every_n == 0
+            if red_on:
                 self._screen.fill(self._sync_rgb(), rect)   # one red frame = one detectable pulse
                 flashes += 1
             pygame.display.flip()
+            if red_on and flash_times is not None:
+                flash_times.append(_t.time())   # after flip: the frame is on-glass (vsync-paced)
             try:
                 pygame.event.pump()
             except Exception:

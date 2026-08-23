@@ -1,0 +1,25 @@
+# displayd/displayd.service — VRFarm display daemon (phase 2)
+#
+# Installed to /etc/systemd/system by the setup UI's Install step, which also
+# substitutes <name> with the rig name (the rig FILENAME is the rig's identity).
+# Shipped DISABLED: Install runs daemon-reload only — phase 3 enables.
+#
+# Type=notify + WatchdogSec: displayd sends READY=1/WATCHDOG=1 datagrams to
+# $NOTIFY_SOCKET itself (~10-line helper, no python3-systemd dep). SYSTEM
+# python3 on purpose — the conda env's SDL has no kmsdrm and must never run
+# displayd or its renderer child. stdout/stderr -> journald.
+
+[Unit]
+Description=VRFarm display daemon
+After=network-online.target
+
+[Service]
+Type=notify
+User=vruser
+ExecStart=/usr/bin/python3 /home/vruser/rig/displayd/displayd.py --rig /home/vruser/rig/rigs/<name>.yaml
+Restart=always
+RestartSec=2
+WatchdogSec=15
+
+[Install]
+WantedBy=multi-user.target

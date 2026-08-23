@@ -1,8 +1,19 @@
 # displayd/displayd.service — VRFarm display daemon (phase 2)
 #
-# Installed to /etc/systemd/system by the setup UI's Install step, which also
-# substitutes <name> with the rig name (the rig FILENAME is the rig's identity).
+# Installed to /etc/systemd/system by the setup UI's Install step.
 # Shipped DISABLED: Install runs daemon-reload only — phase 3 enables.
+#
+# WHAT INSTALL MUST SUBSTITUTE (setup/app.py, step 5c):
+#   <name>   -> the rig FILENAME (the rig's identity; the yaml rides Deploy to
+#               ~/rig/rigs/<name>.yaml).                          [already done]
+#   User=    -> the target Pi's `pis[].user` from the rig yaml when it is not
+#               "vruser" (a plain replace of the "User=vruser" line below).
+#               This is the ONLY user-specific token left in this unit.
+#
+# No /home/<user> path is hardcoded any more: WorkingDirectory=~ is the home of
+# whoever User= names, and both file arguments are relative to it. Do NOT
+# "improve" this to %h — in a SYSTEM unit %h resolves to /root regardless of
+# User= (systemd.unit(5)), which would point the daemon at /root/rig.
 #
 # Type=notify + WatchdogSec: displayd sends READY=1/WATCHDOG=1 datagrams to
 # $NOTIFY_SOCKET itself (~10-line helper, no python3-systemd dep). SYSTEM
@@ -16,7 +27,8 @@ After=network-online.target
 [Service]
 Type=notify
 User=vruser
-ExecStart=/usr/bin/python3 /home/vruser/rig/displayd/displayd.py --rig /home/vruser/rig/rigs/<name>.yaml
+WorkingDirectory=~
+ExecStart=/usr/bin/python3 rig/displayd/displayd.py --rig rig/rigs/<name>.yaml
 Restart=always
 RestartSec=2
 WatchdogSec=15

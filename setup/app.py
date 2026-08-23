@@ -311,6 +311,13 @@ def api_install_pi():
                 svc_text = svc_text.replace("<name>", rig_name)
             else:
                 steps.append("WARN: no rig loaded — displayd.service keeps the <name> placeholder")
+            # User=: the unit ships with vruser; every other path in it is relative to
+            # WorkingDirectory=~, so this line is the only user-specific token. pis[].user
+            # is honored everywhere else (SSH, install, reboot) — honor it here too, or a
+            # `pi`-user follower gets a unit that fails with status=217/USER.
+            if user != "vruser":
+                svc_text = svc_text.replace("User=vruser", f"User={user}")
+                steps.append(f"displayd.service User set to {user}")
             with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as f:
                 f.write(svc_text)
                 svc_tmp = f.name

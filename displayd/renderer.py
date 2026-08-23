@@ -19,6 +19,13 @@ so this process must never start under conda. All drawing lives in devices/displ
   4. {"ev":"ready"} up the socketpair on pass; {"ev":"fatal"} + exit(3) on any failure,
      so displayd can surface the reason verbatim instead of guessing from a dead child.
 
+The Display is initialized from the composed display config displayd sends in the "mode"
+op ({"op":"mode","lease":...,"config":{...}}) — resolution/refresh_hz and the photodiode
+sync-square layout. That op can arrive before step 2, so start() drains it first; an older
+displayd sends no config and the Display defaults still apply. Parent death is watched
+explicitly (PR_SET_PDEATHSIG + a getppid() check): a SOCK_DGRAM socketpair never reports
+EOF, and an orphaned renderer would hold DRM master forever.
+
 Session drawing (load_stims/show) is a port of engine/follower.py's NPZ handling with
 the leader ACK replaced by an {"ev":"onset"} report; the "render" op carries the old
 engine/display_worker.py setup actions unchanged. Between ops the last flipped frame
@@ -62,9 +69,35 @@ MIN_FLIP_BLOCK_MS = 8.0     # vsync-locked flip must block a real fraction of th
 SELF_TEST_FRAMES = 30
 SELF_TEST_WARMUP = 5        # unmeasured settle flips (first flips after set_mode are irregular)
 
-FLIP_REPORT_MIN_INTERVAL = 1.0 / 60.0   # throttle {"ev":"flip"} to <= 60/s aggregate
+# Throttle for {"ev":"flip"} inside per-frame loops. This used to be 1/60 s, which was a
+# NO-OP: the panel frame period is 1/57.46 = 17.4 ms > 16.7 ms, so every single stimulus
+# frame passed the test (~57 json.dumps + sendto per second inside the vsync-paced loop).
+# displayd only derives an fps estimate and a flip_ms p99 from these, so a 0.25 s sample
+# is plenty; timing-critical events (onset) are never throttled. See report_flip.
+FLIP_REPORT_MIN_INTERVAL = 0.25
+
+PARENT_CHECK_INTERVAL = 1.0   # s between getppid() checks (see Renderer.check_parent)
 
 WARP_PATH = Path.home() / "rig" / "calibration" / "warp_map.npz"
+
+
+def _install_parent_death_signal() -> bool:
+    """Best-effort PR_SET_PDEATHSIG(SIGTERM): ask the kernel to signal us the instant
+    displayd dies. Needed because an AF_UNIX SOCK_DGRAM socketpair never reports EOF when
+    the peer closes — a SIGKILLed displayd leaves this process alive forever as the SOLE
+    DRM master, and every later displayd bringup then fails its KMSDRM assert.
+
+    Linux-specific and cleared across exec in some spawn paths, so it is only half the
+    answer: Renderer.check_parent() watches getppid() as the portable backstop."""
+    try:
+        import ctypes
+        import signal
+
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        PR_SET_PDEATHSIG = 1
+        return libc.prctl(PR_SET_PDEATHSIG, int(signal.SIGTERM), 0, 0, 0) == 0
+    except Exception:
+        return False
 
 
 class _SockStop:
@@ -81,6 +114,11 @@ class _SockStop:
 
     def is_set(self):
         if self.stopped:
+            return True
+        if not self._r.check_parent():
+            # displayd died mid-flash-loop: end the loop so the renderer can exit and
+            # release DRM master (this loop would otherwise flash forever).
+            self.stopped = self.quit = True
             return True
         for msg in self._r.drain_nonblocking():
             op = msg.get("op")
@@ -101,7 +139,11 @@ class Renderer:
         self.sync_every_n = 0
         self.lease = "idle"
         self.pending = deque()       # ops deferred while a blocking flash loop owned the thread
+        self._display_config = {}    # composed display config from displayd's "mode" op
         self._last_flip_report = 0.0
+        self._flips_since_report = 0
+        self._ppid = os.getppid()    # displayd; a change means it died (see check_parent)
+        self._last_parent_check = time.time()
         self._quit = False
 
     # ── socketpair I/O ──
@@ -134,15 +176,55 @@ class Renderer:
             except Exception:
                 self.log(f"bad datagram ({len(data)} bytes) dropped")
 
-    def report_flip(self, flip_ms: float):
-        """{"ev":"flip"} for this flip, throttled to <= 60/s across all render paths.
-        flip_ms brackets the whole draw call (blit + flip); with prewarmed cached surfaces
-        the blit is ~1 ms so it approximates the vsync block, and a cold surface build
-        shows up honestly as a slow frame."""
+    def report_flip(self, flip_ms: float, force: bool = False):
+        """{"ev":"flip"} for this flip. flip_ms brackets the whole draw call (blit + flip);
+        with prewarmed cached surfaces the blit is ~1 ms so it approximates the vsync block,
+        and a cold surface build shows up honestly as a slow frame.
+
+        Throttled to one report per FLIP_REPORT_MIN_INTERVAL so a per-frame loop does not
+        pay a JSON encode + datagram send on every vsync (the old 1/60 s throttle never
+        fired — see the constant). force=True for one-shot renders (startup blank, setup
+        render actions, heartbeat restore): those are a handful per second at most, and
+        displayd's RENDERER_UP transition waits for the very first flip report.
+
+        "n" counts the flips represented by this report (this one included), so fps can be
+        recovered exactly as sum(n)/span. displayd's _renderer_stats currently counts
+        datagrams, so with the real throttle its "fps" is a SAMPLE rate, not the frame
+        rate, until it uses "n"; flip_ms p99 is likewise a sample of frame cost."""
+        self._flips_since_report += 1
         now = time.time()
-        if now - self._last_flip_report >= FLIP_REPORT_MIN_INTERVAL:
-            self._last_flip_report = now
-            self.send({"ev": "flip", "t": now, "flip_ms": round(flip_ms, 2)})
+        if not force and now - self._last_flip_report < FLIP_REPORT_MIN_INTERVAL:
+            return
+        n = self._flips_since_report
+        self._flips_since_report = 0
+        self._last_flip_report = now
+        self.send({"ev": "flip", "t": now, "flip_ms": round(flip_ms, 2), "n": n})
+
+    def _mark_flip_reported(self, t: float):
+        """Account a flip that an {"ev":"onset"} already reported (displayd counts onset as
+        a flip sample), so the loop's next flip report is a full interval later and the
+        frame is not double-counted in "n"."""
+        self._last_flip_report = t
+        self._flips_since_report = 0
+
+    def check_parent(self) -> bool:
+        """False (and _quit set) once displayd is gone. The socketpair can NOT tell us: an
+        AF_UNIX SOCK_DGRAM pair never reports EOF when the peer closes, so a SIGKILLed
+        displayd would leave this process running forever as the sole DRM master and every
+        future displayd bringup would fail its KMSDRM assert. PR_SET_PDEATHSIG covers most
+        cases; this getppid() watch covers the rest (re-parenting to init/a subreaper).
+        Throttled to PARENT_CHECK_INTERVAL — it is called from per-frame paths too."""
+        now = time.time()
+        if now - self._last_parent_check < PARENT_CHECK_INTERVAL:
+            return True
+        self._last_parent_check = now
+        ppid = os.getppid()
+        if ppid == self._ppid:
+            return True
+        self.log("displayd is gone (re-parented to pid %d) — exiting so DRM master is "
+                 "released for the next bringup" % ppid)
+        self._quit = True
+        return False
 
     # ── startup ──
 
@@ -154,8 +236,38 @@ class Renderer:
     def start(self):
         """Startup contract: kms display up, driver asserted, self-test passed, ready sent.
         Any failure -> fatal + exit(3); displayd surfaces the reason and decides on retry."""
+        # displayd may already have queued the "mode" op — which now carries the composed
+        # display config — before we got here (a datagram just sits in the socket buffer).
+        # Drain it FIRST so Display.init() sees the real rig config; everything else waits
+        # in self.pending for the main loop, since the display is not up yet.
+        for msg in self.drain_nonblocking():
+            if msg.get("op") == "mode":
+                self.apply_mode(msg)
+            else:
+                self.pending.append(msg)
+
+        cfg = dict(self._display_config)
+        # Display.init reads background_gray from task_params (load_stims later overrides it
+        # from the NPZ, exactly as engine/follower.py does).
+        task_params = ({"background_gray": cfg["background_gray"]}
+                       if "background_gray" in cfg else {})
         self.dev = Display()
-        self.dev.init(rig_config={}, task_params={})   # 1920x1080 defaults; no hardware yet
+        try:
+            self.dev.init(rig_config=cfg, task_params=task_params)
+        except Exception as e:
+            # A malformed display config must be loud: silently falling back to defaults is
+            # the exact failure this plumbing exists to end.
+            self.fatal("BAD_CONFIG", e)
+        if cfg:
+            self.log("display config from displayd: %sx%s @ %s Hz, sync %s size=%s "
+                     "brightness=%s"
+                     % (self.dev.resolution[0], self.dev.resolution[1], self.dev.refresh_hz,
+                        self.dev.sync_corner, self.dev.sync_size_px or "auto",
+                        self.dev.sync_brightness))
+        else:
+            self.log("no display config from displayd (older daemon?) — Display defaults: "
+                     "%sx%s, sync %s" % (self.dev.resolution[0], self.dev.resolution[1],
+                                         self.dev.sync_corner))
         try:
             self.dev.start_display(kms=True)
         except RuntimeError as e:
@@ -166,15 +278,22 @@ class Renderer:
             self.fatal("SDL_ERROR", e)
 
         try:
-            fps, mean_block = self._self_test()
+            fps, med_block, drops = self._self_test()
         except Exception as e:
             self.fatal("SDL_ERROR", e)
-        if abs(fps - TARGET_FPS) > FPS_TOL or mean_block < MIN_FLIP_BLOCK_MS:
+        # Fail on pace or on a non-blocking flip; a few dropped frames during bringup are
+        # reported, not fatal (>1/3 of the window means something is genuinely wrong).
+        if (abs(fps - TARGET_FPS) > FPS_TOL or med_block < MIN_FLIP_BLOCK_MS
+                or drops > SELF_TEST_FRAMES // 3):
             self.fatal("FPS_OUT_OF_RANGE",
                        f"fps={fps:.2f} (want {TARGET_FPS}±{FPS_TOL}), "
-                       f"mean flip-block={mean_block:.1f} ms (want >= {MIN_FLIP_BLOCK_MS})")
+                       f"median flip-block={med_block:.1f} ms (want >= {MIN_FLIP_BLOCK_MS}), "
+                       f"drops={drops}/{SELF_TEST_FRAMES}")
+        if drops:
+            self.log(f"self-test: {drops}/{SELF_TEST_FRAMES} long frames (pace ok at "
+                     f"{fps:.2f} fps)")
         self.send({"ev": "ready", "driver": "KMSDRM",
-                   "fps": round(fps, 2), "flip_ms": round(mean_block, 2)})
+                   "fps": round(fps, 2), "flip_ms": round(med_block, 2), "drops": drops})
 
         # Warp: same location + semantics as follower.run(). Without it, shows fall back
         # to the flat show_rect path and the sync square loses its off-screen dead band.
@@ -187,32 +306,44 @@ class Renderer:
         # displayd's RENDERER_UP transition waits for one.
         t0 = time.perf_counter()
         self.dev.blank()
-        self.report_flip((time.perf_counter() - t0) * 1000.0)
+        self.report_flip((time.perf_counter() - t0) * 1000.0, force=True)
 
     def _self_test(self):
-        """30 measured flips of a trivial frame: fps from the span, flip-block as the mean
-        perf_counter time spent inside pygame.display.flip() (a vsync-locked flip blocks
-        until the swap; a non-blocking flip is the tear/queue failure mode)."""
+        """30 measured flips of a trivial frame. fps comes from the MEDIAN frame interval,
+        not the elapsed span: one dropped frame in 30 drags a span-derived mean to 55.6 fps
+        (29 x 17.4 ms + one 34.8 ms frame) and would fail a perfectly vsync-locked display —
+        seen on the rig during bringup, where a stray long frame right after modeset is
+        normal. The median answers the real question ("is the pace one refresh period?"),
+        drops are counted and reported separately, and flip-block (median time inside
+        pygame.display.flip()) is what actually separates a locked flip from a free-running
+        one."""
         import pygame
         scr = self.dev._screen
         for _ in range(SELF_TEST_WARMUP):
             scr.fill((0, 0, 0))
             pygame.display.flip()
-        blocks = []
-        t_start = time.perf_counter()
+        blocks, dts = [], []
+        prev = time.perf_counter()
         for _ in range(SELF_TEST_FRAMES):
             scr.fill((0, 0, 0))
             t0 = time.perf_counter()
             pygame.display.flip()
-            blocks.append((time.perf_counter() - t0) * 1000.0)
-        elapsed = time.perf_counter() - t_start
-        fps = SELF_TEST_FRAMES / elapsed if elapsed > 0 else 0.0
-        return fps, sum(blocks) / len(blocks)
+            t1 = time.perf_counter()
+            blocks.append((t1 - t0) * 1000.0)
+            dts.append(t1 - prev)
+            prev = t1
+        med_dt = sorted(dts)[len(dts) // 2]
+        fps = (1.0 / med_dt) if med_dt > 0 else 0.0
+        nominal = 1.0 / TARGET_FPS
+        drops = sum(1 for d in dts if d > 1.5 * nominal)
+        return fps, sorted(blocks)[len(blocks) // 2], drops
 
     # ── main loop ──
 
     def run(self):
         while not self._quit:
+            if not self.check_parent():
+                break      # displayd died; quit pygame in shutdown() and release DRM master
             if self.pending:
                 msg = self.pending.popleft()
             else:
@@ -238,8 +369,7 @@ class Renderer:
     def dispatch(self, msg: dict):
         op = msg.get("op")
         if op == "mode":
-            self.lease = str(msg.get("lease", "idle"))
-            self.log(f"lease -> {self.lease}")   # no redraw: current frame stays presented
+            self.apply_mode(msg)
         elif op == "load_stims":
             self.op_load_stims(msg.get("path", ""))
         elif op == "show":
@@ -252,6 +382,65 @@ class Renderer:
             self._quit = True
         else:
             self.log(f"unknown op {op!r} ignored")
+
+    # ── mode / display config ──
+
+    def apply_mode(self, msg: dict):
+        """The "mode" op: the lease, plus (newer displayd) the composed display config in
+        msg["config"]. No redraw — the current frame stays presented."""
+        self.lease = str(msg.get("lease", "idle"))
+        cfg = msg.get("config")
+        if isinstance(cfg, dict) and cfg:
+            self.apply_display_config(cfg)
+        self.log(f"lease -> {self.lease}")
+
+    def apply_display_config(self, cfg: dict):
+        """Remember displayd's composed display config, and apply live what can be applied.
+
+        This exists because the renderer used to hand Display.init() an EMPTY rig config:
+        resolution/refresh_hz AND — critically — the photodiode sync-square layout
+        (sync_corner / sync_size_px / sync_brightness, which engine/follower.py:67-73 merges
+        into the display config from the photodiode card) all fell back to code defaults. A
+        session then drew its sync square in the WRONG CORNER and every trial's photodiode
+        sync failed silently. Config that arrives before start() is used for dev.init();
+        config that arrives after can only change the sync layout (the SDL mode, and the
+        self-test that validated it, are already fixed), so a resolution/refresh change is
+        reported as needing a renderer restart rather than pretended to be applied.
+        An older displayd sends no "config" key at all — the defaults still work."""
+        self._display_config = dict(cfg)
+        if self.dev is None:
+            return   # start() has not run yet; it will pass this to Display.init()
+        sync_keys = ("sync_corner", "sync_size_px", "sync_brightness")
+        if any(k in cfg for k in sync_keys) and hasattr(self.dev, "set_sync_layout"):
+            try:
+                # None leaves a field unchanged (Display.set_sync_layout), and it drops the
+                # cached rect so the next frame uses the new placement.
+                self.dev.set_sync_layout(cfg.get("sync_corner"), cfg.get("sync_size_px"),
+                                         cfg.get("sync_brightness"))
+                self.log("sync layout -> corner=%s size_px=%s brightness=%s"
+                         % (self.dev.sync_corner, self.dev.sync_size_px or "auto",
+                            self.dev.sync_brightness))
+            except Exception as e:
+                self.log(f"sync layout update failed: {type(e).__name__}: {e}")
+        if "background_gray" in cfg and self.stims is None:
+            # Only before a session: once load_stims has run, the NPZ's background_gray is
+            # the authority for dev.bg_gray (blank()/use_session_bg paint it) and a config
+            # replay must not stomp it mid-session.
+            try:
+                self.dev.bg_gray = float(cfg["background_gray"])
+            except (TypeError, ValueError):
+                pass
+        try:
+            res = cfg.get("resolution")
+            if res is not None and tuple(res) != tuple(self.dev.resolution):
+                self.log(f"config resolution {tuple(res)} != active "
+                         f"{tuple(self.dev.resolution)} — needs a renderer restart")
+            hz = cfg.get("refresh_hz")
+            if hz is not None and abs(float(hz) - float(self.dev.refresh_hz)) > 0.01:
+                self.log(f"config refresh_hz {hz} != active {self.dev.refresh_hz} — "
+                         "needs a renderer restart")
+        except Exception:
+            pass   # a malformed value here is a log-only concern, never a render failure
 
     # ── session ops (port of follower.py's NPZ path) ──
 
@@ -339,6 +528,19 @@ class Renderer:
             def draw(sync):
                 dev.show_patch_spherical(az, alt, size_deg, corr_contrast,
                                          bg_gray, sync_square=sync, shape=shape)
+
+            # Warm THIS trial's surface before any timing starts: _prewarm_stims builds
+            # every combo at load_stims, but it is RAM-budgeted and may have left this one
+            # lazy — a cold build would then land on the onset frame and delay the stimulus.
+            # Cache-only (the same helper prewarm uses), so no drawing logic is duplicated;
+            # the key must match show_patch_spherical's default apply_lum=True.
+            if hasattr(dev, "_get_patch_surface"):
+                try:
+                    dev._get_patch_surface(az, alt, size_deg, corr_contrast, bg_gray,
+                                           shape, True)
+                except Exception as e:
+                    self.log(f"surface warm failed for trial {trial}: "
+                             f"{type(e).__name__}: {e}")
         else:
             px_x = float(self.stims["px_x"][trial])
             px_y = float(self.stims["px_y"][trial])
@@ -355,9 +557,10 @@ class Renderer:
             t0 = time.perf_counter()
             draw(False)
             ms = (time.perf_counter() - t0) * 1000.0
+            onset_t = time.time()
             self.send({"ev": "onset", "seq": seq, "trial": trial,
-                       "t": time.time(), "flip_ms": round(ms, 2)})
-            self.report_flip(ms)
+                       "t": onset_t, "flip_ms": round(ms, 2)})   # never throttled
+            self._mark_flip_reported(onset_t)
             time.sleep(duration)
             dev.blank()
 
@@ -365,7 +568,16 @@ class Renderer:
         """follower._show_synced: per-frame render loop with the photodiode sync square ON
         every Nth frame starting at frame 0. The vsync-locked flip paces the loop (kms path
         always grants it, but keep the Clock fallback so a degraded display can't busy-spin);
-        the wall-clock bound keeps the stimulus up for `duration` regardless of pacing."""
+        the wall-clock bound keeps the stimulus up for `duration` regardless of pacing.
+
+        Per-frame cost note: draw() re-derives the patch cache key (a 7-tuple of rounds +
+        one dict hit) and the sync rect on every frame although only the sync flag changes.
+        Both are already cheap — the surface itself is cached (prewarm / _get_patch_surface,
+        warmed for this trial in op_show) and Display._sync_patch_rect memoizes into
+        _sync_rect — and the only way to hoist them would be for the renderer to keep its
+        own copy of show_patch_spherical's blit + _draw_sync_border + flip, i.e. to fork the
+        drawing logic out of devices/display.py. Not worth the divergence risk for a few
+        microseconds inside a 17.4 ms frame, so it is deliberately left as-is."""
         import pygame
         clock = None if getattr(self.dev, "_vsync", False) else pygame.time.Clock()
         refresh_hz = int(getattr(self.dev, "refresh_hz", 60) or 60)
@@ -377,10 +589,13 @@ class Renderer:
             draw(patch_on)
             ms = (time.perf_counter() - t0) * 1000.0
             if fi == 0:
+                # Onset is timing-critical: sent on the frame itself, never throttled.
                 onset_t = time.time()
                 self.send({"ev": "onset", "seq": seq, "trial": trial,
                            "t": onset_t, "flip_ms": round(ms, 2)})
-            self.report_flip(ms)
+                self._mark_flip_reported(onset_t)
+            else:
+                self.report_flip(ms)
             fi += 1
             if time.time() - onset_t >= duration:
                 break
@@ -398,19 +613,29 @@ class Renderer:
         action = msg.get("action")
 
         def result(obj):
-            obj.update({"ev": "result", "op": action})
+            # Echo the request id so displayd correlates by id, not by action name
+            # (two same-action ops in flight would otherwise swap answers).
+            obj.update({"ev": "result", "op": action, "id": msg.get("id")})
             self.send(obj)
 
         try:
             if action == "blank":
                 t0 = time.perf_counter()
-                dev.blank_with_gray(msg.get("gray_value", 0.0))
-                self.report_flip((time.perf_counter() - t0) * 1000.0)
+                if msg.get("use_session_bg"):
+                    # Session-originated BG/BLANK: paint the SESSION background (the NPZ's
+                    # background_gray, held in dev.bg_gray — what engine/follower.py's
+                    # display.blank() always did). The setup-time "blank" action defaults
+                    # gray_value to 0.0 = black, so honouring it here would show the animal
+                    # a black pre-session field that jumps to gray mid-session.
+                    dev.blank()
+                else:
+                    dev.blank_with_gray(msg.get("gray_value", 0.0))
+                self.report_flip((time.perf_counter() - t0) * 1000.0, force=True)
                 result({"ok": True})
             elif action == "checkers":
                 t0 = time.perf_counter()
                 dev.show_checkers(use_warp=msg.get("apply_warp", True))
-                self.report_flip((time.perf_counter() - t0) * 1000.0)
+                self.report_flip((time.perf_counter() - t0) * 1000.0, force=True)
                 result({"ok": True})
             elif action == "stimulus":
                 t0 = time.perf_counter()
@@ -419,7 +644,7 @@ class Renderer:
                     msg.get("size_deg", 8.0), msg.get("corr_contrast", 0.5),
                     msg.get("bg_gray", 0.0), shape=msg.get("shape", "square"),
                     apply_lum=msg.get("apply_lum", True))
-                self.report_flip((time.perf_counter() - t0) * 1000.0)
+                self.report_flip((time.perf_counter() - t0) * 1000.0, force=True)
                 result({"ok": True})
             elif action == "reload_warp":
                 # load_warp caches in memory and never re-reads on its own — this makes a
@@ -478,7 +703,7 @@ class Renderer:
         # Restore: full background repaint + flip (Display.blank).
         t0 = time.perf_counter()
         dev.blank()
-        self.report_flip((time.perf_counter() - t0) * 1000.0)
+        self.report_flip((time.perf_counter() - t0) * 1000.0, force=True)
 
     def _paint_background(self):
         """Compose the session background into the backbuffer WITHOUT flipping — Display's
@@ -512,6 +737,19 @@ class Renderer:
 
 
 def main():
+    # Parent-death detection, half 1: the kernel SIGTERMs us when displayd dies. Best
+    # effort — half 2 (Renderer.check_parent's getppid() watch) covers the cases where
+    # this is unavailable or was cleared across an exec.
+    if not _install_parent_death_signal():
+        print("[renderer] PR_SET_PDEATHSIG unavailable — falling back to the getppid() "
+              "watch", file=sys.stderr, flush=True)
+    if os.getppid() == 1:
+        # displayd died between fork and now: we would never see a ppid CHANGE, and an
+        # orphan renderer holds DRM master forever. Refuse to start.
+        print("[renderer] orphaned at startup (ppid 1) — displayd is gone; exiting",
+              file=sys.stderr, flush=True)
+        sys.exit(3)
+
     # fd 3 is the socketpair end displayd handed us; anything else here is a spawn bug.
     try:
         sock = socket.socket(fileno=3)

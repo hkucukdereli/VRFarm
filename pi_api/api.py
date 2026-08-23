@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_file
@@ -207,11 +208,41 @@ def consolidate(session_id):
 
 @app.route("/api/start", methods=["POST"])
 def start():
-    """Start leader.py or follower.py as a subprocess."""
+    """Start leader.py or follower.py as a subprocess. With displayd running, "follower" is
+    shimmed: no process is spawned — the daemon already is the follower."""
     global _process, _process_log
     data = request.json
     script = data.get("script")  # "leader" or "follower"
     args = data.get("args", [])
+
+    if script == "follower" and _displayd_alive():
+        # THE SHIM: displayd already IS the follower (renderer up, session channel bound), so
+        # spawning engine/follower.py would only fight it for DRM master. Hand the daemon the
+        # stim path on its session channel and report ok — the leader's SYNC_TEST retry loop
+        # stays the readiness barrier, exactly as it was with a freshly spawned follower.
+        # Checked before the busy check below: this path spawns nothing, so `_process` (a
+        # leftover from a pre-daemon run) has no bearing on it.
+        stims = None
+        for i, a in enumerate(args):
+            if a == "--stims" and i + 1 < len(args):
+                stims = args[i + 1]
+                break
+            if str(a).startswith("--stims="):
+                stims = str(a).split("=", 1)[1]
+                break
+        port = int(data.get("display_port", _DISPLAYD_SESSION_PORT))
+        if stims:
+            # own socket, not _display_sock: that one is a request/reply channel to the display
+            # worker and a stray datagram on it would desync a pending reply.
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sock.sendto(json.dumps({"cmd": "LOAD_STIMS", "path": stims}).encode(),
+                            ("127.0.0.1", port))
+            except OSError as e:
+                return jsonify({"ok": False, "error": f"displayd LOAD_STIMS failed: {e}"}), 500
+            finally:
+                sock.close()
+        return jsonify({"ok": True, "daemon": True, "stims": stims})
 
     if _process and _process.poll() is None:
         return jsonify({"ok": False, "error": "Process already running"}), 409
@@ -268,6 +299,12 @@ def stop():
     # Process ref exists but already exited — clean up
     if _process is not None:
         _process = None
+    # Daemon mode: the /api/start follower shim spawned nothing, so there is nothing to kill —
+    # and the daemon itself must NOT be stopped (it owns the display across sessions; QUIT on
+    # its session channel is ignored by design). A plain ok is the whole teardown here.
+    if _displayd_alive():
+        return jsonify({"ok": True, "daemon": True,
+                        "message": "displayd owns the display; nothing to stop"})
     return jsonify({"ok": True, "message": "No process running"})
 
 
@@ -282,7 +319,14 @@ def logs():
 def restart():
     """Restart the pi_api process (systemd Restart=always respawns it). Graceful SIGTERM first,
     then FORCE-exit if still alive after 2s: with the display up, SDL (pygame) can swallow SIGTERM,
-    which used to leave stale code running and make Deploy / Restart-API silently no-op."""
+    which used to leave stale code running and make Deploy / Restart-API silently no-op.
+    Refuses while displayd reports a SESSION lease (a Deploy mid-experiment) unless force:true."""
+    force = bool((request.get_json(silent=True) or {}).get("force", False))
+    st = _displayd_status()
+    if st is not None and (st.get("lease") or {}).get("mode") == "session" and not force:
+        return jsonify({"ok": False,
+                        "error": "session lease active — pass force:true to override"}), 409
+
     def _shutdown():
         time.sleep(0.5)
         os.kill(os.getpid(), signal.SIGTERM)   # graceful
@@ -458,6 +502,66 @@ def _ensure_rig_path():
     sys.path.insert(0, str(RIG_DIR))
 
 
+# ── displayd forwarding (KMS display daemon) ────────────────────────────────────
+# When displayd.service is running on this Pi it OWNS the display: DRM master, the renderer
+# child, the DLPC and the leader-facing session channel. engine/display_worker.py (and
+# engine/follower.py) must never start alongside it — two DRM masters is a black screen. The
+# display endpoints below therefore forward to the daemon's localhost control REST instead of
+# driving the worker. Detection is a per-request probe of GET :5581/status: no config flag and
+# no state, so enabling/stopping the unit IS the switch and an old controller keeps working
+# unchanged. The legacy worker paths stay intact for Pis without the daemon (phase 4 deletes
+# them). stdlib urllib only — pi_api's rig env has no `requests`.
+_DISPLAYD_HOST = "127.0.0.1"
+_DISPLAYD_CTL_PORT = 5581        # control REST (127.0.0.1 only)
+_DISPLAYD_SESSION_PORT = 5575    # session channel (rig yaml network.display_port)
+
+
+def _displayd(path: str, payload=None, method: str = "GET", timeout: float = 5.0) -> dict:
+    """One control-REST round-trip to displayd. Returns the parsed JSON object, or
+    {"ok": False, "error": ...} on any transport/parse failure — a mid-request failure is
+    reported, never silently retried on the legacy path (that would double-drive the display)."""
+    url = "http://%s:%d%s" % (_DISPLAYD_HOST, _DISPLAYD_CTL_PORT, path)
+    data, headers = None, {}
+    if method == "POST":
+        data = json.dumps(payload if payload is not None else {}).encode()
+        headers["Content-Type"] = "application/json"
+    try:
+        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            r = json.loads(resp.read().decode())
+        return r if isinstance(r, dict) else {"ok": True, "result": r}
+    except Exception as e:
+        return {"ok": False, "error": "displayd %s: %s" % (path, str(e)[:200])}
+
+
+def _displayd_status(timeout: float = 0.5) -> dict | None:
+    """The daemon's /status, or None when displayd isn't running on this Pi. This is BOTH the
+    alive probe and the status read: only a live daemon answers with a "state"."""
+    st = _displayd("/status", timeout=timeout)
+    return st if st.get("state") else None
+
+
+def _displayd_alive() -> bool:
+    """Daemon mode? Short timeout — this runs at the top of every display request."""
+    return _displayd_status() is not None
+
+
+def _displayd_render(cmd: dict, timeout: float = 10.0) -> dict:
+    """POST :5581/render and FLATTEN the daemon's {"ok", "result": {...}} envelope into the flat
+    reply these endpoints have always returned ({"ok": True, "flashes": N, ...}), so both UIs and
+    the leader's photodiode verify keep working against either backend. The renderer's action set
+    and param names are identical to display_worker's, so `cmd` passes through unchanged."""
+    r = _displayd("/render", cmd, method="POST", timeout=timeout)
+    result = r.get("result")
+    if isinstance(result, dict):
+        out = {k: v for k, v in result.items() if k not in ("ev", "op")}
+        out.setdefault("ok", True)
+        return out
+    if r.get("ok"):
+        return {"ok": True}      # delivered, no result event (fire-and-forget action)
+    return {"ok": False, "error": r.get("error", "displayd render failed")}
+
+
 # ── Setup-time display worker (out-of-process) ──────────────────────────────────
 # pygame/SDL is NOT run inside pi_api: a crash there would take the whole management API down. The
 # follower's setup-time display therefore runs as a separate subprocess (engine/display_worker.py)
@@ -608,7 +712,23 @@ def _display_command(cmd: dict, timeout: float = 10.0) -> dict:
 
 @app.route("/api/init_projector", methods=["POST"])
 def init_projector():
-    """Run start_projector.sh (GPIO ALT2, DLPC3436 init, X11)."""
+    """Run start_projector.sh (GPIO ALT2, DLPC3436 init, X11) — or, in daemon mode, walk
+    displayd's bring-up state machine instead."""
+    if _displayd_alive():
+        # daemon mode: the bring-up IS the state machine (CONFIG_OK..RENDERER_UP) — never
+        # start_projector.sh/X, which would fight the renderer for DRM. 30 s so a stuck walk
+        # answers as a FAULT before the controller's own 35 s HTTP timeout fires.
+        st = _displayd("/bringup", {}, method="POST", timeout=30.0)
+        state = st.get("state")
+        if state in ("RENDERER_UP", "OPTICS_OK"):
+            return jsonify({"ok": True, "message": "displayd bringup: %s" % state,
+                            "status": st})
+        detail = st.get("fault") or st.get("error") or state
+        return jsonify({
+            "ok": False,
+            "error": "Projector failed to initialize: %s" % str(detail)[-200:],
+            "status": st,
+        }), 500
     script = RIG_DIR / "start_projector.sh"
     if not script.exists():
         return jsonify({"ok": False, "error": "start_projector.sh not found"}), 404
@@ -631,7 +751,19 @@ def init_projector():
 
 @app.route("/api/init_display", methods=["POST"])
 def init_display():
-    """Initialize pygame display via dedicated thread."""
+    """Initialize pygame display via dedicated thread (daemon mode: a readiness read —
+    displayd's renderer is already up)."""
+    st = _displayd_status(timeout=2.0)
+    if st is not None:
+        # daemon mode: the renderer is always up (displayd spawns and supervises it), so there
+        # is nothing to initialize — this becomes a readiness read of the state machine.
+        state = st.get("state")
+        if state in ("RENDERER_UP", "OPTICS_OK"):
+            return jsonify({"ok": True, "message": "displayd renderer up (%s)" % state,
+                            "status": st})
+        detail = st.get("fault") or state
+        return jsonify({"ok": False, "error": "Display not ready: %s" % str(detail)[-200:],
+                        "status": st}), 500
     data = request.json or {}
     rig_cfg = data.get("rig_config", {"resolution": [1920, 1080]})
     result = _display_command({"action": "init", "rig_config": rig_cfg}, timeout=25)
@@ -644,7 +776,8 @@ def blank_display():
     """Blank display with given gray value."""
     data = request.json or {}
     gray = data.get("gray_value", 0.0)
-    result = _display_command({"action": "blank", "gray_value": gray})
+    cmd = {"action": "blank", "gray_value": gray}
+    result = _displayd_render(cmd) if _displayd_alive() else _display_command(cmd)
     code = 200 if result.get("ok") else 500
     return jsonify(result), code
 
@@ -653,7 +786,8 @@ def blank_display():
 def test_checkers():
     """Show checkerboard pattern on display."""
     data = request.json or {}
-    result = _display_command({"action": "checkers", "apply_warp": data.get("apply_warp", True)})
+    cmd = {"action": "checkers", "apply_warp": data.get("apply_warp", True)}
+    result = _displayd_render(cmd) if _displayd_alive() else _display_command(cmd)
     code = 200 if result.get("ok") else 500
     return jsonify(result), code
 
@@ -674,7 +808,7 @@ def test_stimulus():
     except Exception:
         frac = contrast   # fall back to raw fraction if the converter isn't importable
     frac = max(0.0, min(1.0, frac))
-    result = _display_command({
+    cmd = {
         "action": "stimulus",
         "az_deg": float(data.get("az_deg", 0.0)),
         "alt_deg": float(data.get("alt_deg", 0.0)),
@@ -685,7 +819,8 @@ def test_stimulus():
         # Intensity-cal measurement sends apply_lum:false to render RAW drive (so the meter reads
         # the uncorrected delivered luminance the correction is fit from). Normal tests correct.
         "apply_lum": bool(data.get("apply_lum", True)),
-    })
+    }
+    result = _displayd_render(cmd) if _displayd_alive() else _display_command(cmd)
     code = 200 if result.get("ok") else 500
     return jsonify(result), code
 
@@ -695,7 +830,8 @@ def reload_warp():
     """Re-read warp_map.npz into the already-running display (after Generate Warp), without
     a full re-init. Returns reloaded=False (still ok) if the display thread isn't active —
     it will pick up the new warp on the next init_display."""
-    result = _display_command({"action": "reload_warp"})
+    cmd = {"action": "reload_warp"}
+    result = _displayd_render(cmd) if _displayd_alive() else _display_command(cmd)
     code = 200 if result.get("ok") else 500
     return jsonify(result), code
 
@@ -703,7 +839,13 @@ def reload_warp():
 @app.route("/api/shutdown_display", methods=["POST"])
 def shutdown_display():
     """Shut down the setup display worker (release pygame/:0 for follower.py). Killing the process
-    is what guarantees the SDL/X grab on :0 is released; its SIGTERM handler quits pygame first."""
+    is what guarantees the SDL/X grab on :0 is released; its SIGTERM handler quits pygame first.
+    Daemon mode: a lease release — the daemon keeps the renderer and never exits."""
+    if _displayd_alive():
+        # daemon mode: nothing to kill — the daemon never exits and keeps the renderer up. The
+        # equivalent of "release the display" is dropping the lease back to idle.
+        _displayd("/release", {}, method="POST", timeout=5.0)
+        return jsonify({"ok": True})
     with _display_worker_lock:
         _kill_display_worker()
     return jsonify({"ok": True})
@@ -1379,22 +1521,33 @@ def photodiode_raw_stop():
 def photodiode_test_start():
     """Flash the red photodiode sync square every N frames on THIS Pi's display (the follower),
     simulating a session's sync pulses so the photodiode/scope can be exercised from the setup UI.
-    Runs in the display worker; stop via /api/photodiode_test_stop. If the display isn't up the
-    worker replies "Display not initialized"."""
+    Runs in the display worker (daemon mode: displayd's renderer); stop via
+    /api/photodiode_test_stop. If the display isn't up the worker replies "Display not
+    initialized"."""
     data = request.json or {}
     every_n = int(data.get("every_n", 5))
-    _stop_sync_worker()        # unblock any prior flash loop so the worker can accept the new one
-    time.sleep(0.05)
     cmd = {"action": "sync_test", "every_n": every_n}
     for k in ("sync_corner", "sync_size_px", "sync_brightness"):   # apply the current controls live, no re-deploy needed
         if k in data:
             cmd[k] = data[k]
+    if _displayd_alive():
+        # daemon mode: stop_sync rides the same /render path (the renderer consumes it off the
+        # socketpair mid-test, exactly like the worker's out-of-band datagram did). It answers
+        # only once the flash loop ends, so allow for the daemon's own 2 s result wait.
+        _displayd_render({"action": "stop_sync"}, timeout=5.0)
+        return jsonify(_displayd_render(cmd, timeout=10.0))
+    _stop_sync_worker()        # unblock any prior flash loop so the worker can accept the new one
+    time.sleep(0.05)
     return jsonify(_display_command(cmd, timeout=5))
 
 
 @app.route("/api/photodiode_test_stop", methods=["POST"])
 def photodiode_test_stop():
-    """Stop the sync-square flash test (out-of-band stop_sync to the display worker)."""
+    """Stop the sync-square flash test (out-of-band stop_sync to the display worker, or a
+    /render stop_sync to displayd)."""
+    if _displayd_alive():
+        _displayd_render({"action": "stop_sync"}, timeout=5.0)
+        return jsonify({"ok": True})
     _stop_sync_worker()
     return jsonify({"ok": True})
 
@@ -1410,6 +1563,11 @@ def photodiode_sync_burst():
     for k in ("sync_corner", "sync_size_px", "sync_brightness"):
         if k in data:
             cmd[k] = data[k]
+    if _displayd_alive():
+        # the daemon waits duration_s + 10 for the renderer's result — outlast that, or a slow
+        # burst would look like a transport failure to the leader's verify. flash_times rides
+        # along (phase-3 correlation); `flashes` keeps its old meaning and place.
+        return jsonify(_displayd_render(cmd, timeout=dur + 15.0))
     return jsonify(_display_command(cmd, timeout=dur + 5))
 
 

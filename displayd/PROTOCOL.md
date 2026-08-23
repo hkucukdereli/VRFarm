@@ -61,19 +61,25 @@ Repair states: REINIT_DLPC (auto on L1 source-revert), MODESET_KICK, RENDERER_RE
 
 ## displayd <-> renderer socketpair (JSON per datagram, fd 3 in the child)
 
-down: {"op":"mode","lease":"idle"|"setup"|"session"}
+Every down-op carries a monotonic "id"; results echo it (displayd correlates by
+id, falling back to action name for older renderers).
+down: {"op":"mode","lease":"idle"|"setup"|"session","config":{...display device
+       config: rig devices.display merged with the photodiode sync_* keys, exactly
+       engine/follower.py's merge — arrives on EVERY mode op, apply idempotently}}
       {"op":"load_stims","path":"/home/vruser/rig/stims/<sid>/stimuli.npz"}
       {"op":"show","seq":42,"trial":7}
       {"op":"render","action":"blank"|"checkers"|"stimulus"|"reload_warp"|
        "sync_test"|"stop_sync"|"sync_burst", ...params identical to the old
-       display_worker actions...}
+       display_worker actions...}   # session BG/BLANK add "use_session_bg":true
+       # -> the device's plain blank() (NPZ background gray), never black
       {"op":"heartbeat_flash"}          # one red sync-square frame, then restore
       {"op":"quit"}
 up:   {"ev":"ready","driver":"KMSDRM","fps":57.46,"flip_ms":13.5}   # after self-test
-      {"ev":"flip","t":<wall>,"flip_ms":13.5}       # per flip, throttle to <= 60/s
+      {"ev":"flip","t":<wall>,"flip_ms":13.5,"n":<flips represented>}  # sampled
+      # every 0.25 s (the old 1/60 s throttle never fired against a 17.4 ms frame)
       {"ev":"onset","seq":42,"trial":7,"t":<wall>,"flip_ms":13.5}
       {"ev":"flash","t_cmd":<wall>}                  # heartbeat flash flip time
-      {"ev":"result","op":"sync_burst","flashes":12,"flash_times":[...]}
+      {"ev":"result","op":"sync_burst","id":<echo>,"flashes":12,"flash_times":[...]}
       {"ev":"fatal","reason":...,"detail":...}
       {"ev":"log","line":"..."}
 
@@ -89,7 +95,8 @@ the phase-3 leader; tolerate unknown cmds with a log line.
 ## Control REST (:5581, localhost; stdlib ThreadingHTTPServer)
 
 GET  /status  -> {"state":..., "since":..., "optics":"unverified"|"ok",
-                  "dlpc":{...latest sweep, latched:{bit: since_t}...},
+                  "dlpc":{...latest sweep, latched:{bit: since_t} (fault bits only,
+                    retained 300 s from last assertion), read_errors:{name:msg}...},
                   "renderer":{"pid":..., "fps":..., "flip_ms_p99":..., "restarts":N},
                   "lease":{"mode":"idle|setup|session|external","holder":...},
                   "alarms":[...last 20...]}
@@ -139,3 +146,58 @@ Shipped disabled: Install writes the unit + `systemctl daemon-reload`, no enable
 Leader-side HB_FLASH scheduler + correlator; seq-numbered SESSION_BEGIN protocol;
 pi_api forwarding of the old endpoint names to :5581; /api/start translation shim;
 deletion of follower.py/display_worker.py; enabling the service.
+
+# ── Phase 3 additions ──────────────────────────────────────────────────────────
+
+## Daemon-mode detection (pi_api)
+
+pi_api decides daemon vs legacy per request by probing GET 127.0.0.1:5581/status
+(timeout 0.5 s). Alive -> daemon mode. No config flag, no state: enabling/stopping
+displayd.service IS the switch, and old controllers keep working through the shim.
+
+## pi_api forwarding (daemon mode)
+
+- /api/init_projector      -> POST :5581/bringup (never start_projector.sh/X)
+- /api/init_display        -> GET :5581/status (renderer is always up; returns ok
+                              when state==RENDERER_UP, plus the status blob)
+- /api/shutdown_display    -> POST :5581/release (lease release; daemon never exits)
+- /api/blank_display, /api/test_checkers, /api/test_stimulus, /api/reload_warp,
+  /api/photodiode_test_start|stop, /api/photodiode_sync_burst
+                           -> POST :5581/render with the mapped action + params
+                              (identical param names; sync burst returns flashes
+                              + flash_times)
+- /api/start {script:"follower", args:[..., "--stims", PATH]}  (the SHIM)
+                           -> do NOT spawn a process. Send LOAD_STIMS {path:PATH}
+                              to 127.0.0.1:5575, return {ok, daemon:true}. The
+                              leader's SYNC_TEST retry loop remains the readiness
+                              barrier. /api/stop with the daemon alive sends
+                              nothing (QUIT is ignored anyway) and reports ok.
+- /api/restart             -> 409 {"error":"session lease active"} when :5581
+                              /status.lease.mode == "session" (unless force:true).
+Legacy paths stay intact when the daemon is down (phase 4 deletes them).
+
+## Leader-clocked L3 heartbeats (engine/leader.py)
+
+- Scheduler: when the photodiode device exists AND task stimulus.photodiode_sync_enabled
+  is true, every hb_period_s (default 5.0, task/device override "heartbeat_period_s")
+  while NO stim window is active: record t_cmd = time.time(), send
+  {"cmd":"HB_FLASH","seq":k} to every follower :5575. displayd forwards
+  heartbeat_flash to the renderer and reports {"type":"hb_flash","seq":k,"t_flip":...}
+  back on ack_port; the leader stores t_flip (fallback t_cmd + 0.05 if no report).
+- When photodiode_sync_enabled is FALSE: no heartbeats, and one
+  {"type":"display_health","alarm":{"kind":"optics_watch_off",...}} event is
+  published at session start — the named degraded mode, never silence.
+- Correlator (leader-side, single clock): photodiode pulse times arrive from the
+  existing GPIO callback (already leader-clock). Cluster pulses: gap > 30 ms starts
+  a new cluster (one flash = 2-3 sub-pulses at 8.7 ms). A heartbeat is CONFIRMED if
+  a cluster onset lands in [t_flip - 0.020, t_flip + 0.070]. 3 consecutive
+  unconfirmed heartbeats -> publish {"type":"display_health","alarm":{"kind":
+  "heartbeat_lost",...}} + Slack notify (via the controller's existing event->
+  notify path); recovery event after 2 consecutive confirmed. Stim windows: the
+  existing per-trial sync path (sync_queue first-pulse) is unchanged and doubles
+  as the in-stim heartbeat; the scheduler pauses from SHOW until stim_off.
+- Per-trial record: sync_ok becomes tri-state int: 1 confirmed, 0 failed (sync
+  enabled, no pulse), -1 unavailable (sync disabled). New per-trial field
+  onset_source: "photodiode" | "ack" | "command" — the best available onset
+  anchor (photodiode pulse > displayd stim_onset ack > SHOW send time); the
+  chosen onset keeps feeding true_onset_t exactly as today.

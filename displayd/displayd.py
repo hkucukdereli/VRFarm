@@ -19,6 +19,7 @@ import argparse
 import glob
 import json
 import os
+import queue
 import signal
 import socket
 import subprocess
@@ -70,6 +71,26 @@ ST_RENDERER_RESTART = "RENDERER_RESTART"
 # States in which the DLPC lock was established — only then does an L1 source
 # readback != parallel mean "reverted" (during bringup it just means "not yet").
 _LOCKED_STATES = (ST_DLPC_LOCKED, ST_CURTAIN_DOWN, ST_RENDERER_UP, ST_OPTICS_OK)
+
+# The identity read in dlpc._READS: if it NAKs on the wire the part is not
+# answering at all. NOTE dlpc.py caches the boot-constant reads (_STATIC_READS)
+# after open(), so a cached identity can appear in sweep()["reads"] with the bus
+# dead — hence _live_reads() below, which only counts reads that answered THIS
+# sweep. Individual other reads failing is partial data, not a power loss.
+_IDENTITY_READ = "ControllerDeviceId"
+
+
+def _live_reads(reads):
+    """Names in a sweep's reads that were actually fetched over the bus this
+    sweep (i.e. minus anything dlpc.py may serve from its boot-constant cache)."""
+    cached = frozenset(getattr(dlpc_mod, "_STATIC_READS", ()) or ())
+    return set(reads) - cached
+
+
+# How long a latched DLPC fault bit stays in /status.dlpc.latched after it was
+# last seen asserted. DLPC status bits clear on read, so a bit is history the
+# moment we read it — the retention window IS the report (see _l1_sweep_once).
+LATCH_RETENTION_S = 300.0
 
 
 def log(msg):
@@ -153,6 +174,7 @@ class Displayd:
         self.sync_layout = {k: pd_cfg[k] for k in
                             ("sync_corner", "sync_size_px", "sync_brightness")
                             if k in pd_cfg}
+        self.display_cfg = dict(disp_cfg)   # rig devices.display verbatim
 
         # Leader address for onset acks + display_health alarms (ack_port — the
         # leader binds it; event_port is bound on the CONTROLLER, see follower.py).
@@ -178,11 +200,14 @@ class Displayd:
 
         # ── DLPC / L1 poller ──
         self.dlpc = None                 # dlpc.Dlpc once opened (poller opens lazily)
+        self._dlpc_open_lock = threading.Lock()   # only ONE Dlpc may ever be built
         self._dlpc_snapshot = None       # latest sweep() result verbatim
         self._dlpc_snapshot_t = None
         self._latched = {}               # bit -> first-seen t (latch semantics)
-        self._latched_reported = set()   # bits that have survived >= 1 snapshot
+        self._latched_last = {}          # bit -> last-seen-asserted t (retention)
         self._dlpc_unreachable = False   # NAK edge detector (alarm once per outage)
+        self._read_err_names = frozenset()   # reads that failed in the last sweep
+        self._read_err_t = 0.0               # throttle for the dlpc_read_errors event
         self._last_auto_reinit = 0.0     # throttle auto REINIT_DLPC (no repair loops)
 
         # ── Renderer supervision ──
@@ -201,29 +226,55 @@ class Displayd:
         self._flip_ts = deque(maxlen=120)     # recent flip wall-times -> fps estimate
         self._flip_ms = deque(maxlen=1024)    # recent flip-block durations -> p99
         self._last_flash = None          # heartbeat-flash t_cmd (phase-3 correlator input)
+        self._hb_pending = deque(maxlen=16)   # HB_FLASH seqs awaiting their flash ev
         self._last_sync_burst = None     # last sync_burst result ev (manual optics check)
+        self._onset_dedup = None         # (t, flip_ms) of the last onset — see _handle_up_event
 
-        # One in-flight render-with-result at a time (sync_burst): the session
-        # SYNC_TEST handler and REST /render share this waiter.
+        # Render ops that carry a result (sync_burst) are correlated by id: every
+        # down-op is stamped with a monotonic "id" and the reader thread hands each
+        # result to that id's waiter queue. _render_lock still serializes waiters so
+        # the no-id fallback (renderer does not echo id yet) stays unambiguous.
         self._render_lock = threading.Lock()
-        self._result_event = threading.Event()
-        self._result_payload = None
+        self._op_id_lock = threading.Lock()
+        self._op_id = 0
+        self._waiters = {}               # op id -> {"action":..., "q": queue.Queue}
+        self._waiters_lock = threading.Lock()
 
         self._show_seq = 0
 
-        # ── Session channel + pd ingest sockets ──
-        self._cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._cmd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._cmd_sock.bind(("0.0.0.0", self.display_port))
-        self._cmd_sock.settimeout(1.0)
+        # ── Desired renderer state (the reconcile target) ──
+        # Every renderer generation is brought up to THIS, so "restart the
+        # renderer" is an idempotent reconcile: a child that dies mid-session
+        # comes back with the same lease, the same display config AND the same
+        # stims loaded (before this, a respawn silently lost the NPZ and every
+        # later SHOW was a no-op while /status still said RENDERER_UP).
+        self._desired_lock = threading.Lock()
+        self._desired = {"lease": "idle",
+                         "stims_path": None,
+                         "display_cfg": dict(self.display_cfg),
+                         "sync_layout": dict(self.sync_layout)}
 
-        self._pd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._pd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._pd_sock.bind(("0.0.0.0", self.pd_port))
-        self._pd_sock.settimeout(1.0)
+        # ── Session channel + pd ingest sockets ──
+        # Bind failures are recorded, not raised: main() turns them into FAULT so
+        # the daemon stays diagnosable over /status instead of crash-looping.
+        self._bind_errors = []
+        self._cmd_sock = self._bind_udp(self.display_port, "session channel")
+        self._pd_sock = self._bind_udp(self.pd_port, "pd ingest")
         self._pd_buf = deque(maxlen=10000)   # bounded: phase 3's correlator drains it
 
         self.lease = {"mode": "idle", "holder": None}
+
+    def _bind_udp(self, port, what):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("0.0.0.0", port))
+            s.settimeout(1.0)
+            return s
+        except OSError as e:
+            self._bind_errors.append("%s :%d: %s" % (what, port, e))
+            log("[displayd] bind failed for %s :%d: %s" % (what, port, e))
+            return None
 
     # ── Alarm / event ring ──
 
@@ -323,9 +374,16 @@ class Displayd:
         if dlpc_mod is None:
             raise RuntimeError("dlpc import failed: %s" % _DLPC_IMPORT_ERROR)
         if self.dlpc is None:
-            d = dlpc_mod.Dlpc()
-            d.open()
-            self.dlpc = d
+            # Double-checked under a dedicated lock: BOTH the L1 poller thread and
+            # the bringup thread call this. Two Dlpc instances would each carry
+            # their own bus lock and _io_error flag while the SDK's module-global
+            # callbacks bind to only one of them — defeating dlpc.py's stale-read
+            # protection and leaking an i2c fd.
+            with self._dlpc_open_lock:
+                if self.dlpc is None:
+                    d = dlpc_mod.Dlpc()
+                    d.open()
+                    self.dlpc = d
         return self.dlpc
 
     def _step_dlpc_alive(self):
@@ -367,6 +425,47 @@ class Displayd:
 
     def _step_renderer_up(self):
         self._start_renderer()
+
+    # ── Desired renderer state (reconcile target) ──
+
+    def _set_desired(self, **kw):
+        with self._desired_lock:
+            self._desired.update(kw)
+
+    def _desired_config(self):
+        """The display device config the renderer must init its Display with —
+        composed exactly like engine/follower.py:67-73 does it: the rig's
+        devices.display block merged with the photodiode card's sync-square prefs
+        (authored on the photodiode, DRAWN by the display). Without this the
+        renderer inits on Display() defaults: wrong resolution/refresh_hz and the
+        session sync square in the wrong corner, so every trial's photodiode sync
+        fails silently."""
+        with self._desired_lock:
+            cfg = dict(self._desired.get("display_cfg") or {})
+            cfg.update(self._desired.get("sync_layout") or {})
+        return cfg
+
+    def _mode_op(self):
+        """The {"op":"mode"} op for the current desired lease, carrying the device
+        config (the renderer applies it; sending it on every mode op keeps a live
+        renderer in step when the sync layout is overridden)."""
+        with self._desired_lock:
+            lease = self._desired.get("lease") or "idle"
+        if lease not in ("idle", "setup", "session"):
+            lease = "idle"      # "external" means no renderer at all
+        return {"op": "mode", "lease": lease, "config": self._desired_config()}
+
+    def _replay_desired(self):
+        """Bring a freshly spawned renderer generation up to the desired state:
+        mode (+ config) first, then the stims if a session has loaded any."""
+        op = self._mode_op()
+        self._send_down(op)
+        with self._desired_lock:
+            path = self._desired.get("stims_path")
+        if path:
+            self._send_down({"op": "load_stims", "path": path})
+        self._event("renderer", "replayed desired state: lease=%s stims=%s"
+                    % (op["lease"], path or "none"))
 
     # ── Renderer supervision ──
 
@@ -419,9 +518,10 @@ class Displayd:
             if rc is not None:
                 raise RuntimeError("renderer exited rc=%s before ready" % rc)
             if self._renderer_ready.is_set() and self._renderer_first_flip.is_set():
-                # Tell the renderer which lease mode it woke up into.
-                mode = self.lease["mode"] if self.lease["mode"] in ("idle", "setup", "session") else "idle"
-                self._send_down({"op": "mode", "lease": mode})
+                # Reconcile this generation to the FULL desired state (lease +
+                # display config + stims), not just the lease: a renderer that
+                # died mid-session must come back able to SHOW.
+                self._replay_desired()
                 return
             time.sleep(0.1)
         raise RuntimeError("renderer start timeout (no ready/first flip in %.0fs)" % timeout)
@@ -460,12 +560,22 @@ class Displayd:
             except OSError:
                 pass
 
+    def _next_op_id(self):
+        with self._op_id_lock:
+            self._op_id += 1
+            return self._op_id
+
     def _send_down(self, op):
-        """One JSON datagram down the socketpair. False if no renderer."""
+        """One JSON datagram down the socketpair. False if no renderer. Every op
+        carries a monotonic "id" so a result ev can be correlated to its request
+        (see _dispatch_result)."""
         with self._renderer_lock:
             sock = self._renderer_sock
         if sock is None:
             return False
+        if "id" not in op:
+            op = dict(op)
+            op["id"] = self._next_op_id()
         try:
             sock.send(json.dumps(op).encode())
             return True
@@ -496,6 +606,39 @@ class Displayd:
                 return
             self._handle_up_event(ev)
 
+    def _record_flip(self, t, flip_ms):
+        """One physical flip -> the fps / p99 windows."""
+        self._flip_ts.append(t)
+        if flip_ms is not None:
+            try:
+                self._flip_ms.append(float(flip_ms))
+            except (TypeError, ValueError):
+                pass
+        self._renderer_first_flip.set()
+
+    def _dispatch_result(self, ev):
+        """Hand a {"ev":"result"} to the waiter that asked for it. Correlation is
+        by the "id" we stamped on the way down. NOTE: the renderer does not echo
+        "id" yet (it sends only {"ev":"result","op":<action>}) — until it does,
+        fall back to the OLDEST waiter for that action name (dicts preserve
+        insertion order). TODO(renderer): echo the request "id" and this fallback
+        can go away."""
+        rid = ev.get("id")
+        waiter = None
+        with self._waiters_lock:
+            if rid is not None:
+                waiter = self._waiters.pop(rid, None)
+            if waiter is None:
+                for key, w in self._waiters.items():
+                    if w["action"] == ev.get("op"):
+                        waiter = self._waiters.pop(key)
+                        break
+        if waiter is not None:
+            try:
+                waiter["q"].put_nowait(ev)
+            except queue.Full:
+                pass
+
     def _handle_up_event(self, ev):
         name = ev.get("ev")
         if name == "ready":
@@ -506,17 +649,25 @@ class Displayd:
             self._event("renderer", "ready: driver=%s fps=%s flip_ms=%s"
                         % (ev.get("driver"), ev.get("fps"), ev.get("flip_ms")))
         elif name == "flip":
-            self._flip_ts.append(ev.get("t", time.time()))
-            if ev.get("flip_ms") is not None:
-                self._flip_ms.append(float(ev["flip_ms"]))
-            self._renderer_first_flip.set()
+            t = ev.get("t", time.time())
+            ms = ev.get("flip_ms")
+            # The renderer reports the SAME physical flip twice on the onset frame
+            # (an "onset" ev, then report_flip's "flip" ev with an identical
+            # flip_ms a few hundred microseconds later). Counting both inflated
+            # fps and p99 exactly during trials — drop the echo.
+            dd = self._onset_dedup
+            self._onset_dedup = None
+            if (dd is not None and ms is not None and dd[1] is not None
+                    and abs(float(ms) - float(dd[1])) < 0.011
+                    and 0.0 <= t - dd[0] <= 0.05):
+                return
+            self._record_flip(t, ms)
         elif name == "onset":
             # SHOW's first stimulus flip -> stim_onset ack to the leader, the
             # exact shape follower.py sends today (the leader logs it as-is).
-            self._flip_ts.append(ev.get("t", time.time()))
-            if ev.get("flip_ms") is not None:
-                self._flip_ms.append(float(ev["flip_ms"]))
-            self._renderer_first_flip.set()
+            t = ev.get("t", time.time())
+            self._record_flip(t, ev.get("flip_ms"))
+            self._onset_dedup = (t, ev.get("flip_ms"))
             if self._leader_addr:
                 ack = {"type": "stim_onset", "trial": ev.get("trial"),
                        "t": ev.get("t")}
@@ -526,10 +677,21 @@ class Displayd:
                     pass
         elif name == "flash":
             self._last_flash = ev.get("t_cmd")
-            self._event("flash", "heartbeat flash t_cmd=%s" % ev.get("t_cmd"))
+            # Flashes are serialized (one heartbeat_flash op -> one flip), so the OLDEST
+            # pending HB_FLASH owns this flip: report t_flip to the leader's L3 correlator.
+            # No ring entry for a correlated heartbeat — at one per hb_period they would
+            # evict the alarm history /status reports; an unsolicited flash still gets one.
+            seq = self._hb_pending.popleft() if self._hb_pending else None
+            if seq is None:
+                self._event("flash", "flash t_cmd=%s" % ev.get("t_cmd"))
+            elif self._leader_addr:
+                pkt = {"type": "hb_flash", "seq": seq, "t_flip": ev.get("t_cmd")}
+                try:
+                    self._ack_sock.sendto(json.dumps(pkt).encode(), self._leader_addr)
+                except OSError:
+                    pass
         elif name == "result":
-            self._result_payload = ev
-            self._result_event.set()
+            self._dispatch_result(ev)
             if ev.get("op") == "sync_burst":
                 self._last_sync_burst = ev
         elif name == "fatal":
@@ -554,10 +716,15 @@ class Displayd:
                 continue
             rc = proc.poll()
             if rc is None:
+                # Reset the ladder on healthy UPTIME, not on a recent flip: the
+                # renderer has no idle redraw loop, so "a flip in the last 2 s"
+                # is false between trials and the streak never reset — three
+                # unrelated restarts hours apart would FAULT the daemon.
                 if (self._renderer_fail_streak
-                        and time.time() - self._renderer_started_t > 60.0
-                        and self._flip_ts and time.time() - self._flip_ts[-1] < 2.0):
+                        and time.time() - self._renderer_started_t > 60.0):
                     self._renderer_fail_streak = 0
+                    self._event("renderer",
+                                "restart ladder reset (renderer healthy > 60 s)")
                 continue
             # Child died while it should be running.
             reason = self._renderer_fatal or ("exit rc=%s" % rc)
@@ -602,40 +769,57 @@ class Displayd:
 
     def render_op(self, body, timeout=None):
         """Forward {"op":"render",...body} to the renderer and wait for its
-        {"ev":"result","op":<action>} answer. Results are matched on the action
-        name and mismatches re-waited: a fire-and-forget blank sent outside
-        this path (BG/BLANK session cmds) also produces a result ev, which must
-        not satisfy a later sync_burst waiter. A quiet timeout on a non-burst
-        action still returns ok — the op was delivered."""
+        {"ev":"result"} answer.
+
+        The waiter's queue is registered under this op's id BEFORE the op goes
+        down, so a result can never land in a gap and be dropped (the old
+        single-slot payload+event lost results whose reader-thread set raced the
+        stale-result clear() — a SYNC_TEST then reported flashes:0/timeout for a
+        burst that really ran, aborting the session). A quiet timeout on a
+        non-burst action still returns ok — the op was delivered."""
+        body = dict(body or {})
+        # A POST /render body must never choose the op ("op":"quit" would kill
+        # the renderer): strip it from the body, then force it after the update.
+        body.pop("op", None)
+        body.pop("id", None)
         action = body.get("action")
         op = {"op": "render"}
         op.update(body)
+        op["op"] = "render"
         with self._render_lock:
-            self._result_payload = None
-            self._result_event.clear()
-            if not self._send_down(op):
-                return {"ok": False, "error": "renderer not running (state %s)" % self.state}
-            if timeout is None:
-                if action == "sync_burst":
-                    timeout = float(body.get("duration_s", 1.0) or 1.0) + 10.0
-                else:
-                    timeout = 2.0
-            deadline = time.time() + timeout
-            while True:
-                remaining = deadline - time.time()
-                if remaining <= 0 or not self._result_event.wait(remaining):
-                    break
-                result = self._result_payload
-                if result is not None and result.get("op") == action:
-                    return {"ok": True, "result": result}
-                self._result_event.clear()   # stale result from another op
-            if action == "sync_burst":
-                return {"ok": False, "error": "timeout waiting for sync_burst result"}
-            return {"ok": True, "result": None}
+            oid = self._next_op_id()
+            op["id"] = oid
+            q = queue.Queue(maxsize=4)
+            with self._waiters_lock:
+                self._waiters[oid] = {"action": action, "q": q}
+            try:
+                if not self._send_down(op):
+                    return {"ok": False,
+                            "error": "renderer not running (state %s)" % self.state}
+                if timeout is None:
+                    if action == "sync_burst":
+                        timeout = float(body.get("duration_s", 1.0) or 1.0) + 10.0
+                    else:
+                        timeout = 2.0
+                try:
+                    result = q.get(timeout=max(0.0, float(timeout)))
+                except queue.Empty:
+                    result = None
+            finally:
+                with self._waiters_lock:
+                    self._waiters.pop(oid, None)
+        if result is not None:
+            return {"ok": True, "result": result}
+        if action == "sync_burst":
+            return {"ok": False, "error": "timeout waiting for sync_burst result"}
+        return {"ok": True, "result": None}
 
     # ── Session channel (UDP :5575) — follower.py-compatible ──
 
     def _session_loop(self):
+        if self._cmd_sock is None:
+            log("[displayd] session channel DOWN (bind failed) — no session commands")
+            return
         log("[displayd] session channel on :%d" % self.display_port)
         while not self._stop.is_set():
             try:
@@ -657,14 +841,31 @@ class Displayd:
                                 "SHOW trial %s with no renderer (state %s)"
                                 % (msg.get("trial"), self.state))
             elif cmd in ("BG", "BLANK"):
-                self._send_down({"op": "render", "action": "blank"})
+                # Session background = the NPZ background gray, which is what
+                # follower.py's display.blank() painted. The setup-time "blank"
+                # render action defaults gray_value=0.0 (BLACK), so flag this as
+                # session-originated: the renderer calls the device's plain
+                # blank() for it.
+                self._send_down({"op": "render", "action": "blank",
+                                 "use_session_bg": True})
             elif cmd == "LOAD_STIMS":
                 # The leader loading stims marks the start of a session: flip the
-                # lease so /status shows who owns the display right now.
+                # lease so /status shows who owns the display right now, and record
+                # both in the desired state so a renderer respawn reloads them.
+                path = msg.get("path")
                 self.lease = {"mode": "session", "holder": "leader"}
-                self._send_down({"op": "mode", "lease": "session"})
-                self._send_down({"op": "load_stims", "path": msg.get("path")})
-                self._event("session", "LOAD_STIMS %s" % msg.get("path"))
+                self._set_desired(lease="session", stims_path=path)
+                self._send_down(self._mode_op())
+                self._send_down({"op": "load_stims", "path": path})
+                self._event("session", "LOAD_STIMS %s" % path)
+            elif cmd == "HB_FLASH":
+                # Leader-clocked L3 heartbeat: flash the sync square once and let the
+                # flash ev carry seq -> t_flip back (see _handle_up_event). A drop here
+                # (no renderer) is deliberately quiet: the leader's own heartbeat_lost
+                # rule is the alarm, and renderer death alarms on its own path.
+                self._hb_pending.append(msg.get("seq"))
+                if not self._send_down({"op": "heartbeat_flash"}):
+                    self._hb_pending.pop()
             elif cmd == "SYNC_TEST":
                 self._handle_sync_test(msg, addr)
             elif cmd == "QUIT":
@@ -673,7 +874,10 @@ class Displayd:
                 self._event("session", "QUIT received — ignored (daemon does not exit)")
                 if self.lease["mode"] == "session":
                     self.lease = {"mode": "idle", "holder": None}
-                    self._send_down({"op": "mode", "lease": "idle"})
+                    # Session over: forget its NPZ too, so a later respawn does
+                    # not reload stims for a session that has ended.
+                    self._set_desired(lease="idle", stims_path=None)
+                    self._send_down(self._mode_op())
             elif cmd == "PING":
                 try:
                     self._cmd_sock.sendto(
@@ -685,6 +889,16 @@ class Displayd:
                 # tolerate unknown cmds with a log line, never a crash.
                 log("[displayd] unknown session cmd: %r" % cmd)
 
+    def _renderer_is_up(self):
+        """True only when a renderer process is alive AND we have reached the
+        RENDERER_UP milestone (i.e. it can actually draw)."""
+        if self.state not in (ST_RENDERER_UP, ST_OPTICS_OK):
+            return False
+        with self._renderer_lock:
+            proc = self._renderer_proc
+            sock = self._renderer_sock
+        return proc is not None and proc.poll() is None and sock is not None
+
     def _handle_sync_test(self, msg, addr):
         """Photodiode INIT verify: run a bounded sync_burst in the renderer and
         reply SYNC_TEST_DONE to the SENDER (the leader's ephemeral socket) —
@@ -692,6 +906,25 @@ class Displayd:
         the phase-2 leader works unchanged. Failures ride the reply (a bare
         {flashes:0} is indistinguishable from a healthy burst that emitted
         nothing)."""
+        if not self._renderer_is_up():
+            # SILENCE, not an error reply. engine/leader.py's
+            # _sync_burst_follower re-sends SYNC_TEST for up to ~20 s waiting for
+            # the display to come up, and treats ANY error reply as a hard abort
+            # — answering {"ok":false,"error":"renderer not running"} during
+            # bringup would fail GO instead of waiting. follower.py could not
+            # reply before its display was open; match that.
+            log("[displayd] SYNC_TEST ignored — renderer not up (state %s)" % self.state)
+            return
+        # The leader ships the photodiode card's layout with the request; adopt it
+        # as the desired sync layout so the renderer (this generation and every
+        # later one) draws the session sync square in the same place.
+        overrides = {k: msg[k] for k in
+                     ("sync_corner", "sync_size_px", "sync_brightness") if k in msg}
+        if overrides and overrides != {k: self.sync_layout.get(k) for k in overrides}:
+            self.sync_layout.update(overrides)
+            self._set_desired(sync_layout=dict(self.sync_layout))
+            self._send_down(self._mode_op())
+            self._event("sync_layout", "sync layout override from leader: %s" % overrides)
         params = dict(self.sync_layout)   # rig-yaml defaults (photodiode card)
         for k in ("sync_corner", "sync_size_px", "sync_brightness",
                   "every_n", "duration_s"):
@@ -725,6 +958,9 @@ class Displayd:
     def _pd_loop(self):
         """Phase 2: bind + buffer only. The L3 onset/pulse correlator (phase 3)
         drains this deque; bounded so a chatty leader can't grow us unbounded."""
+        if self._pd_sock is None:
+            log("[displayd] pd ingest DOWN (bind failed)")
+            return
         log("[displayd] pd ingest on :%d" % self.pd_port)
         while not self._stop.is_set():
             try:
@@ -777,26 +1013,39 @@ class Displayd:
         self._dlpc_snapshot = res
         self._dlpc_snapshot_t = now
 
-        if not res.get("ok"):
-            # NAK == no response == logic power lost (rare; the I2C rail can
-            # back-feed enough to answer, so treat silence as the real signal).
+        reads = res.get("reads") or {}
+        errors = res.get("errors") or {}
+        # sweep().ok is False when ANY ONE of the 18 reads failed — that is NOT a
+        # power-loss signal. Only "nothing answered at all" (or the identity read
+        # itself NAKing) means the DLPC is unreachable; anything else is PARTIAL
+        # data, and bailing out on it silently disabled fault-bit latching, the
+        # actuator-watchdog alarm and the SourceSelect auto-repair for the whole
+        # outage while spamming a false logic-power alarm.
+        if errors and (not _live_reads(reads) or _IDENTITY_READ in errors):
             if not self._dlpc_unreachable:
                 self._dlpc_unreachable = True
                 self._alarm("dlpc_unreachable", "DLPC NAK — logic power lost?",
-                            errors=res.get("errors"))
+                            errors=errors)
             return
         if self._dlpc_unreachable:
             self._dlpc_unreachable = False
             self._event("dlpc", "DLPC reachable again (logic powered)")
+        if errors:
+            self._note_read_errors(errors, len(reads), now)
+        elif self._read_err_names:
+            self._read_err_names = frozenset()
+            self._read_err_t = 0.0
+            self._event("dlpc", "all DLPC reads answering again")
 
-        reads = res.get("reads") or {}
         # Latch semantics: DLPC status bits clear on read, so the first sweep
         # after an event is history. Only FAULT-shaped bits latch — a healthy
         # register is full of 1s that mean "fine" (SystemInitialized, LED
         # states/enables, ActuatorDriveEnable, Application=MainApp), and
-        # latching those buries the real breadcrumbs. A bit clears only once a
-        # LATER sweep reads it 0 and it has been reported (survived >= 1
-        # published snapshot).
+        # latching those buries the real breadcrumbs. Retention rule (chosen over
+        # "clear once reported", which deleted a bit on the very next sweep — the
+        # same second — and left /status.dlpc.latched permanently empty): a bit
+        # stays latched until LATCH_RETENTION_S after it was LAST seen asserted,
+        # keeping its original first-seen t as the published "since".
         def _is_fault_bit(name):
             n = name.lower()
             return ("error" in n or "timeout" in n or "abort" in n
@@ -812,12 +1061,15 @@ class Displayd:
         for bit in flags_now:
             if bit not in self._latched:
                 self._latched[bit] = now
-                self._latched_reported.discard(bit)
                 new_bits.append(bit)
+            self._latched_last[bit] = now
         for bit in list(self._latched):
-            if bit not in flags_now and bit in self._latched_reported:
+            last = self._latched_last.get(bit, self._latched[bit])
+            if now - last > LATCH_RETENTION_S:
                 del self._latched[bit]
-                self._latched_reported.discard(bit)
+                self._latched_last.pop(bit, None)
+                self._event("dlpc", "latched bit expired after %ds: %s"
+                            % (int(LATCH_RETENTION_S), bit))
 
         # Detections (edge-triggered on the new latch, not re-alarmed per sweep):
         for bit in new_bits:
@@ -827,8 +1079,20 @@ class Displayd:
                             bit=bit)
         self._check_source_revert(reads)
 
-        # Everything latched has now been through one snapshot -> reportable.
-        self._latched_reported.update(self._latched)
+    def _note_read_errors(self, errors, n_ok, now):
+        """Partial-sweep breadcrumb: some reads NAKed while the part is clearly
+        answering. Deliberately an EVENT, not the dlpc_unreachable alarm (which
+        means logic power lost). Throttled: re-reported when the failing set
+        changes, otherwise once a minute."""
+        names = frozenset(errors)
+        if names == self._read_err_names and now - self._read_err_t < 60.0:
+            return
+        self._read_err_names = names
+        self._read_err_t = now
+        self._event("dlpc_read_errors",
+                    "%d/%d DLPC reads failed (%s)"
+                    % (len(names), len(names) + n_ok, ", ".join(sorted(names))),
+                    errors=dict(errors))
 
     def _check_source_revert(self, reads):
         """SourceSelect != parallel after lock -> auto REINIT_DLPC. Throttled so
@@ -896,8 +1160,9 @@ class Displayd:
         if mode not in ("setup", "external"):
             return {"ok": False, "error": "lease mode must be 'setup' or 'external'"}
         self.lease = {"mode": mode, "holder": holder}
+        self._set_desired(lease=mode)
         if mode == "setup":
-            self._send_down({"op": "mode", "lease": "setup"})
+            self._send_down(self._mode_op())
         else:
             with self._bringup_lock:
                 self._stop_renderer()
@@ -907,6 +1172,7 @@ class Displayd:
     def release_lease(self):
         was_external = self.lease["mode"] == "external"
         self.lease = {"mode": "idle", "holder": None}
+        self._set_desired(lease="idle")
         if was_external:
             # Take the display back from the outside process.
             with self._bringup_lock:
@@ -917,7 +1183,7 @@ class Displayd:
                 except Exception as e:  # noqa: BLE001
                     self._fault("release/respawn: %s" % e)
         else:
-            self._send_down({"op": "mode", "lease": "idle"})
+            self._send_down(self._mode_op())
         self._event("lease", "lease released")
         return self.status()
 
@@ -950,6 +1216,9 @@ class Displayd:
                 "sweep": self._dlpc_snapshot,
                 "sweep_t": self._dlpc_snapshot_t,
                 "latched": dict(self._latched),
+                # Reads that NAKed in the last sweep while the part still
+                # answered (partial data, NOT a power loss — see _l1_sweep_once).
+                "read_errors": sorted(self._read_err_names),
             },
             "renderer": self._renderer_stats(),
             "lease": dict(self.lease),
@@ -978,6 +1247,8 @@ class Displayd:
         self._stop.set()
         self._stop_renderer()
         for sock in (self._cmd_sock, self._pd_sock, self._ack_sock):
+            if sock is None:
+                continue
             try:
                 sock.close()
             except OSError:
@@ -1058,8 +1329,23 @@ def main():
     parser.add_argument("--rig", required=True, help="Rig yaml path")
     args = parser.parse_args()
 
-    with open(args.rig) as f:
-        rig = yaml.safe_load(f)
+    # A missing / empty / malformed rig yaml must NOT crash-loop under
+    # Restart=always: the daemon's whole premise is that it stays diagnosable
+    # over /status, so come up on defaults and report FAULT with the reason.
+    config_error = None
+    rig = {}
+    try:
+        with open(args.rig) as f:
+            loaded = yaml.safe_load(f)
+        if loaded is None:
+            raise RuntimeError("rig yaml is empty")
+        if not isinstance(loaded, dict):
+            raise RuntimeError("rig yaml is not a mapping (got %s)"
+                               % type(loaded).__name__)
+        rig = loaded
+    except Exception as e:  # noqa: BLE001 — any load failure is a FAULT reason
+        config_error = "%s: %s" % (type(e).__name__, e)
+        log("[displayd] rig config load failed (%s) — starting in FAULT" % config_error)
 
     d = Displayd(rig, args.rig)
     if _DLPC_IMPORT_ERROR:
@@ -1067,7 +1353,14 @@ def main():
 
     # Localhost-only control plane. ThreadingHTTPServer: /bringup blocks for
     # seconds (light settle + renderer self-test) and /status must stay live.
-    server = ThreadingHTTPServer(("127.0.0.1", d.ctl_port), _CtlHandler)
+    # This one bind IS fatal — without /status there is nothing to diagnose with
+    # — but say so in one journald line instead of a bare traceback loop.
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", d.ctl_port), _CtlHandler)
+    except OSError as e:
+        log("[displayd] FATAL: control REST cannot bind 127.0.0.1:%d (%s) — "
+            "another displayd instance?" % (d.ctl_port, e))
+        return 1
     server.daemon_threads = True
     _CtlHandler.displayd = d
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -1082,9 +1375,17 @@ def main():
     signal.signal(signal.SIGINT, _sig)
 
     # READY once the sockets are bound, then walk bringup in the background so
-    # systemd's startup timeout never races the 2.5 s light settle.
+    # systemd's startup timeout never races the 2.5 s light settle. A broken
+    # config or a failed UDP bind skips bringup and parks in FAULT instead —
+    # the daemon stays up and /status names the reason (POST /bringup can still
+    # be used to retry by hand once the cause is fixed).
     sd_notify("READY=1")
-    threading.Thread(target=d.bringup, daemon=True).start()
+    if config_error:
+        d._fault("config: %s (%s)" % (config_error, args.rig))
+    elif d._bind_errors:
+        d._fault("bind: %s" % "; ".join(d._bind_errors))
+    else:
+        threading.Thread(target=d.bringup, daemon=True).start()
 
     # Main loop = watchdog heartbeat (WatchdogSec=15; ping every 5 s).
     while not d._stop.wait(5.0):
@@ -1096,4 +1397,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

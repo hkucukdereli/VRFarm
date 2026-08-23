@@ -17,6 +17,7 @@ import signal
 import socket
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -32,6 +33,23 @@ import devices.camera         # noqa: F401
 import devices.photodiode     # noqa: F401
 import devices.calibration_probe  # noqa: F401
 import devices.encoder        # noqa: F401 — running-wheel encoder
+
+
+# ── L3 display heartbeat (displayd/PROTOCOL.md "Leader-clocked L3 heartbeats") ──
+# Between stim windows the leader flashes the display's sync square on its OWN clock and
+# expects the photodiode to see it: one closed loop that proves projector + optics + wiring
+# are still alive during the long stretches where nothing else is drawn.
+HB_PERIOD_DEFAULT_S = 5.0     # task devices.photodiode.heartbeat_period_s overrides
+HB_CLUSTER_GAP_S = 0.030      # a gap this large starts a new flash cluster (one flash is
+                              # 2-3 sub-pulses at ~8.7 ms)
+HB_WIN_PRE_S = 0.020          # confirm window around the reported flip: [t-20ms, t+70ms]
+HB_WIN_POST_S = 0.070
+HB_EVAL_AGE_S = 0.2           # judge a heartbeat once it is this old (window has closed)
+HB_FLIP_FALLBACK_S = 0.05     # no flip report from displayd -> assume one frame + slop
+HB_CLUSTER_KEEP_S = 2.0       # cluster onsets older than this can never match a pending hb
+HB_LOST_N = 3                 # consecutive unconfirmed heartbeats -> alarm
+HB_OK_N = 2                   # consecutive confirmed heartbeats -> recovery
+HB_REALERT_S = 60.0           # re-alert cadence while the alarm persists
 
 
 class Leader:
@@ -60,6 +78,28 @@ class Leader:
         self._sync_queue = queue.Queue()
         self._sync_enabled = False
         self._sync_timeout_s = 0.1  # max wait for first photodiode edge per trial
+        # Latest displayd/follower stim_onset ack per trial (the display's real flip time) —
+        # the onset anchor used when the photodiode didn't win. Capped at 50 entries.
+        self._onset_acks = {}
+
+        # ── L3 heartbeat state (scheduler + correlator, both ride the trial-loop tick) ──
+        pd_task = (self.task.get("devices", {}) or {}).get("photodiode", {}) or {}
+        pd_rig = (self.rig.get("devices", {}) or {}).get("photodiode", {}) or {}
+        self._hb_period_s = float(pd_task.get(
+            "heartbeat_period_s",
+            pd_rig.get("heartbeat_period_s", HB_PERIOD_DEFAULT_S)) or HB_PERIOD_DEFAULT_S)
+        self._hb_enabled = False        # set in run_session (needs photodiode + sync on)
+        self._hb_seq = 0
+        self._hb_next = 0.0             # next scheduled flash (wall clock)
+        self._stim_active = False       # SHOW..stim off: the scheduler stays out of the way
+        self._heartbeats = deque(maxlen=64)   # {seq, t_cmd, t_flip} awaiting judgement
+        self._hb_pulses = deque(maxlen=4096)  # raw photodiode t from the GPIO callback thread
+        self._hb_clusters = deque(maxlen=256)  # cluster onset times (first pulse of a flash)
+        self._hb_last_pulse_t = None    # clusterer's previous pulse (gap detection)
+        self._hb_lost_streak = 0
+        self._hb_ok_streak = 0
+        self._hb_alarm_on = False
+        self._hb_last_alarm_t = 0.0
 
         # UDP sockets
         net = rig_config["network"]
@@ -149,6 +189,7 @@ class Leader:
     # ── Actions ──
 
     def _action_show_stim(self):
+        self._stim_active = True   # heartbeat scheduler pauses from SHOW until stim off
         self._send_follower({"cmd": "SHOW", "trial": self.trial_num})
         t = time.time()
         self._trial_ctx["stim_onset_t"] = t
@@ -179,9 +220,35 @@ class Leader:
                 self._sync_queue.put_nowait(evt["t"])
             except queue.Full:
                 pass
+            # Second, independent tap for the heartbeat correlator: _sync_queue is drained
+            # (and refilled) per trial by the stim-onset path, so it can never also serve as
+            # the between-trials pulse record. deque.append is atomic — this runs on the
+            # lgpio callback thread, the correlator drains it on the trial-loop thread.
+            if self._hb_enabled:
+                self._hb_pulses.append(evt["t"])
         # Publish with a `type` key: the device dict carries `event`, but the browser dispatches on
         # switch(evt.type), so without this the live SYNC raster (case 'sync_pulse') never populates.
         self._publish({**evt, "type": evt.get("event", "sync_pulse")})
+
+    def _wait_stim_pulse(self, since_t: float, timeout_s: float):
+        """First photodiode pulse of THIS stimulus: the first queued edge at/after the SHOW
+        send time, waited for up to timeout_s. An earlier edge cannot be this stim's onset —
+        the display can't flash before it is told to — so it is discarded rather than
+        mistaken for one. That matters now that heartbeat flashes also pulse the photodiode
+        between trials: the trial-setup drain can't catch a flash whose pulse is still in
+        flight, and one stale edge would anchor the whole trial timeline seconds early.
+        Returns None on timeout (wire off / no pulse), exactly as the queue get did."""
+        deadline = time.time() + timeout_s
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return None
+            try:
+                t = self._sync_queue.get(timeout=remaining)
+            except queue.Empty:
+                return None
+            if t >= since_t:
+                return t
 
     def _on_encoder(self, evt: dict):
         """Running-wheel sample: cache the live speed (for future gating) and publish to the Mac."""
@@ -341,6 +408,26 @@ class Leader:
             and self.task.get("stimulus", {}).get("photodiode_sync_enabled", False))
         if self._sync_enabled:
             print("Photodiode stim-sync: ON (online onset correction)")
+
+        # ── L3 display heartbeat ── The same photodiode + sync-square loop that anchors stim
+        # onsets, run on the leader's clock between stim windows so a dark projector is caught
+        # in seconds instead of at the next trial (or at post-hoc analysis).
+        self._hb_enabled = self._sync_enabled and bool(self._follower_addrs)
+        if self._hb_enabled:
+            self._hb_next = time.time() + self._hb_period_s
+            print(f"Display heartbeat: ON (every {self._hb_period_s:g}s between stims)")
+        elif not self._sync_enabled:
+            # The named degraded mode, never silence: with sync off nothing watches the
+            # optics this session, and sync_ok is recorded as -1 (unavailable, not failed).
+            self._publish_display_health(
+                "optics_watch_off",
+                "photodiode stim sync is off — display optics are unmonitored this session "
+                "and per-trial sync_ok is unavailable (-1)")
+            print("Display heartbeat: OFF (photodiode sync disabled)")
+        else:
+            # Sync is on (per-trial onsets still verified), but nothing to flash between
+            # trials — not a degraded optics watch, so no alarm.
+            print("Display heartbeat: OFF (no follower display in this rig)")
 
         # Open HDF5 (if h5py available)
         # Nested: subject / subject_date / session_id
@@ -531,16 +618,30 @@ class Leader:
             stim_onset_t = self._trial_ctx["stim_onset_t"]
 
             # ── Online photodiode sync: anchor timeline to true display onset ──
+            # Best available anchor, in order: photodiode pulse > displayd/follower
+            # stim_onset ack (its real flip time) > the SHOW send time. sync_ok is tri-state:
+            # 1 = pulse seen, 0 = sync on but no pulse (a real failure), -1 = sync disabled
+            # (unavailable — which the old flat 0 made indistinguishable from failure).
+            onset_source = "command"
             if self._sync_enabled:
-                try:
-                    true_onset_t = self._sync_queue.get(timeout=self._sync_timeout_s)
-                    self._trial_ctx["sync_ok"] = True
-                except queue.Empty:
+                pulse_t = self._wait_stim_pulse(stim_onset_t, self._sync_timeout_s)
+                if pulse_t is not None:
+                    true_onset_t = pulse_t
+                    self._trial_ctx["sync_ok"] = 1
+                    onset_source = "photodiode"
+                else:
                     true_onset_t = stim_onset_t  # wire off / no pulse: fall back
-                    self._trial_ctx["sync_ok"] = False
+                    self._trial_ctx["sync_ok"] = 0
             else:
                 true_onset_t = stim_onset_t
-                self._trial_ctx["sync_ok"] = False
+                self._trial_ctx["sync_ok"] = -1
+            if onset_source == "command":
+                ack_t = self._await_onset_ack(
+                    trial_num, self._sync_timeout_s - (time.time() - stim_onset_t))
+                if ack_t is not None:
+                    true_onset_t = ack_t
+                    onset_source = "ack"
+            self._trial_ctx["onset_source"] = onset_source
             self._trial_ctx["true_onset_t"] = true_onset_t
             self._trial_ctx["display_latency_s"] = true_onset_t - stim_onset_t
 
@@ -582,6 +683,11 @@ class Leader:
 
             # ── Stim OFF event — no waiting; Follower runs for visual_dur independently ──
             stim_off_t = true_onset_t + visual_dur
+            # The engine is done with the stim window, but the follower keeps drawing until
+            # stim_off_t — hold the next heartbeat past that, so a flash never repaints the
+            # sync square over a stimulus still on the glass.
+            self._stim_active = False
+            self._hb_next = max(self._hb_next, stim_off_t + 0.05)
             self._publish({"type": "stim", "on": False,
                            "trial": self.trial_num,
                            "t": stim_off_t})
@@ -714,6 +820,138 @@ class Leader:
         with open(meta_path, "w") as f:
             yaml.dump(meta, f, default_flow_style=False)
 
+    # ── L3 display heartbeat (leader-clocked scheduler + correlator) ──
+
+    def _hb_tick(self):
+        """One trial-loop tick of the display heartbeat: flash if one is due, then judge the
+        flashes whose confirm window has closed. Cheap by design — the trial loop calls this
+        at up to 1 kHz through _check_udp, so the heartbeat needs no thread and no clock of
+        its own (one clock, the leader's, times both the command and the pulse)."""
+        if not self._hb_enabled:
+            return
+        now = time.time()
+        # Never flash into a stim window: the stimulus draws its own sync square, and the
+        # per-trial sync path already doubles as the in-stim heartbeat.
+        if now >= self._hb_next and not self._stim_active:
+            self._hb_seq += 1
+            self._send_follower({"cmd": "HB_FLASH", "seq": self._hb_seq})
+            self._heartbeats.append({"seq": self._hb_seq, "t_cmd": now, "t_flip": None})
+            self._hb_next = now + self._hb_period_s
+        self._hb_correlate(now)
+
+    def _hb_correlate(self, now: float):
+        """Fold new photodiode pulses into flash clusters (one flash = 2-3 sub-pulses ~8.7 ms
+        apart; a gap > HB_CLUSTER_GAP_S starts a new cluster, whose onset is its first pulse)
+        and confirm every heartbeat old enough to judge."""
+        while self._hb_pulses:
+            try:
+                t = self._hb_pulses.popleft()
+            except IndexError:
+                break
+            if (self._hb_last_pulse_t is None
+                    or (t - self._hb_last_pulse_t) > HB_CLUSTER_GAP_S):
+                self._hb_clusters.append(t)
+            self._hb_last_pulse_t = t
+        # Cluster onsets this old can no longer match a pending heartbeat (heartbeats are
+        # judged HB_EVAL_AGE_S after t_cmd) — drop them so the scan below stays short.
+        while self._hb_clusters and self._hb_clusters[0] < now - HB_CLUSTER_KEEP_S:
+            self._hb_clusters.popleft()
+
+        while self._heartbeats and (now - self._heartbeats[0]["t_cmd"]) > HB_EVAL_AGE_S:
+            hb = self._heartbeats.popleft()
+            t_flip = hb["t_flip"]
+            if t_flip is None:
+                t_flip = hb["t_cmd"] + HB_FLIP_FALLBACK_S   # no report from displayd
+            confirmed = any((t_flip - HB_WIN_PRE_S) <= c <= (t_flip + HB_WIN_POST_S)
+                            for c in self._hb_clusters)
+            self._hb_judge(hb, confirmed, now)
+
+    def _hb_judge(self, hb: dict, confirmed: bool, now: float):
+        """Streak bookkeeping: HB_LOST_N consecutive misses raise the alarm (edge-triggered,
+        re-alerted every HB_REALERT_S while it persists), HB_OK_N consecutive hits clear it."""
+        if confirmed:
+            self._hb_lost_streak = 0
+            self._hb_ok_streak += 1
+            if self._hb_alarm_on and self._hb_ok_streak >= HB_OK_N:
+                self._hb_alarm_on = False
+                self._hb_ok_streak = 0
+                self._publish_display_health(
+                    "heartbeat_ok",
+                    "display heartbeat confirmed again (%d in a row)" % HB_OK_N,
+                    level="event", seq=hb["seq"])
+                print(f"[heartbeat] recovered at seq {hb['seq']}", flush=True)
+            return
+
+        self._hb_ok_streak = 0
+        self._hb_lost_streak += 1
+        if self._hb_lost_streak < HB_LOST_N:
+            return
+        if self._hb_alarm_on and (now - self._hb_last_alarm_t) < HB_REALERT_S:
+            return
+        self._hb_alarm_on = True
+        self._hb_last_alarm_t = now
+        msg = ("no photodiode pulse for %d consecutive display heartbeats (%gs apart) — "
+               "check projector, optics and photodiode wiring"
+               % (self._hb_lost_streak, self._hb_period_s))
+        self._publish_display_health("heartbeat_lost", msg, seq=hb["seq"],
+                                     n_missed=self._hb_lost_streak)
+        print(f"[heartbeat] ALARM: {msg}", flush=True)
+
+    def _publish_display_health(self, kind: str, msg: str, level: str = "alarm", **extra):
+        """Publish in the SAME envelope displayd sends on the ack port, so the controller's
+        display_health path treats leader-side and daemon-side alarms identically."""
+        alarm = {"t": time.time(), "level": level, "kind": kind, "msg": msg}
+        alarm.update(extra)
+        self._publish({"type": "display_health", "source": "leader",
+                       "alarm": alarm, "t": alarm["t"]})
+
+    def _note_hb_flip(self, msg: dict):
+        """displayd's {"type":"hb_flash","seq":k,"t_flip":T}: the flip time of one scheduled
+        heartbeat. Newest-first scan — a duplicate seq lands on the live record."""
+        seq = msg.get("seq")
+        t_flip = msg.get("t_flip")
+        if seq is None or t_flip is None:
+            return
+        for hb in reversed(self._heartbeats):
+            if hb["seq"] == seq:
+                try:
+                    hb["t_flip"] = float(t_flip)
+                except (TypeError, ValueError):
+                    pass
+                return
+
+    def _note_onset_ack(self, msg: dict):
+        """Remember the display's reported flip time for a trial (the onset anchor used when
+        the photodiode didn't win). Bounded at 50: dicts keep insertion order, so the pop
+        drops the oldest trial."""
+        trial = msg.get("trial")
+        t = msg.get("t")
+        if trial is None or t is None:
+            return
+        try:
+            self._onset_acks[int(trial)] = float(t)
+        except (TypeError, ValueError):
+            return
+        while len(self._onset_acks) > 50:
+            self._onset_acks.pop(next(iter(self._onset_acks)))
+
+    def _await_onset_ack(self, trial: int, budget_s: float):
+        """Best-effort: this trial's stim_onset ack, within whatever is LEFT of the per-trial
+        onset budget (_sync_timeout_s from SHOW). Costs nothing when the photodiode wait
+        already spent it, so the pre-onset wait never grows beyond today's worst case.
+        Returns the acked flip time, or None."""
+        if not self._follower_addrs:
+            return None
+        deadline = time.time() + max(0.0, budget_s)
+        while True:
+            self._check_udp()
+            t = self._onset_acks.get(trial)
+            if t is not None:
+                return t
+            if time.time() >= deadline or not self.running:
+                return None
+            time.sleep(0.001)
+
     # ── UDP helpers ──
 
     def _check_udp(self):
@@ -740,11 +978,24 @@ class Leader:
                 msg = json.loads(data)
             except (OSError, ValueError):   # ValueError covers JSON + non-UTF-8 datagrams
                 continue
-            if msg.get("type") == "stim_onset":
+            mtype = msg.get("type")
+            if mtype == "stim_onset":
                 # Republish to the controller (its stim_onset handler was dormant until the
-                # ack channel became real).
+                # ack channel became real), and keep it as this trial's onset anchor.
+                self._note_onset_ack(msg)
                 self._publish({"type": "stim_onset", "trial": msg.get("trial"),
                                "t": msg.get("t")})
+            elif mtype == "hb_flash":
+                # displayd reporting when a scheduled heartbeat actually hit the glass.
+                self._note_hb_flip(msg)
+            elif mtype == "display_health":
+                # displayd's own alarms (DLPC, renderer, optics) — forward verbatim; the
+                # controller's event path is what surfaces and notifies them.
+                self._publish(msg)
+
+        # Every trial-loop wait ticks through here at ms rate, so the display heartbeat
+        # (scheduler + correlator) rides this call instead of running a thread of its own.
+        self._hb_tick()
 
     # ── Communication ──
 
@@ -818,6 +1069,10 @@ class Leader:
             "reward_type": "operant" if is_operant else "pavlovian",
             "rt_ms": rt_ms,
             "resp_licks": ctx.get("n_window_licks", 0),   # licks within the response window
+            # Onset provenance for the live table: tri-state sync_ok (1/0/-1) + which anchor
+            # true_onset_t actually came from.
+            "sync_ok": int(ctx.get("sync_ok", -1)),
+            "onset_source": ctx.get("onset_source", "command"),
             "level": level,
             "adaptive_state": adaptive_state,
             "t": time.time(),
@@ -859,7 +1114,11 @@ class Leader:
                       "outcome_t", "first_lick_t",
                       "true_onset_t", "display_latency_s"]:
             f.create_dataset(name, shape=(0,), maxshape=(n,), dtype="f8")
+        # Tri-state: 1 confirmed by a photodiode pulse, 0 sync on but no pulse, -1 sync off.
         f.create_dataset("sync_ok", shape=(0,), maxshape=(n,), dtype="i1")
+        # Which anchor true_onset_t came from: "photodiode" | "ack" | "command".
+        f.create_dataset("onset_source", shape=(0,), maxshape=(n,),
+                         dtype=h5py.vlen_dtype(str))
 
         # Core trial data
         f.create_dataset("trial_num", shape=(0,), maxshape=(n,), dtype="i4")
@@ -903,7 +1162,10 @@ class Leader:
             f[name].resize(i + 1, axis=0)
             f[name][i] = self._trial_ctx.get(name, float("nan"))
         f["sync_ok"].resize(i + 1, axis=0)
-        f["sync_ok"][i] = 1 if self._trial_ctx.get("sync_ok") else 0
+        # Tri-state (see _create_hdf5_datasets); -1 when the key is missing = no sync ran.
+        f["sync_ok"][i] = int(self._trial_ctx.get("sync_ok", -1))
+        f["onset_source"].resize(i + 1, axis=0)
+        f["onset_source"][i] = self._trial_ctx.get("onset_source", "command")
 
         # Core trial data
         for name in ["trial_num", "block_num", "iti_duration_s",

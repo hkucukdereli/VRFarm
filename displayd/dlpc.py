@@ -36,6 +36,7 @@ sweep() read payload shapes (what the L1 poller keys on):
   {"name", "value"}; multi-value reads to labeled dicts — see _READS.)
 """
 
+import copy
 import os
 import subprocess
 import sys
@@ -100,6 +101,16 @@ _READS = [
     ("RgbLedCurrent", lambda a: a.ReadRgbLedCurrent(), ("red", "green", "blue")),
 ]
 
+# Of the 18, these five are boot constants: silicon/firmware identity that cannot change
+# while the controller is powered. sweep() reads each ONCE per open() and merges the cached
+# value back in — same keys, same order, same payload shape, ~5/18 fewer I2C round trips
+# every second. A failed read is never cached, so it is retried on the next sweep; once
+# cached, a later bus failure still surfaces through the 13 dynamic reads.
+_STATIC_READS = frozenset((
+    "ControllerDeviceId", "SystemSoftwareVersion", "FirmwareBuildVersion",
+    "DmdDeviceId", "FpgaVersion",
+))
+
 
 class Dlpc(object):
 
@@ -112,6 +123,7 @@ class Dlpc(object):
         self._api = None       # api.dlpc343x_xpr4 module, imported in open()
         self._i2c = None       # linuxi2c.LinuxI2C, opened in open()
         self._io_error = None  # transport failure flag; see _write_cb/_read_cb
+        self._static_cache = {}  # _STATIC_READS payloads, refreshed on open()
 
     # ---------------------------------------------------------------- open/close
 
@@ -120,6 +132,9 @@ class Dlpc(object):
         with self._lock:
             if self._i2c is not None:
                 return
+            # New bus session -> the boot-constant reads are re-taken on the next sweep
+            # (they are only constant for as long as the controller stays powered).
+            self._static_cache = {}
             # The SDK is not a package: ~/dlp holds linuxi2c.py and the api/
             # namespace dir. Appended (not inserted) so stdlib and repo modules
             # always shadow the vendored names.
@@ -203,29 +218,63 @@ class Dlpc(object):
     def sweep(self):
         """Run the 18-read health sweep. Returns {"ok", "reads", "errors"}
         (+ "t" wall time and "sweep_ms"); a read appears in exactly one of
-        reads/errors. ok means every read answered."""
+        reads/errors. ok means every read answered.
+
+        The five _STATIC_READS are boot constants: hit the bus only until each
+        has answered once, then served from the per-open cache. The output dict
+        is byte-for-byte the shape it always was (cached values merged in, in
+        _READS order) — only sweep_ms drops."""
         out = {"ok": True, "t": time.time(), "reads": {}, "errors": {}}
         t0 = time.perf_counter()
         with self._lock:
             self._require_open()
             for name, fn, fields in _READS:
+                static = name in _STATIC_READS
+                if static:
+                    cached = self._static_cache.get(name)
+                    if cached is not None:
+                        # Copy: the caller owns the sweep dict and must never be able
+                        # to mutate the cache through it.
+                        out["reads"][name] = copy.deepcopy(cached)
+                        continue
                 res, err = self._invoke(fn)
                 if err is not None:
                     out["errors"][name] = err
                     continue
                 try:
-                    out["reads"][name] = self._label(res, fields)
+                    value = self._label(res, fields)
                 except Exception as e:  # malformed payload ≠ healthy read
                     out["errors"][name] = "serialize: %s: %s" % (type(e).__name__, e)
+                    continue
+                out["reads"][name] = value
+                if static:
+                    self._static_cache[name] = copy.deepcopy(value)
         out["sweep_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
         out["ok"] = not out["errors"]
         return out
 
     # ---------------------------------------------------------------- init
 
+    @staticmethod
+    def _pinctrl(args):
+        """Run one `pinctrl <args>`. Returns None on success, else an error string
+        (never raises: a missing/failing pinctrl is a reported init step, not a
+        traceback out of the init sequence)."""
+        try:
+            proc = subprocess.run(["pinctrl"] + list(args),
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  timeout=10)
+        except Exception as e:
+            return "%s: %s" % (type(e).__name__, e)
+        if proc.returncode != 0:
+            return (proc.stderr.decode(errors="replace").strip()
+                    or "pinctrl rc=%d" % proc.returncode)
+        return None
+
     def init_parallel(self):
         """Port of dlp/init_parallel_mode.py, in-process and verified:
-        GPIO25 high (video enable) -> curtain on -> source select external
+        GPIO24/26 tri-stated (flash selects released) -> GPIO25 high (RGB666
+        buffer enable) -> curtain on -> source select external
         parallel -> input size 1920x1080 -> actuator DAC on -> RGB666 ->
         chroma swap -> parallel video polarities -> CCA off -> delay ->
         curtain off -> readback source+curtain -> 2.5 s light settle.
@@ -258,25 +307,57 @@ class Dlpc(object):
         with self._lock:
             self._require_open()
             try:
-                # GPIO25 drives the EVM's parallel-video enable; must be high
-                # before the DLPC will lock to the DPI signal. Idempotent.
-                t0 = time.perf_counter()
-                try:
-                    proc = subprocess.run(
-                        ["pinctrl", "set", "25", "op", "dh"],
-                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                        timeout=10)
-                    gpio_err = None if proc.returncode == 0 else (
-                        proc.stderr.decode(errors="replace").strip()
-                        or "pinctrl rc=%d" % proc.returncode)
-                except Exception as e:
-                    gpio_err = "%s: %s" % (type(e).__name__, e)
-                steps.append({
-                    "step": "gpio25_high", "ok": gpio_err is None,
-                    "error": gpio_err,
-                    "ms": round((time.perf_counter() - t0) * 1000.0, 2)})
-                if gpio_err is not None:
-                    raise _StepFailed("gpio25_high: %s" % gpio_err)
+                # ---- GPIO preamble: TI's InitGPIO, reduced to what is safe under KMS ----
+                # dlp/init_parallel_mode.py ALWAYS ran InitGPIO() before touching the
+                # DLPC. Its docstring (dlp/api/dlpc343x_xpr4_evm.py) is a hardware
+                # warning, not a style note:
+                #   BCM24 -> SPI_SELECT_ASIC (flash select; tri-state for video mode)
+                #   BCM25 -> RGB_BUFFER_SEL  (RGB666 buffer enable; drive high)
+                #   BCM26 -> SPI_SELECT_FPGA (flash select; tri-state for video mode)
+                #   "Do NOT attempt to enable RGB666 buffers and access ASIC/FPGA flash
+                #    devices simultaneously. Damage to flash devices may occur."
+                # So the two flash-select lines must be RELEASED BEFORE GPIO25 goes high.
+                # That ordering is the entire safety content of InitGPIO, and driving 25
+                # high on its own (what this step used to do) skipped it: whatever a
+                # previous flash-write tool, an aborted run, or the boot default left on
+                # 24/26 stayed asserted while the RGB666 buffer came on.
+                #
+                # Deliberately NOT reproduced from InitGPIO, because under displayd the
+                # Pi is in full KMS (dtoverlay=vc4-kms-dpi-generic, see
+                # dlp/sample_config/config_kms.txt) rather than the firmware-DPI setup
+                # TI's script and display_calibration/start_projector.sh assumed:
+                #   * `set 0-21 a2` (the ALT2/DPI mux, start_projector.sh step 1) — the
+                #     KERNEL owns and muxes GPIO0-21 for the DPI panel; re-driving them
+                #     from userspace fights the vc4 driver instead of helping it.
+                #   * `set 1-27 ip pn` wholesale — that range covers GPIO22/23, which are
+                #     the i2c-gpio bus (bus=22) this very sequence is talking to the DLPC
+                #     over, and GPIO25 itself. Tri-stating exactly 24 and 26 gets the
+                #     safety without pulling the control bus out from under us.
+                #   * `set 0 op pn` + `gpio drive 0 ...` — a drive-strength tweak on a
+                #     kernel-owned DPI pin; same reason, and not safety-relevant.
+                # pinctrl writes the pad registers synchronously, so no settle delay is
+                # needed between the tri-state and the buffer enable (TI's sleep(1)
+                # covered a full 27-pin reset done through fire-and-forget shell calls).
+                def gpio_step(name, calls):
+                    t0 = time.perf_counter()
+                    gpio_err = None
+                    for args in calls:
+                        gpio_err = self._pinctrl(args)
+                        if gpio_err is not None:
+                            break
+                    steps.append({
+                        "step": name, "ok": gpio_err is None, "error": gpio_err,
+                        "ms": round((time.perf_counter() - t0) * 1000.0, 2)})
+                    if gpio_err is not None:
+                        raise _StepFailed("%s: %s" % (name, gpio_err))
+
+                # Flash selects released FIRST (see above) — abort if that cannot be
+                # proven, rather than enabling the buffer over an asserted flash select.
+                gpio_step("gpio_tristate_flash_selects",
+                          [["set", "24", "ip", "pn"], ["set", "26", "ip", "pn"]])
+                # GPIO25 drives the EVM's parallel-video (RGB666) buffer enable; must be
+                # high before the DLPC will lock to the DPI signal. Idempotent.
+                gpio_step("gpio25_high", [["set", "25", "op", "dh"]])
 
                 api = self._api
                 run("curtain_on",

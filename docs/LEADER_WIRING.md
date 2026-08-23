@@ -40,7 +40,7 @@ all the conditioning — the leader just timestamps the resulting clean edges.
 | Teensy pin      | Signal                         | Notes |
 |-----------------|--------------------------------|-------|
 | **A1** (analog in) | ← photodiode                | **Divide/clamp to ≤ 3.3 V before this pin** — Teensy 4 analog pins are 3.3 V max, not 5 V-tolerant. |
-| **pin 1** (OUT) | → Leader **GPIO16**           | Clean **5 ms** (`OUT_PULSE_US`), 3.3 V square pulse per sync frame; idles LOW, pulses HIGH. Drives the Pi input directly (no level shift). |
+| **pin 16** (OUT) | → Leader **GPIO16**          | Clean **5 ms** (`OUT_PULSE_US`), 3.3 V square pulse per sync frame; idles LOW, pulses HIGH. Drives the Pi input directly (no level shift). |
 | **pin 13** (LED)| onboard LED mirrors OUT        | Quick visual check that pulses are firing — **`DEBUG` builds only**. |
 | **GND**         | ↔ Leader GND                  | Common ground is essential — tie Teensy GND to a Pi GND pin. |
 | USB             | power                          | Bench supply or a Pi USB port. |
@@ -194,7 +194,7 @@ Why the pins landed where they did — reuse these when adding hardware:
     `gpiodetect`. The pin map is identical. (Background: `PI5_LEADER_FEASIBILITY.md` in the
     local-only `docs/assets/` stash.)
 - **Teensy firmware**: flash `teensy/photodiode_sync/photodiode_sync.ino` with
-  Arduino + Teensyduino (`PD_PIN = A1`, `OUT_PIN = 1`, `DEBUG = 0`).
+  Arduino + Teensyduino (`PD_PIN = A1`, `OUT_PIN = 16`, `DEBUG = 0`).
 
 ---
 

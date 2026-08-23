@@ -78,6 +78,7 @@ devices:
 grace_period_s: 10
 name: cheese
 network:
+  ack_port: 5573
   api_port: 5080
   camera_port: 5001
   command_port: 5572

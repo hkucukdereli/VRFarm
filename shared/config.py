@@ -143,3 +143,27 @@ def get_subject_history(subject_id: str, db_dir: Union[str, Path]) -> list:
         return []
     with open(db_file) as f:
         return json.load(f).get("sessions", [])
+
+
+def photodiode_init_payload(cfg: dict) -> dict:
+    """The /api/init_photodiode payload both UIs send — one builder so the two can't
+    drift (the experiment UI once sent only gpio + long-dead glitch/debounce keys).
+    The optical-verify target (follower_ip/follower_api_port) is NOT included: the
+    setup UI adds it (its init order guarantees the follower display is up first);
+    the experiment UI must not (it shuts the setup display worker down at Load Rig
+    and runs its own verify later, at leader-engine init, over UDP)."""
+    return {
+        "gpio": cfg.get("gpio", 24),
+        "gpiochip": cfg.get("gpiochip", 0),
+        "pulse_every_n_frames": cfg.get("pulse_every_n_frames", 5),
+        "serial_port": cfg.get("serial_port"),          # Teensy USB for the amplitude stream
+        "v_high": cfg.get("v_high", 3.0),
+        "v_low": cfg.get("v_low", 0.3),
+        "v_window_s": cfg.get("v_window_s", 10.0),
+        "v_realert_s": cfg.get("v_realert_s", 30.0),
+        "verify_duration_s": cfg.get("verify_duration_s", 1.0),
+        "verify_enabled": cfg.get("verify_enabled", True),
+        "sync_corner": cfg.get("sync_corner"),
+        "sync_size_px": cfg.get("sync_size_px"),
+        "sync_brightness": cfg.get("sync_brightness"),
+    }

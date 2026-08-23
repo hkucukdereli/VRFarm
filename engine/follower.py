@@ -39,12 +39,14 @@ class Follower:
         self._cmd_sock.bind(("0.0.0.0", net["display_port"]))
         self._cmd_sock.settimeout(1.0)
 
-        # Optional ack socket back to leader
+        # Ack socket back to leader. NOTE: acks go to the ACK port (leader binds it), not the
+        # event port — event_port is bound on the CONTROLLER, so acks sent there were dead-
+        # lettered for the system's whole life (nothing on the leader listened).
         self._ack_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._leader_addr = None
         for pi in rig_config["pis"]:
             if pi["role"] == "leader":
-                self._leader_addr = (pi["ip"], net.get("event_port", 5571))
+                self._leader_addr = (pi["ip"], net.get("ack_port", 5573))
                 break
 
     # ── Device initialization ──
@@ -285,18 +287,27 @@ class Follower:
         can compare its GPIO-detected pulse count (±1). A reply also signals the display is up."""
         display = self.devices.get("display")
         flashes = 0
+        error = None
         try:
-            if display is not None:
+            if display is None:
+                error = "no display device on this follower"
+            else:
                 if hasattr(display, "set_sync_layout"):
                     display.set_sync_layout(msg.get("sync_corner"), msg.get("sync_size_px"),
                                             msg.get("sync_brightness"))
                 flashes = int(display.run_sync_burst(int(msg.get("every_n", 5)),
                                                      float(msg.get("duration_s", 1.0))))
         except Exception as e:
+            error = str(e)
             print(f"SYNC_TEST error: {e}")
+        # Carry the failure in the reply: a bare {flashes: 0} is indistinguishable from a
+        # healthy burst that emitted nothing, and the real cause only lived in this print.
+        reply = {"cmd": "SYNC_TEST_DONE", "flashes": flashes}
+        if error:
+            reply["ok"] = False
+            reply["error"] = error
         try:
-            self._cmd_sock.sendto(
-                json.dumps({"cmd": "SYNC_TEST_DONE", "flashes": flashes}).encode(), addr)
+            self._cmd_sock.sendto(json.dumps(reply).encode(), addr)
         except OSError:
             pass
 

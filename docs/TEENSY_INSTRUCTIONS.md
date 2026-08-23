@@ -23,7 +23,7 @@ drifts. Set `ADAPTIVE 0` in the sketch to fall back to the `v1_0`-style fixed th
 | Pin | Role |
 |---|---|
 | `A1` (`PD_PIN`) | photodiode analog input — **must be ≤ 3.3 V at the pin** |
-| `1` (`OUT_PIN`) | square-pulse output → RPi GPIO (idles LOW, pulses HIGH) |
+| `16` (`OUT_PIN`) | square-pulse output → RPi GPIO16 (idles LOW, pulses HIGH) — scope-verified on the rig 2026-08-23; older docs said pin 1 |
 
 > ⚠️ **Teensy 4 analog pins are 3.3 V max and NOT 5 V-tolerant.** The photodiode swings
 > above 5 V, so a divider or Schottky clamp is mandatory ahead of `PD_PIN`. Set `DIVIDER`

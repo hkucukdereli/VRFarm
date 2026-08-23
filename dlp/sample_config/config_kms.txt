@@ -1,0 +1,48 @@
+# =============================================================================
+# Raspberry Pi 4B (FOLLOWER) — DLPDLCR230NPEVM — /boot/firmware/config.txt
+# FULL-KMS CANDIDATE (Suite B bench, 2026-08-22). FKMS original preserved as
+# /boot/firmware/config_fkms_backup.txt — rollback = copy back + reboot.
+#
+# 1920x1080 @ 57.46 Hz via 18-bit DPI (RGB666), 125 MHz pixel clock, driven by
+# the kernel (vc4-kms-v3d + vc4-kms-dpi-generic) instead of firmware DPI.
+# Timings translated 1:1 from the FKMS hdmi_timings line:
+#   htotal 1960 (1920+20+10+10), vtotal 1110 (1080+10+10+10) -> 125e6/(1960*1110)
+# Runtime bring-up after EVERY boot or EVM power-cycle (no X involved):
+#   pinctrl set 25 op dh && python3 ~/dlp/init_parallel_mode.py
+# =============================================================================
+
+# --- Core system -------------------------------------------------------------
+dtparam=audio=on
+camera_auto_detect=1
+auto_initramfs=1
+arm_64bit=1
+disable_overscan=1
+arm_boost=1
+
+# gpu_mem is inert under full KMS (CMA is the relevant allocator); kept harmless.
+gpu_mem=128
+
+# --- Display driver: FULL KMS + generic DPI panel ----------------------------
+# The kernel claims GPIO0-21 (ALT2/DPI) at boot via the overlay. The EVM-side
+# isolation during boot is GPIO25 (RGB buffer enable) staying low until bring-up.
+dtoverlay=vc4-kms-v3d
+max_framebuffers=2
+dtoverlay=vc4-kms-dpi-generic
+dtparam=clock-frequency=125000000
+dtparam=hactive=1920,hfp=20,hsync=10,hbp=10
+dtparam=vactive=1080,vfp=10,vsync=10,vbp=10
+# RGB666 on GPIO0-21 is this overlay's DEFAULT format (no param needed).
+# DLPC3436 expects: HS active-low, VS active-low, DE active-high, launch on
+# rising clock edge -> hsync-invert + vsync-invert, no de-invert, no pixclk-invert.
+# If AutoFraming shows no incoming video after bring-up, iterate these params.
+dtparam=hsync-invert,vsync-invert
+
+[cm4]
+otg_mode=1
+
+[cm5]
+dtoverlay=dwc2,dr_mode=host
+
+[all]
+# --- DLPC3436 control bus: software I2C on GPIO23(SDA)/22(SCL) -> /dev/i2c-22 -
+dtoverlay=i2c-gpio,bus=22,i2c_gpio_sda=23,i2c_gpio_scl=22,i2c_gpio_delay_us=2

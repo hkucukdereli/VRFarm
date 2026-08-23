@@ -2124,6 +2124,7 @@ function renderDeviceCard(name, dev, pisReady) {
         ${reinitBtn}
       </h4>
       ${showControls ? `<fieldset class="device-fieldset" ${devicesInitialized ? '' : 'disabled'}>${controlsHtml}</fieldset>` : ''}
+      ${showControls && name === 'photodiode' ? renderTeensyFirmware() : ''}
       ${showControls && !devicesInitialized ? '<div style="font-size:10px; color:#888; margin-top:4px">Press Initialize to enable device controls.</div>' : ''}
       ${!pisReady && enabled ? '<div style="font-size:10px; color:#f44336; margin-top:4px">Waiting for Pi check...</div>' : ''}
     </div>`;
@@ -2610,6 +2611,59 @@ function renderPhotodiodeControls(dev) {
     </div>
     ${monitoring ? `<canvas id="photodiode-canvas" class="lick-canvas" width="460" height="120" style="width:460px;height:120px;max-width:100%"></canvas>` : ''}
     <div style="font-size:10px; color:#666; margin-top:2px">Rising edge detection on GPIO${gpio} (clean pulses from the Teensy — filtering runs on the Teensy) — red sync square at ${corner}, ${sizePx ? sizePx + 'px' : 'auto (' + sizeCap + 'px = dead-band width)'}, brightness ${brightness}</div>`;
+}
+
+// ── Photodiode: Teensy firmware upload ──────────────────────────────────────
+// Compiles + flashes the sketch over SSH on the Pi that owns the photodiode device
+// (the Teensy is USB-attached there). Rendered OUTSIDE the init-gated fieldset so
+// firmware can be flashed before/without device init. Browse picks a local .ino;
+// with no file chosen the server uses the newest teensy/ sketch in the repo.
+let teensyInoFile = null;   // {name, text} from Browse
+
+function renderTeensyFirmware() {
+  return `
+    <div class="device-controls" style="margin-top:6px; align-items:center">
+      <span style="font-size:11px; color:#888">Teensy firmware:</span>
+      <button class="btn btn-sm" onclick="document.getElementById('teensy-ino-file').click()">Browse</button>
+      <input type="file" id="teensy-ino-file" accept=".ino" style="display:none" onchange="teensyPickIno(this)">
+      <span id="teensy-ino-name" style="font-size:11px; color:#888">${teensyInoFile ? teensyInoFile.name : 'newest repo sketch'}</span>
+      <label style="font-size:11px; display:flex; align-items:center; gap:3px">
+        <input type="checkbox" id="teensy-debug" ${teensyDebugChecked ? 'checked' : ''}
+               onchange="teensyDebugChecked = this.checked"> Debug</label>
+      <button class="btn btn-orange btn-sm" onclick="uploadTeensyFirmware()"
+              title="Patch #define DEBUG, compile with arduino-cli on the photodiode Pi, flash via teensy_loader_cli (soft reboot, no button press)">Upload</button>
+    </div>`;
+}
+let teensyDebugChecked = false;
+
+function teensyPickIno(inp) {
+  const f = inp.files && inp.files[0];
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    teensyInoFile = {name: f.name, text: rd.result};
+    const el = document.getElementById('teensy-ino-name');
+    if (el) el.textContent = f.name;
+    log('Teensy sketch selected: ' + f.name);
+  };
+  rd.readAsText(f);
+}
+
+async function uploadTeensyFirmware() {
+  const debug = document.getElementById('teensy-debug')?.checked || false;
+  log(`Teensy upload: ${teensyInoFile ? teensyInoFile.name : 'newest repo sketch'} (DEBUG=${debug ? 1 : 0})...`);
+  _lockUI();
+  try {
+    const r = await fetch('/api/teensy_upload', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ino_name: teensyInoFile?.name, ino_text: teensyInoFile?.text, debug})
+    });
+    const data = await r.json();
+    (data.steps || []).forEach(s => log('  ' + s));
+    log(data.ok ? 'Teensy firmware uploaded.' : 'Teensy upload failed: ' + (data.error || ''));
+  } catch (e) {
+    log('Teensy upload failed: ' + e);
+  } finally { _unlockUI(); }
 }
 
 function renderRewardControls(dev) {

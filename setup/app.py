@@ -1209,6 +1209,96 @@ def _get_deploy_files(role: str) -> list[tuple[str, str]]:
     return files
 
 
+# ── Teensy firmware (photodiode sync pulse detector) ──
+# The Teensy is USB-attached to whichever Pi owns the photodiode device (cheddar rig:
+# the leader). Compile + flash happen THERE over SSH — needs arduino-cli (~/bin) with
+# the teensy:avr core, plus teensy-loader-cli (apt) and the PJRC udev rules on that Pi.
+# teensy_loader_cli -s soft-reboots the running sketch into the bootloader, so no
+# button press is needed while a sketch with USB serial is running.
+
+TEENSY_FQBN = "teensy:avr:teensy40"   # cheddar rig: Teensy 4.0 (arduino-cli board list)
+TEENSY_MCU = "TEENSY40"
+
+
+def _ssh_merged(target: str, cmd: str, timeout: int = 60):
+    """Like _ssh but with stderr merged into stdout (arduino-cli / teensy_loader_cli
+    write progress to stderr). Returns (returncode, output)."""
+    r = subprocess.run(
+        ["ssh", "-o", "ConnectTimeout=5", target, cmd],
+        capture_output=True, text=True, timeout=timeout)
+    return r.returncode, (r.stdout + r.stderr)
+
+
+@app.route("/api/teensy_upload", methods=["POST"])
+def api_teensy_upload():
+    """Compile the photodiode Teensy sketch and flash it on the Pi that owns the
+    photodiode device. Body: {ino_name, ino_text, debug} — ino_text from the card's
+    Browse button; if absent the newest teensy/ sketch in the repo is used. The
+    '#define DEBUG' line is patched to the checkbox state before compiling."""
+    if not _rig_config:
+        return jsonify({"ok": False, "error": "No rig loaded"}), 400
+    pd_pi = next((pi for pi in _rig_config.get("pis", [])
+                  if "photodiode" in pi.get("devices", [])), None)
+    if not pd_pi:
+        return jsonify({"ok": False, "error": "No Pi has the photodiode device"}), 400
+    import re as _re
+    import tempfile
+    data = request.json or {}
+    debug = bool(data.get("debug"))
+    ino_text = data.get("ino_text")
+    ino_name = data.get("ino_name") or ""
+    steps = []
+    try:
+        if not ino_text:
+            versions = sorted(p for p in (ROOT / "teensy").iterdir()
+                              if p.is_dir() and (p / (p.name + ".ino")).exists())
+            if not versions:
+                raise RuntimeError("no sketches under teensy/")
+            src = versions[-1] / (versions[-1].name + ".ino")
+            ino_text = src.read_text()
+            ino_name = src.name
+            steps.append(f"No file chosen — using repo sketch {ino_name}")
+        sketch = ino_name[:-4] if ino_name.endswith(".ino") else ino_name
+        if not sketch:
+            raise RuntimeError("cannot derive sketch name from the filename")
+        ino_text, n = _re.subn(r"#define\s+DEBUG\s+\d+",
+                               f"#define DEBUG {1 if debug else 0}", ino_text, count=1)
+        steps.append(f"DEBUG set to {1 if debug else 0}" if n else
+                     "WARNING: no '#define DEBUG' line found — uploading as-is")
+        user = pd_pi.get("user", "vruser")
+        target = f"{user}@{pd_pi['ip']}"
+        rdir = f"~/teensy_build/{sketch}"          # Arduino: dir name must == ino name
+        _ssh(target, f"mkdir -p {rdir}")
+        with tempfile.NamedTemporaryFile("w", suffix=".ino", delete=False) as f:
+            f.write(ino_text)
+            tmp = f.name
+        try:
+            _scp(tmp, f"{target}:{rdir}/{sketch}.ino")
+        finally:
+            os.unlink(tmp)
+        steps.append(f"Sketch on {pd_pi['name']}: {rdir}/{sketch}.ino")
+        rc, out = _ssh_merged(
+            target, f"~/bin/arduino-cli compile --fqbn {TEENSY_FQBN} "
+                    f"--output-dir {rdir}/out {rdir}", timeout=240)
+        if rc != 0:
+            raise RuntimeError("compile failed: " + out.strip()[-500:])
+        mem = [l.strip() for l in out.splitlines() if "FLASH:" in l or "RAM1:" in l]
+        steps += ["  " + l for l in mem[:2]] or ["Compiled."]
+        rc, out = _ssh_merged(
+            target, f"teensy_loader_cli --mcu={TEENSY_MCU} -s -w -v "
+                    f"{rdir}/out/{sketch}.ino.hex", timeout=90)
+        if rc != 0:
+            raise RuntimeError("flash failed: " + out.strip()[-500:] +
+                               " (if the sketch has no USB serial, press the Teensy button)")
+        steps.append("Flashed: " + ((out.strip().splitlines() or ["ok"])[-1]))
+        if debug:
+            steps.append("Debug build: serial now streams the 4-trace plotter format; "
+                         "the P/B health lines are suppressed until a DEBUG=0 upload.")
+        return jsonify({"ok": True, "steps": steps})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "steps": steps})
+
+
 def _ssh(target: str, cmd: str, timeout: int = 60):
     """Run a command on a Pi via SSH."""
     r = subprocess.run(

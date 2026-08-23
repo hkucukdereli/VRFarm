@@ -32,7 +32,8 @@ sys.path.insert(0, str(ROOT))
 from shared.config import (load_rig, load_task, save_task,
                            get_leader_pi, get_follower_pis,
                            make_session_id, register_session,
-                           get_subject_history, next_session_num)
+                           get_subject_history, next_session_num,
+                           photodiode_init_payload)
 from shared.notify import notify, configure as _notify_configure
 
 app = Flask(__name__)
@@ -226,17 +227,16 @@ def api_load_rig():
                               "Camera not detected — check CSI cable")
                         init_errors.append(err)
                 elif dev_name == "photodiode":
-                    r = requests.post(f"http://{ip}:{api_port}/api/init_photodiode", json={
-                        "gpio": dev_cfg.get("gpio", 24),
-                        "glitch_enabled": dev_cfg.get("glitch_enabled", True),
-                        "glitch_ms": dev_cfg.get("glitch_ms", 0.5),
-                        "debounce_enabled": dev_cfg.get("debounce_enabled", True),
-                        "debounce_ms": dev_cfg.get("debounce_ms", 5),
-                    }, timeout=10)
-                    if not r.json().get("ok"):
-                        err = r.json().get("error",
-                              "Photodiode failed — check the GPIO pin/wiring")
-                        init_errors.append(err)
+                    # Full config payload (shared builder — keeps the two UIs in lockstep).
+                    # Deliberately NO follower_ip here: that would trigger the optical verify
+                    # against a display this UI just shut down; the experiment path verifies
+                    # later, at leader-engine init, over UDP.
+                    r = requests.post(f"http://{ip}:{api_port}/api/init_photodiode",
+                                      json=photodiode_init_payload(dev_cfg), timeout=10)
+                    resp = r.json()
+                    if not resp.get("ok"):
+                        init_errors.append(resp.get("error",
+                              "Photodiode failed — check the GPIO pin/wiring"))
                 elif dev_name == "encoder":
                     r = requests.post(f"http://{ip}:{api_port}/api/init_encoder", json={
                         "i2c_address": dev_cfg.get("i2c_address", "0x36"),
@@ -397,37 +397,17 @@ def deploy():
     steps = []
 
     try:
-        # 0. Upload code to Pis
-        code_files = {
-            "leader": [
-                "engine/leader.py",
-                "shared/stim_generator.py",
-                "shared/config.py",
-                "shared/consolidate.py",
-                "devices/base.py",
-                "devices/lick_sensor.py",
-                "devices/reward.py",
-                "devices/camera.py",
-                "devices/photodiode.py",
-                "devices/encoder.py",
-                "devices/calibration_probe.py",
-                "devices/reward_calibration.py",
-                "pi_api/api.py",
-            ],
-            "follower": [
-                "engine/follower.py",
-                "engine/display_worker.py",
-                "devices/base.py",
-                "devices/display.py",
-                "pi_api/api.py",
-            ],
-        }
+        # 0. Upload code to Pis — file list comes from shared/deploy_manifest.py, the
+        # single source of truth shared with the setup UI (the two lists used to live
+        # separately and had diverged: this UI never shipped the calibration tools).
+        from shared.deploy_manifest import deploy_files
         for pi in rig["pis"]:
-            role = pi["role"]
-            for rel_path in code_files.get(role, []):
-                local = ROOT / rel_path
+            for local_rel, remote_rel in deploy_files(pi["role"]):
+                local = ROOT / local_rel
                 if local.exists():
-                    _upload_file(pi["ip"], api_port, str(local), rel_path)
+                    _upload_file(pi["ip"], api_port, str(local), remote_rel)
+                else:
+                    steps.append(f"WARNING: missing local file skipped: {local_rel}")
         steps.append("Uploaded code to all Pis")
 
         # 0b. Restart pi_api on all Pis so new code takes effect

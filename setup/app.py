@@ -557,21 +557,8 @@ def _init_one_device(dev_name, devices, post):
         return post("/api/init_reward",
                     {"pins": cfg.get("pins", {"main": {"gpio": 18}})}, "Reward", 10)
     if dev_name == "photodiode":
-        payload = {
-            "gpio": cfg.get("gpio", 24),
-            "gpiochip": cfg.get("gpiochip", 0),
-            "pulse_every_n_frames": cfg.get("pulse_every_n_frames", 5),
-            "serial_port": cfg.get("serial_port"),          # Teensy USB (leader) for the V stream
-            "v_high": cfg.get("v_high", 3.0),
-            "v_low": cfg.get("v_low", 0.3),
-            "v_window_s": cfg.get("v_window_s", 10.0),
-            "v_realert_s": cfg.get("v_realert_s", 30.0),
-            "verify_duration_s": cfg.get("verify_duration_s", 1.0),
-            "verify_enabled": cfg.get("verify_enabled", True),
-            "sync_corner": cfg.get("sync_corner"),
-            "sync_size_px": cfg.get("sync_size_px"),
-            "sync_brightness": cfg.get("sync_brightness"),
-        }
+        from shared.config import photodiode_init_payload
+        payload = photodiode_init_payload(cfg)
         # The sync verify flashes the FOLLOWER's display, so tell the leader which Pi that is.
         # (_INIT_ORDER runs display before photodiode, so the follower display worker is already up.)
         fol = next((p for p in (_rig_config or {}).get("pis", []) if p.get("role") == "follower"), None)
@@ -1156,57 +1143,10 @@ def _display_init_cfg(devices: dict) -> dict:
 
 
 def _get_deploy_files(role: str) -> list[tuple[str, str]]:
-    """Return list of (local_path, remote_path) for deployment."""
-    files = [
-        # Shared
-        ("shared/__init__.py", "shared/__init__.py"),
-        ("shared/config.py", "shared/config.py"),
-        ("shared/stim_generator.py", "shared/stim_generator.py"),
-        ("shared/consolidate.py", "shared/consolidate.py"),   # data consolidation at Transfer
-        # Devices
-        ("devices/__init__.py", "devices/__init__.py"),
-        ("devices/base.py", "devices/base.py"),
-        ("devices/reward.py", "devices/reward.py"),
-        ("devices/reward_calibration.py", "devices/reward_calibration.py"),
-        ("devices/lick_sensor.py", "devices/lick_sensor.py"),
-        ("devices/camera.py", "devices/camera.py"),
-        ("devices/photodiode.py", "devices/photodiode.py"),
-        ("devices/display.py", "devices/display.py"),
-        ("devices/calibration_probe.py", "devices/calibration_probe.py"),
-        ("devices/encoder.py", "devices/encoder.py"),
-        # Pi API
-        ("pi_api/api.py", "pi_api/api.py"),
-    ]
-    if role == "leader":
-        files += [
-            ("engine/__init__.py", "engine/__init__.py"),
-            ("engine/leader.py", "engine/leader.py"),
-            # shepherd health monitor code. Its config.yaml is NOT here on purpose — it is
-            # seeded once at Install (cp -n) so thresholds edited on the Pi survive a re-Deploy.
-            ("shepherd/shepherd.py", "shepherd/shepherd.py"),
-            # camera feasibility sweep (run by hand on the Pi to validate mode/fps/CPU combos)
-            ("tools/camera_sweep.py", "tools/camera_sweep.py"),
-        ]
-    elif role == "follower":
-        files += [
-            ("engine/__init__.py", "engine/__init__.py"),
-            ("engine/follower.py", "engine/follower.py"),
-            ("engine/display_worker.py", "engine/display_worker.py"),   # setup-time display (out-of-proc)
-            # The display Pi (follower) also gets projector bring-up + the calibration tools:
-            # start_projector.sh -> ~/rig/; the rest -> ~/rig/calibration/ (same place the
-            # Calibrate button uses). NOTE: start_projector.sh calls ~/dlp/init_parallel_mode.py.
-            # The dlp/ SDK is vendored in this repo but pushed to ~/dlp/ at INSTALL, not Deploy
-            # (it's static — see step 5b) — it lives outside ~/rig so it rides scp, not /api/upload.
-            ("display_calibration/start_projector.sh", "start_projector.sh"),
-            ("display_calibration/vsync_probe.py", "calibration/vsync_probe.py"),
-            ("display_calibration/calib_geo.py", "calibration/calib_geo.py"),
-            ("display_calibration/cal_start.sh", "calibration/cal_start.sh"),
-            ("display_calibration/cal_stop.sh", "calibration/cal_stop.sh"),
-            ("display_calibration/panel_grid.py", "calibration/panel_grid.py"),
-            ("display_calibration/validate_calibration_pygame.py",
-             "calibration/validate_calibration_pygame.py"),
-        ]
-    return files
+    """(local, remote) deploy pairs — single source of truth in shared/deploy_manifest.py,
+    consumed by BOTH UIs so the lists can never diverge again."""
+    from shared.deploy_manifest import deploy_files
+    return deploy_files(role)
 
 
 # ── Teensy firmware (photodiode sync pulse detector) ──

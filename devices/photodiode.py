@@ -65,10 +65,16 @@ class Photodiode(Device):
         self._raw_ref_tick = None
         self._raw_ref_time = None
 
-        # ── v2_1: read the photodiode VOLTAGE from the Teensy over USB serial ──────────────────
-        # The Teensy (photodiode_sync_v2_1) streams a bare V float per line at ~100 Hz on its USB
-        # serial (plugged into THIS leader Pi). We keep a rolling window to (a) warn when the signal
-        # drifts out of range and (b) validate the display->diode sync path at init (verify_sync).
+        # ── Teensy USB serial: photodiode amplitude telemetry ───────────────────────────────────
+        # Two firmware protocols are understood (auto-detected per line):
+        #   v2_2 (current): "P <median_V> <peak_V> <baseline_V> <width_us>" per detected pulse +
+        #        "B <floor_V> <ceil_V>" once per second. Per-pulse stats are computed on the Teensy
+        #        at full ADC rate — the fix for the v2_1 aliasing (a 100 Hz stream sampled at random
+        #        phase mostly missed the ~1.2 ms optical pulses; bench 2026-08-22: p99 varied
+        #        0.12-2.7 V across identical runs).
+        #   v2_1 (legacy): a bare V float per line at ~100 Hz (also the DEBUG plotter's 1st field).
+        # The rolling window keeps P medians + B floors (v2_2) or raw samples (v2_1), so the
+        # percentile machinery below works for both: top 1% ~ pulse amplitude, bottom 1% ~ floor.
         # No serial_port configured (or open fails) -> V features silently disabled; pulse timing
         # over GPIO is unaffected.
         self.serial_port = rig_config.get("serial_port")            # e.g. /dev/ttyACM0; None = off
@@ -78,10 +84,20 @@ class Photodiode(Device):
         self.v_realert_s = float(rig_config.get("v_realert_s", 30.0))
         self.verify_duration_s = float(rig_config.get("verify_duration_s", 1.0))
         self.verify_enabled = bool(rig_config.get("verify_enabled", True))
-        self._v = deque(maxlen=max(100, int(self.v_window_s * 100)))   # (t, V) samples
+        # AMPLITUDE series: v2_2 P medians (per pulse) or v2_1 raw samples. Kept separate from
+        # the baseline series — mixing them made the percentiles depend on the event-rate ratio
+        # instead of the signal. maxlen is a bound, not the window: percentile consumers pass
+        # a time window (v2_1's 100 Hz vs v2_2's per-pulse rate span very different history).
+        self._v = deque(maxlen=max(100, int(self.v_window_s * 100)))   # (t, V)
+        self._b = deque(maxlen=60)     # BASELINE series: v2_2 "B" lines, (t, floor_V, ceil_V)
         self._v_lock = threading.Lock()
-        self._v_state = "ok"           # edge-triggered range monitor: "ok" | "warn"
-        self._v_since = 0.0
+        # v2_2 per-pulse telemetry (latest values; None until the first tagged line arrives).
+        # Plain reference assignments (atomic in CPython) — read via get_v_status.
+        self._last_pulse = None        # {"t", "median_V", "peak_V", "baseline_V", "width_us"}
+        self._last_baseline = None     # {"t", "floor_V", "ceil_V"}
+        # Edge-triggered warning state per channel ("range", "clip", "hum"): warn on the
+        # rising edge, re-alert every v_realert_s while sustained, recovery notice on clear.
+        self._warn_state = {}
         self._serial = None
         self._serial_thread = None
         self._serial_stop = threading.Event()
@@ -106,9 +122,28 @@ class Photodiode(Device):
         self._serial_thread = threading.Thread(target=self._serial_reader, daemon=True)
         self._serial_thread.start()
 
+    def _warn_edge(self, key, active, message):
+        """Edge-triggered warning channel: warn on the rising edge, re-alert every
+        v_realert_s while `active` stays true, emit a recovery notice on clear."""
+        now = time.time()
+        st = self._warn_state.get(key)
+        if active:
+            if st is None:
+                self._warn_state[key] = now
+                self._emit_warning(message, "warning")
+            elif (now - st) >= self.v_realert_s:
+                self._warn_state[key] = now
+                self._emit_warning(message, "warning")
+        elif st is not None:
+            del self._warn_state[key]
+            self._emit_warning(f"Photodiode {key} cleared", "ok")
+
     def _serial_reader(self):
-        """Daemon: parse the bare V float per line into the rolling window; periodic range check."""
-        n = 0
+        """Daemon: parse Teensy lines into the amplitude/baseline series; per-pulse
+        clipping/hum classification; periodic range check. Dispatch is bytes-first (no
+        per-line decode — DEBUG builds stream at 5 kHz). ONE-READER RULE: this thread must
+        be the only reader of the port — a second reader steals bytes and garbles both."""
+        last_check = 0.0
         while not self._serial_stop.is_set():
             try:
                 line = self._serial.readline()
@@ -116,54 +151,92 @@ class Photodiode(Device):
                 break
             if not line:
                 continue
+            parts = line.split()
+            if not parts:
+                continue
             try:
-                v = float(line.split()[0])     # first token = V (also works if DEBUG 4-field is on)
+                if parts[0] == b"P" and len(parts) >= 5:
+                    # v2_2 per-pulse report: median peak baseline width_us.
+                    median_v, peak_v = float(parts[1]), float(parts[2])
+                    base_v, width_us = float(parts[3]), int(float(parts[4]))
+                    now = time.time()
+                    self._last_pulse = {"t": now, "median_V": median_v, "peak_V": peak_v,
+                                        "baseline_V": base_v, "width_us": width_us}
+                    with self._v_lock:
+                        self._v.append((now, median_v))
+                    # Clipping: the Teensy pin saturates at 3.3 V; peaks at/above v_high mean
+                    # the divider needs adjusting before the signal clips.
+                    self._warn_edge("clipping", peak_v >= self.v_high,
+                                    f"Photodiode pulse clipping (peak {peak_v:.2f} V >= "
+                                    f"{self.v_high})")
+                    # Width discriminates optics from electricity: a real optical sub-pulse is
+                    # ~1.2 ms; mains-hum crossings are ~10 ms.
+                    self._warn_edge("hum", width_us >= 5000,
+                                    f"Photodiode pulses look like mains hum (width {width_us} "
+                                    f"us, expect ~1200) — check amp/ground")
+                elif parts[0] == b"B" and len(parts) >= 3:
+                    # v2_2 idle line, 1 Hz: baseline-follower floor + peak-follower ceiling.
+                    floor_v, ceil_v = float(parts[1]), float(parts[2])
+                    now = time.time()
+                    self._last_baseline = {"t": now, "floor_V": floor_v, "ceil_V": ceil_v}
+                    with self._v_lock:
+                        self._b.append((now, floor_v, ceil_v))
+                else:
+                    # Bare float: the DEBUG builds' 4-trace stream (1st field = V) and the
+                    # legacy v2_1 100 Hz stream. Do NOT remove — every DEBUG bench build
+                    # speaks this.
+                    v = float(parts[0])
+                    now = time.time()
+                    with self._v_lock:
+                        self._v.append((now, v))
             except (ValueError, IndexError):
                 continue
-            with self._v_lock:
-                self._v.append((time.time(), v))
-            n += 1
-            if n >= 200:                       # ~2 s at 100 Hz -> re-evaluate the V range
-                n = 0
+            if now - last_check >= 2.0:
+                last_check = now
                 try:
                     self._check_v_range()
                 except Exception:
                     pass
 
-    def _v_percentiles(self, t_start=None, t_end=None):
-        """(p1, p99) over the V window, optionally within [t_start, t_end]; None if too few samples."""
+    def _v_percentiles(self, t_start=None, t_end=None, min_n=10):
+        """(p1, p99) over the AMPLITUDE series, optionally within [t_start, t_end]; None if
+        fewer than min_n samples. Under v2_2 the series holds per-pulse medians (a 1 s burst
+        yields only ~12), so windowed callers pass a smaller min_n."""
         import numpy as np
         with self._v_lock:
             vals = [v for (t, v) in self._v
                     if (t_start is None or t >= t_start) and (t_end is None or t <= t_end)]
-        if len(vals) < 10:
+        if len(vals) < min_n:
             return None
         return float(np.percentile(vals, 1)), float(np.percentile(vals, 99))
 
     def _check_v_range(self):
-        """Edge-triggered warning: top 1% >= v_high (saturating) or bottom 1% <= v_low (too weak).
-        Recover notice on return; re-alert every v_realert_s while sustained (shepherd pattern)."""
-        pr = self._v_percentiles()
+        """Range monitor over the last v_window_s (time-windowed — the deque's maxlen is only
+        a bound; sample RATE differs 100x between protocols).
+        v2_2 (B lines seen recently): saturation check only, from pulse medians. The v2_1
+        "too weak" check is meaningless here — the diode sits in the black dead band, so the
+        floor is always near zero, and ABSENCE of pulses (the real weakness signal) is the
+        correlation layer's job, not a percentile's.
+        v2_1/DEBUG bare-float stream: original two-sided behavior."""
+        now = time.time()
+        pr = self._v_percentiles(t_start=now - self.v_window_s)
+        v22 = self._last_baseline is not None and (now - self._last_baseline["t"]) < 3.0
+        if v22:
+            if pr is not None:
+                p1, p99 = pr
+                self._warn_edge("range", p99 >= self.v_high,
+                                f"Photodiode V saturating (top 1% = {p99:.2f} V >= {self.v_high})")
+            return
         if pr is None:
             return
         p1, p99 = pr
-        bad = (p99 >= self.v_high) or (p1 <= self.v_low)
-        now = time.time()
-        if bad:
-            if p99 >= self.v_high:
-                msg = f"Photodiode V saturating (top 1% = {p99:.2f} V >= {self.v_high})"
-            else:
-                msg = f"Photodiode V too weak (bottom 1% = {p1:.2f} V <= {self.v_low})"
-            if self._v_state == "ok":
-                self._v_state = "warn"
-                self._v_since = now
-                self._emit_warning(msg, "warning")
-            elif (now - self._v_since) >= self.v_realert_s:
-                self._v_since = now
-                self._emit_warning(msg, "warning")
-        elif self._v_state == "warn":
-            self._v_state = "ok"
-            self._emit_warning(f"Photodiode V back in range (1% = {p1:.2f}, 99% = {p99:.2f})", "ok")
+        if p99 >= self.v_high:
+            msg = f"Photodiode V saturating (top 1% = {p99:.2f} V >= {self.v_high})"
+        elif p1 <= self.v_low:
+            msg = f"Photodiode V too weak (bottom 1% = {p1:.2f} V <= {self.v_low})"
+        else:
+            msg = ""
+        self._warn_edge("range", bool(msg), msg or "in range")
 
     def _emit_warning(self, message, level):
         """Fire a UI-log event through the stream callback (Leader._publish -> SSE). If not streaming
@@ -186,11 +259,15 @@ class Photodiode(Device):
         with self._v_lock:
             n = len(self._v)
             latest = self._v[-1][1] if n else None
-            recent = [round(v, 3) for (_, v) in list(self._v)[-120:]]   # ~last 1.2 s @ 100 Hz
-        pr = self._v_percentiles()
+            # Last 120 amplitude samples: ~1.2 s of the 100 Hz v2_1 stream, or minutes of
+            # v2_2 per-pulse medians — the card's trace, not a fixed time span.
+            recent = [round(v, 3) for (_, v) in list(self._v)[-120:]]
+        pr = self._v_percentiles(t_start=time.time() - self.v_window_s)
         return {"available": True, "n": n, "v": latest,
                 "p1": (pr[0] if pr else None), "p99": (pr[1] if pr else None),
-                "recent": recent, "v_high": self.v_high, "v_low": self.v_low}
+                "recent": recent, "v_high": self.v_high, "v_low": self.v_low,
+                # v2_2 per-pulse telemetry (None until the first tagged line arrives)
+                "last_pulse": self._last_pulse, "last_baseline": self._last_baseline}
 
     def verify_sync(self, sync_burst, duration_s=None):
         """Universal init check: flash the display for ~duration_s while counting our own rising edges
@@ -215,12 +292,22 @@ class Photodiode(Device):
         if started_here:
             self.stop_stream()
             self._callback = None
+        # A burst that emitted nothing means the DISPLAY path is broken (the follower replies
+        # {flashes: 0} when its draw raised) — without this gate, "detected >= emitted - 1" is
+        # trivially true for emitted 0 and the strongest barrier in the chain false-passes
+        # exactly when the display is dead (bench 2026-08-22).
+        if emitted <= 0:
+            return {"ok": False, "detected": detected, "emitted": emitted, "p1": None, "p99": None,
+                    "reason": f"display emitted no flashes (emitted={emitted}) — display path broken"}
         # V gate (only when the serial stream is available): fail if the flash peak never rose
         # (99% <= v_low) or the signal is saturated (1% >= v_high).
         p1 = p99 = None
         v_ok = True
         if self._serial is not None:
-            pr = self._v_percentiles(t0, time.time())
+            # Amplitude series only (P medians under v2_2, raw under v2_1). min_n=3: a 1 s
+            # v2_2 burst yields only ~12 P lines, and the old min of 10 silently disabled
+            # this gate for short bursts.
+            pr = self._v_percentiles(t0, time.time(), min_n=3)
             if pr is not None:
                 p1, p99 = pr
                 v_ok = (p99 > self.v_low) and (p1 < self.v_high)

@@ -118,12 +118,14 @@ Leader (engine/leader.py)
   - HDF5 data saved locally, transferred to the Controller after session
   → UDP :5575 display commands to Follower (SHOW, QUIT)
   → UDP :5571 events to the Controller
+  ← UDP :5573 acks from Follower (stim_onset; ack_port, default 5573)
 
 Follower (engine/follower.py)
   - pygame display (HDMI/DPI)
   - Loads pre-generated stim NPZ at session start
   - On SHOW: look up trial params, render, wait duration, blank
   ← UDP :5575 commands from Leader
+  → UDP :5573 stim_onset acks to the Leader
 ```
 
 **Key design:** Leader sends `{"cmd": "SHOW", "trial": N}` — Follower handles

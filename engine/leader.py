@@ -12,6 +12,7 @@ import argparse
 import json
 import queue
 import random
+import select
 import signal
 import socket
 import sys
@@ -66,6 +67,11 @@ class Leader:
         self._cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._cmd_sock.bind(("0.0.0.0", net["command_port"]))
         self._cmd_sock.setblocking(False)
+        # Ack socket: the follower's stim_onset acks land here (they used to be sent to
+        # event_port, which only the CONTROLLER binds — dead-lettered since day one).
+        self._ack_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._ack_sock.bind(("0.0.0.0", net.get("ack_port", 5573)))
+        self._ack_sock.setblocking(False)
 
         # Follower addresses
         self._follower_addrs = {}
@@ -726,6 +732,19 @@ class Leader:
             pass
         except json.JSONDecodeError:
             pass
+        # Drain follower acks. _check_udp runs at up to 1 kHz inside the trial loop, so the
+        # empty case must be one cheap select() — not a raised-and-caught BlockingIOError.
+        while select.select([self._ack_sock], [], [], 0)[0]:
+            try:
+                data, _addr = self._ack_sock.recvfrom(4096)
+                msg = json.loads(data)
+            except (OSError, ValueError):   # ValueError covers JSON + non-UTF-8 datagrams
+                continue
+            if msg.get("type") == "stim_onset":
+                # Republish to the controller (its stim_onset handler was dormant until the
+                # ack channel became real).
+                self._publish({"type": "stim_onset", "trial": msg.get("trial"),
+                               "t": msg.get("t")})
 
     # ── Communication ──
 
@@ -758,6 +777,8 @@ class Leader:
                     continue                           # follower not listening yet -> retry
                 r = json.loads(reply.decode())
                 if r.get("cmd") == "SYNC_TEST_DONE":
+                    if r.get("error"):
+                        raise RuntimeError(f"follower display flash failed: {r['error']}")
                     return int(r.get("flashes", 0))
             raise RuntimeError("display not ready (no SYNC_TEST reply from follower)")
         finally:
@@ -923,6 +944,7 @@ class Leader:
             dev.close()
         self._event_sock.close()
         self._cmd_sock.close()
+        self._ack_sock.close()
         # Consolidate into one self-contained .h5 now that every sidecar is finalized (the camera's
         # frame_timestamps.npy is flushed above in dev.close()) — instead of deferring it to transfer.
         self._consolidate_at_exit()

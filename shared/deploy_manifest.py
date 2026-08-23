@@ -60,6 +60,15 @@ _FOLLOWER = [
     ("display_calibration/panel_grid.py", "calibration/panel_grid.py"),
     ("display_calibration/validate_calibration_pygame.py",
      "calibration/validate_calibration_pygame.py"),
+    # displayd (phase 2): KMS display daemon + its renderer child + DLPC wrapper.
+    # Runs on the SYSTEM python3, not the conda env (kmsdrm SDL). PROTOCOL.md
+    # rides along so the deployed interface contract is inspectable on the Pi.
+    # The unit file is NOT here — displayd.service is installed to /etc/systemd
+    # by the setup UI's Install step (static, like the dlp/ SDK push).
+    ("displayd/displayd.py", "displayd/displayd.py"),
+    ("displayd/renderer.py", "displayd/renderer.py"),
+    ("displayd/dlpc.py", "displayd/dlpc.py"),
+    ("displayd/PROTOCOL.md", "displayd/PROTOCOL.md"),
 ]
 
 

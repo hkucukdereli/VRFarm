@@ -288,6 +288,55 @@ def api_install_pi():
                 steps.append(f"WARN: projector config NOT applied ({e}) — no DPI/i2c-22, the DLP will only show "
                              "its test pattern. Fix passwordless sudo, then re-run Install and reboot")
 
+        # 5c. displayd (phase 2, follower): KMS display daemon prerequisites. The daemon and its
+        #     renderer child run on the SYSTEM python3 (the conda env's SDL has no kmsdrm), so
+        #     pygame/numpy/yaml come from apt, not pip — and get apt-mark held: a distro SDL/pygame
+        #     bump can silently drop the kmsdrm backend, and the renderer's self-test would only
+        #     catch it at the next session. libdrm-tests ships modetest (the MODESET_KICK recovery).
+        if role == "follower":
+            _ssh(ssh_prefix,
+                 "sudo apt-get update -qq && sudo apt-get install -y "
+                 "python3-pygame python3-numpy python3-yaml libdrm-tests && "
+                 "sudo apt-mark hold libsdl2-2.0-0 python3-pygame",
+                 timeout=300)
+            steps.append("Installed displayd system packages (pygame/numpy/yaml/libdrm-tests; "
+                         "libsdl2 + python3-pygame held)")
+            # Unit file: substitute the rig name into ExecStart (the rig FILENAME is the rig's
+            # identity; the yaml rides Deploy to ~/rig/rigs/<name>.yaml). scp can't write /etc, so
+            # stage in /tmp and sudo mv. daemon-reload only — NO enable (phase 3 enables).
+            import tempfile
+            svc_text = (ROOT / "displayd" / "displayd.service").read_text()
+            rig_name = (_rig_config or {}).get("name")
+            if rig_name:
+                svc_text = svc_text.replace("<name>", rig_name)
+            else:
+                steps.append("WARN: no rig loaded — displayd.service keeps the <name> placeholder")
+            with tempfile.NamedTemporaryFile("w", suffix=".service", delete=False) as f:
+                f.write(svc_text)
+                svc_tmp = f.name
+            try:
+                _scp(svc_tmp, f"{ssh_prefix}:/tmp/displayd.service")
+            finally:
+                os.unlink(svc_tmp)
+            _ssh(ssh_prefix,
+                 "sudo mv /tmp/displayd.service /etc/systemd/system/displayd.service && "
+                 "sudo systemctl daemon-reload",
+                 timeout=20)
+            steps.append("Installed displayd.service (disabled — phase 3 enables)")
+            # KMS boot config: staged as a CANDIDATE next to config.txt, never activated in
+            # phase 2 — the running config.txt (FKMS, step 5b) stays untouched. Switching to
+            # full KMS is a deliberate manual step (or phase 3).
+            kms_local = ROOT / "dlp" / "sample_config" / "config_kms.txt"
+            if kms_local.exists():
+                _scp(str(kms_local), f"{ssh_prefix}:/tmp/config_kms_candidate.txt")
+                _ssh(ssh_prefix,
+                     "sudo mv /tmp/config_kms_candidate.txt /boot/firmware/config_kms_candidate.txt",
+                     timeout=15)
+                steps.append("Staged /boot/firmware/config_kms_candidate.txt (KMS config — NOT active)")
+            else:
+                steps.append("WARN: dlp/sample_config/config_kms.txt missing locally — "
+                             "KMS candidate config not staged")
+
         # 6. Upload and enable systemd service
         _scp(str(ROOT / "pi_api" / "vrfarm.service"),
              f"{ssh_prefix}:/tmp/vrfarm.service")

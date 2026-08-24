@@ -31,16 +31,30 @@ solved geometry (incl. horizontal/vertical_stretch), the derived altitudes, the
 azimuth_height, and a `calibration:` block (flip/offset/frame/az90 landmarks), dropping
 the now-redundant azimuth_max_deg. compute_warp_map.py builds warp_map.npz from it.
 
-Run on mozzarella (projector X must be up):
-  DISPLAY=:0 ~/miniforge3/envs/rig/bin/python calib_geo.py
-Then open http://192.168.10.102:5091 on your Mac.
+Run on the display Pi under KMS. displayd owns DRM, so it must step aside first — that is
+what cal_start.sh does (POST :5581/standby before, /resume after). Run it by hand with:
+  curl -sX POST http://127.0.0.1:5581/standby
+  /usr/bin/python3 calib_geo.py        # SYSTEM python3: see the SDL note below
+  curl -sX POST http://127.0.0.1:5581/resume
+Then open http://192.168.10.102:5091.
 """
 import argparse
 import copy
 import json
+import os
 import signal
 import threading
 from pathlib import Path
+
+# SDL must be pinned BEFORE pygame is imported anywhere (pygame is imported lazily inside
+# run(), so module scope is early enough). Same contract as displayd/renderer.py: under full
+# KMS there is no X server at all, and an inherited DISPLAY would send SDL looking for one.
+# NOTE this also means calib_geo must run on the SYSTEM python3 — the conda `rig` env's SDL
+# has no kmsdrm backend, and would silently fall back to a null driver that renders nothing.
+os.environ["SDL_VIDEODRIVER"] = "kmsdrm"
+os.environ["SDL_HINT_NO_SIGNAL_HANDLERS"] = "1"
+os.environ["SDL_NO_SIGNAL_HANDLERS"] = "1"
+os.environ.pop("DISPLAY", None)
 
 import numpy as np
 import yaml
@@ -601,22 +615,21 @@ const en=document.getElementById('azhnote');if(en)en.textContent='→ altitude '
 load();</script></body></html>"""
 
 
-def start_web(port):
-    from flask import Flask, request
-    app = Flask(__name__)
+def _route(path, q):
+    """Handle one GET. Returns (content_type, body) or None for 404. Route names and response
+    bodies are byte-identical to the Flask version this replaces, so PAGE's JS is unchanged."""
+    if path == "/":
+        return "text/html; charset=utf-8", PAGE
 
-    @app.route("/")
-    def idx():
-        return PAGE
-
-    @app.route("/get")
-    def get():
+    if path == "/get":
         with LOCK:
-            return json.dumps(PARAMS)
+            return "application/json", json.dumps(PARAMS)
 
-    @app.route("/set")
-    def setp():
-        k, v = request.args["k"], request.args["v"]
+    if path == "/set":
+        k = (q.get("k") or [None])[0]
+        v = (q.get("v") or [None])[0]
+        if k is None or v is None:
+            raise KeyError("set requires k and v")
         with LOCK:
             if k in ("flip_h", "flip_v"):
                 PARAMS[k] = (v == "1")
@@ -629,28 +642,24 @@ def start_web(port):
                 _apply_visual_field()
             if k in SOLVE_TRIGGERS:
                 _solve_stretches()
-        return "ok"
+        return "text/plain", "ok"
 
-    @app.route("/save")
-    def save():
+    if path == "/save":
         archived = save_geometry()
-        return json.dumps({"ok": True, "archived": archived})
+        return "application/json", json.dumps({"ok": True, "archived": archived})
 
-    @app.route("/preview")
-    def preview():
+    if path == "/preview":
         with LOCK:
             p = dict(PARAMS)
-        return json.dumps(grid_lines(p))
+        return "application/json", json.dumps(grid_lines(p))
 
-    @app.route("/save_defaults")
-    def save_defaults():
+    if path == "/save_defaults":
         with LOCK:
             DEFAULTS_PATH.write_text(json.dumps(PARAMS, indent=2))
-        print(f"saved defaults {DEFAULTS_PATH}")
-        return "ok"
+        print(f"saved defaults {DEFAULTS_PATH}", flush=True)
+        return "text/plain", "ok"
 
-    @app.route("/load_defaults")
-    def load_defaults():
+    if path == "/load_defaults":
         with LOCK:
             if DEFAULTS_PATH.exists():
                 try:
@@ -660,12 +669,52 @@ def start_web(port):
                             PARAMS[k] = v
                     _coerce_types()
                 except Exception as e:
-                    print("load_defaults failed:", e)
+                    print("load_defaults failed:", e, flush=True)
             _apply_visual_field()
             _solve_stretches()
-            return json.dumps(PARAMS)
+            return "application/json", json.dumps(PARAMS)
 
-    app.run(host="0.0.0.0", port=port, threaded=True)
+    return None
+
+
+def start_web(port):
+    """Stdlib HTTP, not Flask. Under KMS this tool must run on the SYSTEM python3 (the only
+    interpreter here whose SDL has a kmsdrm backend) and that interpreter has no Flask —
+    and the Pis are firewall-gated, so adding a dependency to the calibration path is a
+    trap for whoever next needs to calibrate. Seven GET routes do not justify it; displayd's
+    control REST is stdlib for the same reason. Threaded so a slow /preview (it walks the
+    whole grid) cannot block the slider PUTs behind it."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import urlparse, parse_qs
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"          # keep-alive; Content-Length is always set
+
+        def do_GET(self):
+            u = urlparse(self.path)
+            try:
+                hit = _route(u.path, parse_qs(u.query))
+            except KeyError as e:
+                self.send_error(400, str(e))
+                return
+            except Exception as e:             # noqa: BLE001 — never kill the web thread
+                self.send_error(500, str(e))
+                return
+            if hit is None:
+                self.send_error(404, "no such route")
+                return
+            ctype, body = hit
+            data = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass                                # the console belongs to the calibration output
+
+    ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
 
 
 def run(port, geo_path=None):

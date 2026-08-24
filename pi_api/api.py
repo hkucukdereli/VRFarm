@@ -7,7 +7,6 @@ stim generation, and calibration.
 """
 
 from __future__ import annotations
-import itertools
 import json
 import os
 import shutil
@@ -208,20 +207,21 @@ def consolidate(session_id):
 
 @app.route("/api/start", methods=["POST"])
 def start():
-    """Start leader.py or follower.py as a subprocess. With displayd running, "follower" is
-    shimmed: no process is spawned — the daemon already is the follower."""
+    """Start leader.py as a subprocess. "follower" spawns nothing: displayd IS the follower
+    (renderer up, session channel bound) and engine/follower.py no longer exists."""
     global _process, _process_log
     data = request.json
     script = data.get("script")  # "leader" or "follower"
     args = data.get("args", [])
 
-    if script == "follower" and _displayd_alive():
-        # THE SHIM: displayd already IS the follower (renderer up, session channel bound), so
-        # spawning engine/follower.py would only fight it for DRM master. Hand the daemon the
-        # stim path on its session channel and report ok — the leader's SYNC_TEST retry loop
-        # stays the readiness barrier, exactly as it was with a freshly spawned follower.
-        # Checked before the busy check below: this path spawns nothing, so `_process` (a
-        # leftover from a pre-daemon run) has no bearing on it.
+    if script == "follower":
+        # Phase 4: this was a shim over engine/follower.py; now it is the only path. The
+        # daemon already owns the display, so all that is needed is to hand it the stim path
+        # on its session channel — the leader's SYNC_TEST retry loop remains the readiness
+        # barrier, exactly as it was when a follower process was spawned here. Answered
+        # before the busy check below: this path spawns nothing, so `_process` is irrelevant.
+        if not _displayd_alive():
+            return jsonify({"ok": False, "error": _DISPLAYD_DOWN_MSG}), 503
         stims = None
         for i, a in enumerate(args):
             if a == "--stims" and i + 1 < len(args):
@@ -232,8 +232,6 @@ def start():
                 break
         port = int(data.get("display_port", _DISPLAYD_SESSION_PORT))
         if stims:
-            # own socket, not _display_sock: that one is a request/reply channel to the display
-            # worker and a stray datagram on it would desync a pending reply.
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
                 sock.sendto(json.dumps({"cmd": "LOAD_STIMS", "path": stims}).encode(),
@@ -252,21 +250,11 @@ def start():
 
     if script == "leader":
         cmd = [python, str(RIG_DIR / "engine" / "leader.py")] + args
-    elif script == "follower":
-        cmd = [python, str(RIG_DIR / "engine" / "follower.py")] + args
     else:
         return jsonify({"ok": False, "error": f"Unknown script: {script}"}), 400
 
     _process_log = []
     env = os.environ.copy()
-    if script == "follower":
-        env.setdefault("DISPLAY", ":0")
-        env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-        # A session's follower.py owns pygame/:0 itself — make sure the setup display worker isn't
-        # still holding it. The leader's Go path calls /api/shutdown_display first, but that is
-        # best-effort; this guard closes the gap so the two never contend for :0.
-        with _display_worker_lock:
-            _kill_display_worker()
     _process = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1, env=env)
@@ -504,13 +492,12 @@ def _ensure_rig_path():
 
 # ── displayd forwarding (KMS display daemon) ────────────────────────────────────
 # When displayd.service is running on this Pi it OWNS the display: DRM master, the renderer
-# child, the DLPC and the leader-facing session channel. engine/display_worker.py (and
-# engine/follower.py) must never start alongside it — two DRM masters is a black screen. The
-# display endpoints below therefore forward to the daemon's localhost control REST instead of
-# driving the worker. Detection is a per-request probe of GET :5581/status: no config flag and
-# no state, so enabling/stopping the unit IS the switch and an old controller keeps working
-# unchanged. The legacy worker paths stay intact for Pis without the daemon (phase 4 deletes
-# them). stdlib urllib only — pi_api's rig env has no `requests`.
+# child, the DLPC and the leader-facing session channel. Phase 4 removed the alternatives
+# (engine/display_worker.py, engine/follower.py and the X stack), so the display endpoints
+# below forward to the daemon's localhost control REST or report that it is down — they never
+# reach the framebuffer another way. Detection is a per-request probe of GET :5581/status: no
+# config flag and no state, so enabling/stopping the unit IS the switch and an old controller
+# keeps working unchanged. stdlib urllib only — pi_api's rig env has no `requests`.
 _DISPLAYD_HOST = "127.0.0.1"
 _DISPLAYD_CTL_PORT = 5581        # control REST (127.0.0.1 only)
 _DISPLAYD_SESSION_PORT = 5575    # session channel (rig yaml network.display_port)
@@ -562,152 +549,25 @@ def _displayd_render(cmd: dict, timeout: float = 10.0) -> dict:
     return {"ok": False, "error": r.get("error", "displayd render failed")}
 
 
-# ── Setup-time display worker (out-of-process) ──────────────────────────────────
-# pygame/SDL is NOT run inside pi_api: a crash there would take the whole management API down. The
-# follower's setup-time display therefore runs as a separate subprocess (engine/display_worker.py)
-# that we spawn/kill/respawn — exactly like /api/start spawns follower.py for a session — and talk
-# to over a localhost-only UDP socket. _display_command() keeps its old (cmd, timeout) signature so
-# the display endpoints below are unchanged.
-_DISPLAY_WORKER_PORT = 5578
-_DISPLAY_ADDR = ("127.0.0.1", _DISPLAY_WORKER_PORT)
-_display_worker: subprocess.Popen | None = None
-_display_worker_log: list[str] = []
-_display_worker_lock = threading.Lock()   # one outstanding request at a time (no result desync)
-_display_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-_display_sock.settimeout(0.5)
-_display_req_id = itertools.count(1)
-
-
-def _display_worker_alive() -> bool:
-    return _display_worker is not None and _display_worker.poll() is None
-
-
-def _ping_display_worker() -> bool:
-    """One ping/pong round-trip (the worker's receiver answers even during a blocking sync test)."""
-    try:
-        rid = next(_display_req_id)
-        _display_sock.sendto(json.dumps({"id": rid, "action": "ping"}).encode(), _DISPLAY_ADDR)
-        deadline = time.monotonic() + 0.5
-        while time.monotonic() < deadline:
-            try:
-                data, _ = _display_sock.recvfrom(65535)
-            except (socket.timeout, OSError):
-                break
-            try:
-                r = json.loads(data.decode())
-            except Exception:
-                continue
-            if r.get("id") == rid and r.get("pong"):
-                return True
-    except OSError:
-        pass
-    return False
-
-
-def _spawn_display_worker() -> None:
-    """Start engine/display_worker.py as a child, mirroring /api/start's follower launch."""
-    global _display_worker, _display_worker_log
-    # reap any orphan from a prior pi_api crash that could still hold :0 / the UDP port
-    subprocess.run(["pkill", "-f", "engine/display_worker.py"], capture_output=True, check=False)
-    time.sleep(0.1)
-    python = str(Path.home() / "miniforge3" / "envs" / "rig" / "bin" / "python")
-    cmd = [python, str(RIG_DIR / "engine" / "display_worker.py"),
-           "--port", str(_DISPLAY_WORKER_PORT)]
-    env = os.environ.copy()
-    env.setdefault("DISPLAY", ":0")
-    env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-    _display_worker_log = []
-    _display_worker = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                       text=True, bufsize=1, env=env)
-
-    def _read():
-        for line in _display_worker.stdout:
-            _display_worker_log.append(line.rstrip())
-            if len(_display_worker_log) > 200:
-                _display_worker_log.pop(0)
-    threading.Thread(target=_read, daemon=True).start()
-    # bounded wait for the worker to bind + answer, so a bad :0/bind surfaces now, not later
-    for _ in range(40):    # ~4 s
-        if not _display_worker_alive():
-            return
-        if _ping_display_worker():
-            return
-        time.sleep(0.1)
-
-
-def _ensure_display_worker() -> bool:
-    if _display_worker_alive():
-        return True
-    _spawn_display_worker()
-    return _display_worker_alive()
-
-
-def _kill_display_worker() -> None:
-    """Terminate the worker so it releases pygame/:0 for follower.py — process death, not just a
-    quit() on a lingering thread. The worker's SIGTERM handler runs pygame.quit() first."""
-    global _display_worker
-    if _display_worker is not None:
-        try:
-            _display_worker.terminate()
-            _display_worker.wait(timeout=2)
-        except Exception:
-            try:
-                _display_worker.kill()
-            except Exception:
-                pass
-    _display_worker = None
-
-
-def _stop_sync_worker() -> None:
-    """Fire-and-forget: unblock a running sync-test flash loop (out-of-band, like the old Event)."""
-    if _display_worker_alive():
-        try:
-            _display_sock.sendto(
-                json.dumps({"id": next(_display_req_id), "action": "stop_sync"}).encode(),
-                _DISPLAY_ADDR)
-        except OSError:
-            pass
+# ── Display access ─────────────────────────────────────────────────────────────
+# Phase 4: the out-of-process setup display worker (engine/display_worker.py) and the
+# session's engine/follower.py are both gone, along with the X stack they ran on. displayd
+# owns the display on any Pi that has one, and every display endpoint below routes to it.
+#
+# There is deliberately NO fallback. A second, quieter path to the framebuffer is exactly
+# how two DRM masters — and a black projector nobody could explain — used to happen. When
+# the daemon is not running these endpoints say so, instead of drawing somewhere else.
+_DISPLAYD_DOWN_MSG = ("displayd is not running on this Pi, and it owns the display. "
+                      "Check with: systemctl status displayd")
 
 
 def _display_command(cmd: dict, timeout: float = 10.0) -> dict:
-    """Send one command to the display worker and wait for its reply. Same signature as the old
-    in-process version, so the display endpoints are unchanged. Spawns the worker on 'init'; for
-    other actions when the worker is down, returns the same messages the old thread did."""
-    action = cmd.get("action")
-    with _display_worker_lock:
-        if action == "init":
-            _ensure_display_worker()
-        if not _display_worker_alive():
-            if action == "shutdown":
-                return {"ok": True}                                  # already released
-            if action == "reload_warp":
-                return {"ok": True, "reloaded": False, "message": "display not active"}
-            return {"ok": False, "error": "Display not initialized"}
-        rid = next(_display_req_id)
-        payload = dict(cmd)
-        payload["id"] = rid
-        try:
-            _display_sock.sendto(json.dumps(payload).encode(), _DISPLAY_ADDR)
-        except OSError as e:
-            return {"ok": False, "error": f"display worker unreachable: {e}", "worker_down": True}
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if not _display_worker_alive():
-                break
-            try:
-                data, _ = _display_sock.recvfrom(65535)
-            except socket.timeout:
-                continue
-            except OSError:
-                break
-            try:
-                r = json.loads(data.decode())
-            except Exception:
-                continue
-            if r.get("id") == rid:                                   # drain any stale reply
-                return r
-        _kill_display_worker()                                       # clean respawn next time
-        return {"ok": False, "error": "display worker crashed; restarting", "worker_down": True}
+    """Route one display action to the daemon. Deliberately keeps the old (cmd, timeout)
+    signature the worker had, so the endpoints below are unchanged: the renderer's action
+    set and parameter names were always identical to display_worker's."""
+    if not _displayd_alive():
+        return {"ok": False, "error": _DISPLAYD_DOWN_MSG}
+    return _displayd_render(cmd, timeout=timeout)
 
 
 @app.route("/api/init_projector", methods=["POST"])
@@ -838,16 +698,12 @@ def reload_warp():
 
 @app.route("/api/shutdown_display", methods=["POST"])
 def shutdown_display():
-    """Shut down the setup display worker (release pygame/:0 for follower.py). Killing the process
-    is what guarantees the SDL/X grab on :0 is released; its SIGTERM handler quits pygame first.
-    Daemon mode: a lease release — the daemon keeps the renderer and never exits."""
-    if _displayd_alive():
-        # daemon mode: nothing to kill — the daemon never exits and keeps the renderer up. The
-        # equivalent of "release the display" is dropping the lease back to idle.
-        _displayd("/release", {}, method="POST", timeout=5.0)
-        return jsonify({"ok": True})
-    with _display_worker_lock:
-        _kill_display_worker()
+    """Release the display. Nothing is killed: displayd never exits and keeps its renderer up,
+    so "release" means dropping the lease back to idle. (This used to terminate the setup
+    display worker to free pygame/:0 for follower.py — both are gone in phase 4.)"""
+    if not _displayd_alive():
+        return jsonify({"ok": True, "message": "no display daemon on this Pi"})
+    _displayd("/release", {}, method="POST", timeout=5.0)
     return jsonify({"ok": True})
 
 
@@ -1530,26 +1386,20 @@ def photodiode_test_start():
     for k in ("sync_corner", "sync_size_px", "sync_brightness"):   # apply the current controls live, no re-deploy needed
         if k in data:
             cmd[k] = data[k]
-    if _displayd_alive():
-        # daemon mode: stop_sync rides the same /render path (the renderer consumes it off the
-        # socketpair mid-test, exactly like the worker's out-of-band datagram did). It answers
-        # only once the flash loop ends, so allow for the daemon's own 2 s result wait.
-        _displayd_render({"action": "stop_sync"}, timeout=5.0)
-        return jsonify(_displayd_render(cmd, timeout=10.0))
-    _stop_sync_worker()        # unblock any prior flash loop so the worker can accept the new one
-    time.sleep(0.05)
-    return jsonify(_display_command(cmd, timeout=5))
+    if not _displayd_alive():
+        return jsonify({"ok": False, "error": _DISPLAYD_DOWN_MSG}), 503
+    # stop_sync rides the same /render path (the renderer consumes it off the socketpair
+    # mid-test). It answers only once the flash loop ends, so allow for the daemon's result wait.
+    _displayd_render({"action": "stop_sync"}, timeout=5.0)
+    return jsonify(_displayd_render(cmd, timeout=10.0))
 
 
 @app.route("/api/photodiode_test_stop", methods=["POST"])
 def photodiode_test_stop():
-    """Stop the sync-square flash test (out-of-band stop_sync to the display worker, or a
-    /render stop_sync to displayd)."""
+    """Stop the sync-square flash test (a /render stop_sync to displayd)."""
     if _displayd_alive():
         _displayd_render({"action": "stop_sync"}, timeout=5.0)
-        return jsonify({"ok": True})
-    _stop_sync_worker()
-    return jsonify({"ok": True})
+    return jsonify({"ok": True})     # nothing running is a successful stop
 
 
 @app.route("/api/photodiode_sync_burst", methods=["POST"])

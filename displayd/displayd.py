@@ -71,6 +71,10 @@ ST_FAULT = "FAULT"
 ST_REINIT_DLPC = "REINIT_DLPC"
 ST_MODESET_KICK = "MODESET_KICK"
 ST_RENDERER_RESTART = "RENDERER_RESTART"
+# Deliberately handed the display to an external tool (geometry calibration). The renderer
+# is stopped and DRM is free; the supervisor must not respawn it, and sessions must refuse
+# rather than draw into a display someone else owns. Only /resume leaves this state.
+ST_STANDBY = "STANDBY"
 
 # States in which the DLPC lock was established — only then does an L1 source
 # readback != parallel mean "reverted" (during bringup it just means "not yet").
@@ -361,6 +365,28 @@ class Displayd:
             # until a manual /render sync_burst + external confirmation (the L3
             # correlator arrives in phase 3). /status exposes this honestly.
             return self.status()
+
+    def standby(self):
+        """Release the display to an external DRM client (calib_geo) and stay out of its way.
+
+        Stops the renderer — which drops DRM master — and parks in STANDBY. _stop_renderer
+        clears _renderer_should_run, so the supervisor will not respawn behind the external
+        tool's back; two DRM masters is a black screen and, historically, the reason
+        calibration had to run on a separate X stack at all. L1 keeps polling throughout:
+        the DLPC lives on I2C, not DRM, so the projector stays observable while we are
+        stepped aside. Idempotent."""
+        with self._bringup_lock:
+            self._stop_renderer()
+            self.optics = "unverified"
+            self._optics_ok_streak = self._optics_lost_streak = 0
+            self._set_state(ST_STANDBY, reason="external DRM client")
+            self._event("standby", "display released to an external client")
+            return self.status()
+
+    def resume(self):
+        """Take the display back after an external client is gone: a full re-walk, because
+        the other process did its own modeset and left the DLPC source wherever it liked."""
+        return self.bringup()
 
     def _step_config_ok(self):
         """DPI connector present + our mode listed. Plain presence check — no
@@ -1358,6 +1384,10 @@ class _CtlHandler(BaseHTTPRequestHandler):
                 self._json(200, d.release_lease())
             elif self.path == "/render":
                 self._json(200, d.render_op(body))
+            elif self.path == "/standby":
+                self._json(200, d.standby())
+            elif self.path == "/resume":
+                self._json(200, d.resume())
             elif self.path == "/recover":
                 self._json(200, d.recover(body.get("action")))
             else:

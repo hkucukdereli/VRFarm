@@ -794,6 +794,16 @@ class Leader:
             self._trial_ctx["first_lick_t"] = window_licks[0] if window_licks else float("nan")
             self._trial_ctx["lick_times"] = self._trial_licks[:]            # full record (all phases)
 
+            # ── Command-path latency ── displayd reports the renderer's REAL flip time for
+            # this stimulus on the ack port; the leader already receives it (_note_onset_ack)
+            # but never recorded it, so SHOW -> on-glass could only be inferred by subtracting
+            # a separately-measured flip->photons constant. Read it HERE, at trial end: the ack
+            # lands asynchronously and may still be in flight at the onset decision.
+            # Decomposes display_latency_s: SHOW -> flip is this, flip -> photons is the rest.
+            _ack_t = self._onset_acks.get(trial_num)
+            self._trial_ctx["onset_ack_latency_s"] = (
+                (_ack_t - stim_onset_t) if _ack_t is not None else float("nan"))
+
             # ── Record trial ──
             self._write_trial(stim)
             self._publish_trial_event(stim)
@@ -1214,6 +1224,7 @@ class Leader:
 
     def _publish_trial_event(self, stim: dict):
         ctx = self._trial_ctx
+        _ack_lat = float(ctx.get("onset_ack_latency_s", float("nan")))
         level = ctx.get("level", 0)
         # ctx["level"] is the RESOLVED level (2.0/3.0, never 2.5), so operant = L3.
         is_operant = (level == 3)
@@ -1243,6 +1254,10 @@ class Leader:
             # Onset provenance for the live table: tri-state sync_ok (1/0/-1) + which anchor
             # true_onset_t actually came from.
             "sync_ok": int(ctx.get("sync_ok", -1)),
+            # JSON null, never NaN: json.dumps emits a bare NaN, which the browser's
+            # JSON.parse REJECTS — one missing ack would kill the live event stream.
+            # (The HDF5 column keeps NaN; that is the right sentinel for a float dataset.)
+            "onset_ack_latency_s": (None if _ack_lat != _ack_lat else round(_ack_lat, 6)),
             "onset_source": ctx.get("onset_source", "command"),
             "level": level,
             "adaptive_state": adaptive_state,
@@ -1281,9 +1296,11 @@ class Leader:
         n = sess.get("n_blocks", sess.get("n_trials", 150) // max(bsize, 1)) * bsize
 
         # Core timing (all f8 for full precision)
+        # onset_ack_latency_s = SHOW -> renderer flip (the command path), from displayd's ack.
+        # display_latency_s - onset_ack_latency_s = flip -> photons (the projector pipeline).
         for name in ["iti_start_t", "stim_onset_t", "response_window_t",
                       "outcome_t", "first_lick_t",
-                      "true_onset_t", "display_latency_s"]:
+                      "true_onset_t", "display_latency_s", "onset_ack_latency_s"]:
             f.create_dataset(name, shape=(0,), maxshape=(n,), dtype="f8")
         # Tri-state: 1 confirmed by a photodiode pulse, 0 sync on but no pulse, -1 sync off.
         f.create_dataset("sync_ok", shape=(0,), maxshape=(n,), dtype="i1")
@@ -1327,9 +1344,11 @@ class Leader:
         i = self.trial_num
 
         # Core timing
+        # onset_ack_latency_s = SHOW -> renderer flip (the command path), from displayd's ack.
+        # display_latency_s - onset_ack_latency_s = flip -> photons (the projector pipeline).
         for name in ["iti_start_t", "stim_onset_t", "response_window_t",
                       "outcome_t", "first_lick_t",
-                      "true_onset_t", "display_latency_s"]:
+                      "true_onset_t", "display_latency_s", "onset_ack_latency_s"]:
             f[name].resize(i + 1, axis=0)
             f[name][i] = self._trial_ctx.get(name, float("nan"))
         f["sync_ok"].resize(i + 1, axis=0)

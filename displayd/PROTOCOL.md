@@ -196,6 +196,30 @@ Legacy paths stay intact when the daemon is down (phase 4 deletes them).
   notify path); recovery event after 2 consecutive confirmed. Stim windows: the
   existing per-trial sync path (sync_queue first-pulse) is unchanged and doubles
   as the in-stim heartbeat; the scheduler pauses from SHOW until stim_off.
+- Verdict feedback (pd port :5582, leader -> displayd): every judged heartbeat is
+  reported as {"type":"hb_verdict","seq":k,"confirmed":bool,"t":...}. The daemon owns
+  the display but cannot see its own light, so this is the ONLY way it learns whether
+  its output reaches the diode. displayd streaks these with the same thresholds the
+  leader uses (2 confirmed -> optics "ok", 3 unconfirmed -> optics "lost") and resets
+  to "unverified" whenever the renderer respawns, since a new process's optics are
+  unproven. Fire-and-forget: the leader's own alarm is the authority. Reported in
+  /status.optics ONLY — ST_OPTICS_OK remains unentered until phase 4 revisits the
+  state ladder, so this does not alter bringup or recovery control flow.
+- Display-fault abort (engine/leader.py, session.abort_on_display_fault, default
+  true; needs photodiode sync): evaluated at the END of a trial, never mid-cue.
+  Aborts when abort_after_bad_trials (default 3) consecutive stimuli record
+  sync_ok == 0, or when the heartbeat alarm stands AND this trial's stimulus was
+  unconfirmed. A standing alarm alone is deliberately insufficient — a confirmed
+  stimulus proves light is arriving now. Publishes {"type":"display_abort","trial",
+  "cause","reason","n_bad"} (controller pages Slack immediately), sets metadata
+  end_reason: "display_fault" plus an "abort" block, and session_end carries
+  end_reason so an aborted run never reports as a clean finish.
+- Loss localization: heartbeat_lost carries "cause" from the Teensy's 1 Hz
+  "B <floor> <ceil>" idle line, which reports the analog front end independently of
+  pulse detection — no_telemetry / sensor_dead (B absent >3 s) / ttl_dead (light seen,
+  no TTL edge) / no_light (front end alive, genuinely dark). no_light does NOT claim
+  the projector failed: a covered or misaimed diode is equally dark from here, and
+  only L4 can separate those.
 - Per-trial record: sync_ok becomes tri-state int: 1 confirmed, 0 failed (sync
   enabled, no pulse), -1 unavailable (sync disabled). New per-trial field
   onset_source: "photodiode" | "ack" | "command" — the best available onset

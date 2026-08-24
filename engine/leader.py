@@ -35,6 +35,20 @@ import devices.calibration_probe  # noqa: F401
 import devices.encoder        # noqa: F401 — running-wheel encoder
 
 
+# ── Per-trial photodiode onset window ──
+# The sync square pulses every `photodiode_sync_every_n` FRAMES, so after the stimulus flips
+# the first pulse can be anything up to every_n frames away. A fixed 100 ms budget silently
+# lost most trials at every_n=5 (87 ms at 57.46 Hz, before the flip itself): they recorded
+# sync_ok=0 and fell back to the displayd ack, which keeps the timeline roughly right and so
+# never looked broken. Derive the window from the cadence instead of hardcoding it — waiting
+# longer is free, because the reward-delay phase below is an ABSOLUTE deadline anchored to
+# true_onset_t and absorbs whatever the wait consumed.
+SYNC_FLIP_BUDGET_S = 0.05     # SHOW send -> photons: UDP hop + up to one frame + slop
+SYNC_TIMEOUT_MARGIN_S = 0.03  # jitter headroom
+SYNC_TIMEOUT_MIN_S = 0.10     # never tighter than the historical value
+SYNC_TIMEOUT_MAX_S = 0.30     # and never long enough to crowd reward_delay_s
+
+
 # ── L3 display heartbeat (displayd/PROTOCOL.md "Leader-clocked L3 heartbeats") ──
 # Between stim windows the leader flashes the display's sync square on its OWN clock and
 # expects the photodiode to see it: one closed loop that proves projector + optics + wiring
@@ -50,6 +64,15 @@ HB_CLUSTER_KEEP_S = 2.0       # cluster onsets older than this can never match a
 HB_LOST_N = 3                 # consecutive unconfirmed heartbeats -> alarm
 HB_OK_N = 2                   # consecutive confirmed heartbeats -> recovery
 HB_REALERT_S = 60.0           # re-alert cadence while the alarm persists
+# A lost heartbeat means "the loop is broken", not "the projector is dark" — the display and the
+# whole sensor chain (diode -> amp -> Teensy -> TTL -> GPIO16) fail with the SAME signature, and
+# L1/L2 cannot separate them (an EVM barrel pull back-feeds DLPC logic through the Pi header, so
+# the status bits still claim healthy LEDs while the room is dark). The Teensy's 1 Hz "B
+# <floor> <ceil>" idle line is the discriminator: it reports the analog front end independently
+# of whether any pulse was detected. Absent = the sensor chain died; present-and-dark = the front
+# end is alive and genuinely sees no light; present-and-bright = light is arriving but the digital
+# leg (Teensy OUT pin 16 -> GPIO16) is broken.
+HB_TELEMETRY_STALE_S = 3.0    # B line older than this = Teensy serial is silent
 
 
 class Leader:
@@ -77,7 +100,11 @@ class Leader:
         # Photodiode stim-sync (online onset correction)
         self._sync_queue = queue.Queue()
         self._sync_enabled = False
-        self._sync_timeout_s = 0.1  # max wait for first photodiode edge per trial
+        self._sync_timeout_s = SYNC_TIMEOUT_MIN_S  # resized per session from the sync cadence
+        # Display-fault abort: consecutive stimuli whose onset the photodiode never confirmed,
+        # and the reason the session stopped (None = ran to the end / operator STOP).
+        self._bad_sync_streak = 0
+        self._abort_reason = None
         # Latest displayd/follower stim_onset ack per trial (the display's real flip time) —
         # the onset anchor used when the photodiode didn't win. Capped at 50 entries.
         self._onset_acks = {}
@@ -115,10 +142,17 @@ class Leader:
 
         # Follower addresses
         self._follower_addrs = {}
+        # displayd's pulse-ingest port. The daemon owns the display but has no way to learn
+        # whether its own light ever lands on the diode — the L3 correlator runs here, on the
+        # leader's clock. Without this the ingest socket sits bound and empty and displayd
+        # reports optics "unverified" forever, however many heartbeats it has served.
+        self._displayd_pd_addrs = {}
         for pi in rig_config["pis"]:
             if pi["role"] == "follower":
                 self._follower_addrs[pi["name"]] = (
                     pi["ip"], net["display_port"])
+                self._displayd_pd_addrs[pi["name"]] = (
+                    pi["ip"], net.get("displayd_pd_port", 5582))
 
         # Mac address for events
         self._mac_addr = None  # set when Mac sends first command
@@ -249,6 +283,31 @@ class Leader:
                 return None
             if t >= since_t:
                 return t
+
+    def _compute_sync_timeout(self) -> float:
+        """Per-trial onset window sized to the sync-square cadence (see SYNC_* above). every_n
+        comes from the task (falling back to the device's pulse_every_n_frames — the same
+        precedence the INIT verify burst uses), refresh from the follower's display config.
+        Clamped, so a wrong refresh_hz in the rig yaml degrades the window rather than
+        breaking the trial clock."""
+        stim = self.task.get("stimulus", {})
+        devs = (self.rig or {}).get("devices", {})
+        pd_cfg = devs.get("photodiode", {}) or {}
+        every_n = int(stim.get("photodiode_sync_every_n",
+                               pd_cfg.get("pulse_every_n_frames", 5)) or 1)
+        refresh = float((devs.get("display", {}) or {}).get("refresh_hz", 60) or 60)
+        if refresh <= 0:
+            refresh = 60.0
+        want = SYNC_FLIP_BUDGET_S + (every_n / refresh) + SYNC_TIMEOUT_MARGIN_S
+        timeout = min(SYNC_TIMEOUT_MAX_S, max(SYNC_TIMEOUT_MIN_S, want))
+        if want > SYNC_TIMEOUT_MAX_S:
+            # every_n is too coarse to anchor onsets at this refresh: the clamp will drop
+            # trials to the ack fallback. Say so instead of quietly under-waiting.
+            print(f"[sync] WARNING: every_n={every_n} at {refresh:g} Hz needs "
+                  f"{want * 1000:.0f} ms but the window is capped at "
+                  f"{SYNC_TIMEOUT_MAX_S * 1000:.0f} ms — expect sync_ok=0 on many trials; "
+                  f"lower photodiode_sync_every_n", flush=True)
+        return timeout
 
     def _on_encoder(self, evt: dict):
         """Running-wheel sample: cache the live speed (for future gating) and publish to the Mac."""
@@ -407,7 +466,9 @@ class Leader:
             "photodiode" in self.devices
             and self.task.get("stimulus", {}).get("photodiode_sync_enabled", False))
         if self._sync_enabled:
-            print("Photodiode stim-sync: ON (online onset correction)")
+            self._sync_timeout_s = self._compute_sync_timeout()
+            print("Photodiode stim-sync: ON (online onset correction, "
+                  f"onset window {self._sync_timeout_s * 1000:.0f} ms)")
 
         # ── L3 display heartbeat ── The same photodiode + sync-square loop that anchors stim
         # onsets, run on the leader's clock between stim windows so a dark projector is caught
@@ -462,6 +523,11 @@ class Leader:
         gt_phases = set(sess_cfg.get("global_timeout_phases", []) or [])
         gt_active = gt_n > 0 and bool(gt_phases)
         gt_dry_streak = 0
+        # Display-fault abort: a stimulus nobody can prove was shown is not data, and the whole
+        # point of catching a dark projector in 15 s is wasted if the session then runs for an
+        # hour anyway. Requires photodiode sync (nothing watches the optics without it).
+        abort_on_display = bool(sess_cfg.get("abort_on_display_fault", True))
+        abort_bad_n = max(1, int(sess_cfg.get("abort_after_bad_trials", 3) or 3))
         reward_cfg = self.task.get("reward", {})
         nominal_level = float(reward_cfg.get("level", 1))
         adaptive_state = self.task.get("adaptive", {}).get("initial_state", 0.0)
@@ -744,6 +810,29 @@ class Leader:
                     adaptive_state -= adaptive_cfg.get("step_down", 0.2)
                 adaptive_state = max(0.0, min(1.0, adaptive_state))
 
+            # ── Display-fault abort ── Decided HERE, at the end of the trial, and never mid-cue:
+            # the stimulus and its post-stim window are already over, so stopping costs nothing
+            # and the animal is never cut off mid-presentation. Two independent triggers, both
+            # requiring evidence AT THE CUE that the loop is broken:
+            #   * abort_bad_n consecutive stimuli whose onset the photodiode never confirmed, or
+            #   * the L3 heartbeat alarm standing (>=3 missed heartbeats, i.e. ~15 s dark)
+            #     together with at least one unconfirmed stimulus.
+            # The heartbeat alarm alone is deliberately NOT enough: if this trial's stimulus WAS
+            # optically confirmed then light is reaching the diode right now, whatever the
+            # between-trials flashes did, and killing a working session on a stale alarm is the
+            # worse error.
+            if abort_on_display and self._sync_enabled:
+                ab = self._check_display_fault(trial_num, abort_bad_n)
+                if ab:
+                    self._abort_reason = ab
+                    self._publish({"type": "display_abort", "trial": ab["trial"],
+                                   "cause": ab["cause"], "reason": ab["reason"],
+                                   "n_bad": ab["n_bad"], "t": time.time()})
+                    print(f"Display fault: {ab['reason']} — aborting session at "
+                          f"trial {trial_num}.", flush=True)
+                    self.running = False
+                    break
+
             # ── Global timeout: abort if the mouse is dry for gt_n consecutive trials ──
             # A trial is "dry" when it produced no licks in ANY of the selected phases.
             # (iti_lick_count is the ITI that ran immediately before this trial.)
@@ -795,9 +884,20 @@ class Leader:
                     self.hdf5_file.create_dataset(ds_name, data=arr)
             self.hdf5_file.close()
 
-        self._publish({"type": "session_end", "n_completed": n_completed,
-                       "n_planned": n_planned, "t": time.time()})
-        print(f"Session complete ({n_completed}/{n_planned} trials). Data: {data_dir}")
+        # Why the session ended, recorded rather than inferred: a run cut short by a dark
+        # projector must not read as a clean early finish in the metadata months later.
+        end_reason = "display_fault" if self._abort_reason else "completed"
+        end_ev = {"type": "session_end", "n_completed": n_completed,
+                  "n_planned": n_planned, "t": time.time(), "end_reason": end_reason}
+        if self._abort_reason:
+            end_ev["abort"] = self._abort_reason
+        self._publish(end_ev)
+        if self._abort_reason:
+            print(f"Session ABORTED — display fault ({self._abort_reason['cause']}) at trial "
+                  f"{self._abort_reason['trial']} after {n_completed}/{n_planned} trials. "
+                  f"Data: {data_dir}")
+        else:
+            print(f"Session complete ({n_completed}/{n_planned} trials). Data: {data_dir}")
 
         # Save metadata
         meta = {
@@ -815,7 +915,10 @@ class Leader:
             # Data provenance: which devices' detailed data was recorded this session.
             "saved_devices": sorted(n for n in self.devices if n not in self._skip_save),
             "skipped_devices": sorted(self._skip_save),
+            "end_reason": end_reason,
         }
+        if self._abort_reason:
+            meta["abort"] = self._abort_reason
         meta_path = data_dir / "metadata.yaml"
         with open(meta_path, "w") as f:
             yaml.dump(meta, f, default_flow_style=False)
@@ -869,6 +972,7 @@ class Leader:
     def _hb_judge(self, hb: dict, confirmed: bool, now: float):
         """Streak bookkeeping: HB_LOST_N consecutive misses raise the alarm (edge-triggered,
         re-alerted every HB_REALERT_S while it persists), HB_OK_N consecutive hits clear it."""
+        self._report_hb_verdict(hb.get("seq"), confirmed)
         if confirmed:
             self._hb_lost_streak = 0
             self._hb_ok_streak += 1
@@ -890,12 +994,65 @@ class Leader:
             return
         self._hb_alarm_on = True
         self._hb_last_alarm_t = now
-        msg = ("no photodiode pulse for %d consecutive display heartbeats (%gs apart) — "
-               "check projector, optics and photodiode wiring"
-               % (self._hb_lost_streak, self._hb_period_s))
-        self._publish_display_health("heartbeat_lost", msg, seq=hb["seq"],
+        cause, detail = self._hb_diagnose()
+        msg = ("no photodiode pulse for %d consecutive display heartbeats (%gs apart) — %s"
+               % (self._hb_lost_streak, self._hb_period_s, detail))
+        self._publish_display_health("heartbeat_lost", msg, seq=hb["seq"], cause=cause,
                                      n_missed=self._hb_lost_streak)
         print(f"[heartbeat] ALARM: {msg}", flush=True)
+
+    def _check_display_fault(self, trial_num, abort_bad_n):
+        """Fold this trial's onset result into the unconfirmed-stimulus streak and decide
+        whether the display loop is broken enough to end the session. Returns the abort record
+        (also stored as _abort_reason by the caller) or None to keep running. Call ONCE per
+        trial, after the cue is over — it mutates the streak."""
+        if int(self._trial_ctx.get("sync_ok", -1)) == 0:
+            self._bad_sync_streak += 1
+        else:
+            self._bad_sync_streak = 0
+        if not (self._bad_sync_streak >= abort_bad_n
+                or (self._hb_alarm_on and self._bad_sync_streak > 0)):
+            return None
+        cause, detail = self._hb_diagnose()
+        trigger = ("display heartbeat lost and stimulus unconfirmed" if self._hb_alarm_on
+                   else "%d consecutive stimuli unconfirmed" % self._bad_sync_streak)
+        return {"cause": cause, "trigger": trigger, "detail": detail,
+                "reason": "%s — %s" % (trigger, detail),
+                "trial": int(trial_num), "n_bad": int(self._bad_sync_streak)}
+
+    def _hb_diagnose(self):
+        """Localize a lost heartbeat using the photodiode's own analog telemetry, which is
+        independent of pulse detection (see HB_TELEMETRY_STALE_S). Returns (cause, detail):
+        a machine-readable cause for the notifier and one human sentence naming the suspect
+        instead of the whole chain. `no_light` deliberately does NOT claim the projector is
+        dark — a covered or knocked-out-of-alignment diode is equally dark from here, and only
+        L4 (camera arbiter) can tell those apart; say what is known, not what is guessed."""
+        dev = self.devices.get("photodiode")
+        if dev is None or not hasattr(dev, "get_v_status"):
+            return "unknown", "no photodiode telemetry — check projector, optics and wiring"
+        try:
+            v = dev.get_v_status()
+        except Exception:  # noqa: BLE001 — an alarm must never be lost to a telemetry error
+            return "unknown", "photodiode telemetry unreadable — check projector and wiring"
+        if not v.get("available"):
+            return ("no_telemetry",
+                    "Teensy serial not open — cannot tell a dark display from a dead sensor; "
+                    "check projector, optics and wiring")
+        base = v.get("last_baseline")
+        if not base or (time.time() - base.get("t", 0)) > HB_TELEMETRY_STALE_S:
+            return ("sensor_dead",
+                    "Teensy serial has gone silent — SENSOR CHAIN fault (Teensy or USB), "
+                    "the display itself may be fine")
+        ceil_v = base.get("ceil_V")
+        v_low = v.get("v_low") or 0.3
+        if ceil_v is not None and ceil_v >= v_low:
+            return ("ttl_dead",
+                    "photodiode sees light (ceil %.3f V) but no TTL pulses arrive — DIGITAL leg "
+                    "fault (Teensy OUT pin 16 -> GPIO16), the display is showing" % ceil_v)
+        return ("no_light",
+                "photodiode is alive and sees darkness (ceil %.3f V) — NO LIGHT reaching the "
+                "diode: projector dark, or the diode is covered/misaimed"
+                % (ceil_v if ceil_v is not None else float("nan")))
 
     def _publish_display_health(self, kind: str, msg: str, level: str = "alarm", **extra):
         """Publish in the SAME envelope displayd sends on the ack port, so the controller's
@@ -1004,6 +1161,20 @@ class Leader:
         data = json.dumps(msg).encode()
         for addr in self._follower_addrs.values():
             self._event_sock.sendto(data, addr)
+
+    def _report_hb_verdict(self, seq, confirmed: bool):
+        """Tell displayd how one of its heartbeat flashes actually landed, so the daemon can
+        report optics honestly instead of a permanent 'unverified'. Fire-and-forget: this is
+        telemetry, and the leader's own alarm is the authority either way."""
+        if not self._displayd_pd_addrs:
+            return
+        data = json.dumps({"type": "hb_verdict", "seq": seq,
+                           "confirmed": bool(confirmed), "t": time.time()}).encode()
+        for addr in self._displayd_pd_addrs.values():
+            try:
+                self._event_sock.sendto(data, addr)
+            except OSError:
+                pass
 
     def _sync_burst_follower(self, duration_s, every_n, dev_config):
         """Photodiode-verify flash trigger (experiment path): ask the follower to flash the red sync

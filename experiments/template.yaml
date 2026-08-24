@@ -43,6 +43,12 @@ session:
   # randomize_blocks: true  # optional, shuffles all trials
   global_timeout_trials: 0            # abort session if dry for N consecutive trials (0 = off)
   global_timeout_phases: []           # phases checked for licks: prestim/stim/poststim/iti
+  # Display-fault abort (needs stimulus.photodiode_sync_enabled — without it nothing watches
+  # the optics). Checked at the END of a trial, never mid-cue. Aborts when the photodiode
+  # fails to confirm N consecutive stimuli, or when the L3 heartbeat alarm is standing and a
+  # stimulus goes unconfirmed. Slack says which of display / sensor chain / TTL leg broke.
+  abort_on_display_fault: true
+  abort_after_bad_trials: 3
 
 # ── Adaptive (level 2.5 only) ──
 adaptive:

@@ -53,6 +53,10 @@ DEFAULT_DISPLAY_PORT = 5575      # leader engine session channel (bind 0.0.0.0)
 DEFAULT_ACK_PORT = 5573          # displayd -> leader (ACK/ONSET/display_health)
 DEFAULT_CTL_PORT = 5581          # control REST, 127.0.0.1 ONLY
 DEFAULT_PD_PORT = 5582           # leader photodiode -> displayd pulse ingest
+# Optics verdict streaks — deliberately the same thresholds as the leader's HB_OK_N / HB_LOST_N
+# so the daemon's reported optics and the leader's heartbeat alarm never disagree.
+OPTICS_OK_N = 2
+OPTICS_LOST_N = 3
 
 # Lifecycle states exactly as reported in /status (PROTOCOL.md).
 ST_BOOT = "BOOT"
@@ -189,8 +193,14 @@ class Displayd:
         self.state = ST_BOOT
         self.state_since = time.time()
         self.fault_reason = None
-        self.optics = "unverified"       # phase 2: the L3 correlator is phase 3;
-                                         # never claim "ok" without external confirmation
+        self.optics = "unverified"       # "ok"/"lost" once the leader's L3 correlator reports
+                                         # (hb_verdict on the pd port); never claim "ok" without
+                                         # that external confirmation — the daemon cannot see
+                                         # its own light. NOTE: this reports optics, it does not
+                                         # drive the state ladder; ST_OPTICS_OK stays unentered
+                                         # until the lifecycle is revisited in phase 4.
+        self._optics_ok_streak = 0
+        self._optics_lost_streak = 0
         self._bringup_lock = threading.RLock()   # serializes bringup/recover/auto-repair
         self._stop = threading.Event()
 
@@ -729,6 +739,10 @@ class Displayd:
             # Child died while it should be running.
             reason = self._renderer_fatal or ("exit rc=%s" % rc)
             self._alarm("renderer_died", "renderer died (%s)" % reason)
+            # A fresh renderer's optics are unproven: nothing has confirmed that THIS process's
+            # output reaches the diode. Carrying "ok" across a respawn would be a stale claim.
+            self.optics = "unverified"
+            self._optics_ok_streak = self._optics_lost_streak = 0
             if not self._bringup_lock.acquire(blocking=False):
                 continue   # a bringup/recover already owns the machinery
             try:
@@ -977,9 +991,31 @@ class Displayd:
             if isinstance(msg, dict):
                 entry = {"t_recv": now}
                 entry.update(msg)
+                if msg.get("type") == "hb_verdict":
+                    self._note_hb_verdict(msg)
             else:
                 entry = {"t_recv": now, "raw": data.decode("utf-8", "replace")}
             self._pd_buf.append(entry)
+
+    def _note_hb_verdict(self, msg):
+        """One heartbeat verdict from the leader's L3 correlator. Streak thresholds match the
+        leader's own (HB_OK_N / HB_LOST_N) so /status and the leader's alarm agree rather than
+        telling the operator two different stories."""
+        confirmed = bool(msg.get("confirmed"))
+        if confirmed:
+            self._optics_lost_streak = 0
+            self._optics_ok_streak += 1
+            if self._optics_ok_streak >= OPTICS_OK_N and self.optics != "ok":
+                self.optics = "ok"
+                self._event("optics", "optics confirmed by photodiode (L3)")
+        else:
+            self._optics_ok_streak = 0
+            self._optics_lost_streak += 1
+            if self._optics_lost_streak >= OPTICS_LOST_N and self.optics != "lost":
+                self.optics = "lost"
+                # No _alarm here: the leader raises heartbeat_lost off the same evidence and
+                # already pages. Two alarms for one fault is how a pager gets ignored.
+                self._event("optics", "optics NOT confirmed by photodiode (L3)")
 
     # ── L1 poller (DLPC health, 1 Hz) ──
 

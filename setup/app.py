@@ -897,10 +897,10 @@ def _displayd_active(target) -> bool:
 
 
 _CALIB_KMS_MSG = (
-    "displayd (KMS) owns the display on this Pi. Geometry calibration still runs under X, "
-    "which would seize DRM master from displayd's renderer and black out the rig. Stop the "
-    "daemon first (sudo systemctl stop displayd), calibrate, then restart it and re-run "
-    "bringup — or wait for calib_geo to be ported to kmsdrm.")
+    "displayd (KMS) owns the display on this Pi — refusing to start an X server, which "
+    "would seize DRM master from displayd's renderer and black out the rig. Under KMS the "
+    "calibration scripts hand the display over themselves (cal_start.sh POSTs "
+    ":5581/standby, cal_stop.sh /resume); no X re-init is needed or wanted.")
 
 
 def _reinit_projector(target):
@@ -956,9 +956,6 @@ def api_start_calibration():
     ip = target_pi["ip"]
     target = f"{user}@{ip}"
 
-    if _displayd_active(target):
-        return jsonify({"ok": False, "error": _CALIB_KMS_MSG}), 409
-
     name = (request.json or {}).get("geometry") or "rig_geometry.yaml"
     geo_data = (request.json or {}).get("geometry_data")   # live Display-card params
     geo_file = (GEO_DIR / Path(name).name).resolve()
@@ -1003,11 +1000,15 @@ def api_start_calibration():
                 _scp(str(geo_file), f"{target}:~/rig/calibration/rig_geometry.yaml")
                 steps.append(f"Seeded rig_geometry.yaml from {geo_file.name}")
 
-        # Force a projector re-init so calib_geo opens on a fresh display with the DLPC
-        # parallel input correctly configured (requested: reinit on Calibrate/Stop). If it
-        # fails it's non-fatal — cal_start.sh also inits the projector when X is down.
-        ok, msg = _reinit_projector(target)
-        steps.append(f"Projector re-init: {msg}" if ok else f"WARN projector re-init: {msg}")
+        # Legacy X rigs: force a projector re-init so calib_geo opens on a fresh display with
+        # the DLPC parallel input correctly configured. Non-fatal — cal_start.sh also inits
+        # the projector when X is down. Under displayd there is no X to re-init and the
+        # handover is cal_start.sh's /standby call, so this step is skipped entirely.
+        if _displayd_active(target):
+            steps.append("KMS: cal_start.sh will put displayd in STANDBY (no X re-init)")
+        else:
+            ok, msg = _reinit_projector(target)
+            steps.append(f"Projector re-init: {msg}" if ok else f"WARN projector re-init: {msg}")
 
         out = _ssh(target, "bash ~/rig/calibration/cal_start.sh geo", timeout=45)
         steps.append((out.strip().splitlines() or ["started"])[0])
@@ -1036,9 +1037,13 @@ def api_stop_calibration():
         note = _drive_calibration_probe(False)  # TTL LOW when calibration stops
         if note:
             steps.append(note)
-        # Re-init the projector so the normal display comes back cleanly (requested).
-        ok, msg = _reinit_projector(target)
-        steps.append(f"Projector re-init: {msg}" if ok else f"WARN projector re-init: {msg}")
+        # Bring the normal display back. Under displayd, cal_stop.sh already POSTed /resume
+        # (a full re-walk) — re-initing here would only start an X server on top of it.
+        if _displayd_active(target):
+            steps.append("KMS: cal_stop.sh returned the display to displayd (/resume)")
+        else:
+            ok, msg = _reinit_projector(target)
+            steps.append(f"Projector re-init: {msg}" if ok else f"WARN projector re-init: {msg}")
         return jsonify({"ok": True, "msg": (out.strip() or "stopped"), "steps": steps})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "steps": steps})

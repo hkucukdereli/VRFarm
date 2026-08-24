@@ -45,14 +45,10 @@ _LEADER = [
 
 _FOLLOWER = [
     ("engine/__init__.py", "engine/__init__.py"),
-    ("engine/follower.py", "engine/follower.py"),
-    ("engine/display_worker.py", "engine/display_worker.py"),   # setup-time display (out-of-proc)
-    # The display Pi (follower) also gets projector bring-up + the calibration tools:
-    # start_projector.sh -> ~/rig/; the rest -> ~/rig/calibration/ (same place the
-    # Calibrate button uses). NOTE: start_projector.sh calls ~/dlp/init_parallel_mode.py.
-    # The dlp/ SDK is vendored in this repo but pushed to ~/dlp/ at INSTALL, not Deploy
-    # (it's static) — it lives outside ~/rig so it rides scp, not /api/upload.
-    ("display_calibration/start_projector.sh", "start_projector.sh"),
+    # Phase 4: engine/follower.py, engine/display_worker.py and start_projector.sh are gone.
+    # displayd owns the display; there is no X server and no second process to draw with.
+    # The calibration tools below now run on kmsdrm (cal_start.sh asks displayd to stand
+    # aside first), so they no longer need a projector bring-up script.
     ("display_calibration/vsync_probe.py", "calibration/vsync_probe.py"),
     ("display_calibration/calib_geo.py", "calibration/calib_geo.py"),
     ("display_calibration/cal_start.sh", "calibration/cal_start.sh"),

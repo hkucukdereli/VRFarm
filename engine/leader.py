@@ -1179,7 +1179,7 @@ class Leader:
     def _sync_burst_follower(self, duration_s, every_n, dev_config):
         """Photodiode-verify flash trigger (experiment path): ask the follower to flash the red sync
         square for `duration_s` and return the emitted flash count. Request/reply on a short-lived
-        socket; retries until the follower answers (a reply means follower.py has opened its display),
+        socket; retries until the follower answers (a reply means displayd's renderer is up),
         so the verify waits for display init. Raises if the display never comes up within the wait."""
         body = {"cmd": "SYNC_TEST", "every_n": int(every_n), "duration_s": float(duration_s)}
         for k in ("sync_corner", "sync_size_px", "sync_brightness"):

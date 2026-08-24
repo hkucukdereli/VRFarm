@@ -16,7 +16,7 @@ Calibration has three independent parts that can be done separately:
 | **Luminance (intensity) correction** | Equalizes delivered luminance across screen locations | If bulb ages, screen is replaced, or geometry changes |
 | **Reward valve** | Maps pulse duration (ms) to dispensed volume (µL) | If the valve, tubing, or reservoir head changes |
 
-The geometric warp and the luminance correction are both stored in `warp_map.npz` and referenced by every experiment. The reward calibration is a small ms→µL table stored per-rig in the rig JSON.
+The geometric warp and the luminance correction are both stored in `warp_map.npz` and referenced by every experiment. The reward calibration is a small ms→µL table stored per-rig in the rig YAML.
 
 Everything is driven from the **setup UI** (`setup/app.py`, localhost:4999): the display card (RENDERING / TESTS / **CALIBRATION** / GEOMETRY sub-sections) and the reward card. The command-line tools still exist for manual runs.
 
@@ -38,13 +38,16 @@ The warp is **ray-traced on the controller** (Mac/Ubuntu, the miniforge `vrfarm`
 
 - Projector is mounted in its final rear position and warmed up
 - Screen and mouse platform are in their final positions
-- Projector X is up on the follower (`~/rig/start_projector.sh`)
+- `displayd` is running on the follower and healthy (`curl :5581/status` → `RENDERER_UP`).
+  There is no X server: `cal_start.sh` asks displayd to stand aside (POST `:5581/standby`)
+  and `cal_stop.sh` gives the display back (POST `/resume`). calib_geo runs on kmsdrm under
+  the **system** `/usr/bin/python3` — the conda env's SDL has no kmsdrm backend.
 
 ### Step 1 — Calibrate the geometry (landmark registration)
 
 Geometry is no longer hand-tuned from abstract stretch factors. The **`calib_geo.py`** landmark tool registers the projected grid to physical reality and back-solves the geometry.
 
-In the setup UI, display card → **CALIBRATION → "Calibrate"**. This re-inits the projector, deploys the calibration tools to the display Pi, launches `calib_geo`, and opens its live sliders at `http://<display-pi>:5091` (`setup/app.py:api_start_calibration`; a `calibration_probe`, if configured, is latched TTL HIGH while calibrating).
+In the setup UI, display card → **CALIBRATION → "Calibrate"**. This deploys the calibration tools to the display Pi, has displayd release the display, launches `calib_geo`, and opens its live sliders at `http://<display-pi>:5091` (`setup/app.py:api_start_calibration`; a `calibration_probe`, if configured, is latched TTL HIGH while calibrating).
 
 Register these landmarks against the physical screen (`display_calibration/calib_geo.py`):
 
@@ -85,7 +88,7 @@ The console prints **visible-screen coverage** (% of pixels the warp fills); ver
 Run on the follower with the projector on (`display_calibration/validate_calibration_pygame.py` — pygame, since the follower has no PsychoPy; the old `validate_calibration.py` used PsychoPy and never ran on the follower):
 
 ```bash
-DISPLAY=:0 ~/miniforge3/envs/rig/bin/python validate_calibration_pygame.py \
+/usr/bin/python3 validate_calibration_pygame.py \
     --warp ~/rig/calibration/warp_map.npz [--flip-h] [--flip-v]
 ```
 
@@ -256,7 +259,7 @@ display_calibration/                 (on the controller; deployed to ~/rig/calib
 └── warp_map_validation.png         # Last --validate plot
 ```
 
-Reward calibration is **not** a file here — it lives in the rig JSON under `devices.reward.calibration`.
+Reward calibration is **not** a file here — it lives in the rig YAML under `devices.reward.calibration`.
 
 ---
 
@@ -286,7 +289,7 @@ python compute_warp_map.py --validate                       # + validation plot
 python compute_warp_map.py --geo rig_geometry.yaml --lum-mode theoretical
 
 # On-projector visual validation (on the follower, projector X up):
-DISPLAY=:0 ~/miniforge3/envs/rig/bin/python validate_calibration_pygame.py \
+/usr/bin/python3 validate_calibration_pygame.py \
     --warp ~/rig/calibration/warp_map.npz [--flip-h] [--flip-v]
 
 # ── Luminance (intensity): PREFERRED path is the setup UI ───────────────────────
@@ -296,8 +299,10 @@ DISPLAY=:0 ~/miniforge3/envs/rig/bin/python validate_calibration_pygame.py \
 # Rebuild the warp with a chosen luminance mode (what the UI does under the hood):
 python compute_warp_map.py --lum-mode empirical             # or theoretical / none
 
-# Legacy CLI (on the follower): measure with a photometer, then fit:
-DISPLAY=:0 python display_test_patches.py
+# Legacy CLI: measure with a photometer, then fit. NOTE display_test_patches.py is a
+# PsychoPy script and PsychoPy is not installed on the follower (and would need X) — it is
+# kept for reference only; use the setup-UI Intensity Cal flow above.
+python display_test_patches.py
 python fit_luminance_correction.py [luminance_measurements_YYYY-MM-DD.yaml]
 
 # ── Reward valve: setup UI → reward card → editable ms/µL table → "Save Calibration"

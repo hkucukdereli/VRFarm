@@ -1202,12 +1202,21 @@ def transfer():
 
 @app.route("/api/state")
 def get_state():
-    """Current app state for UI polling."""
+    """Current app state for UI polling — and, at page load, for resync.
+
+    The browser holds `phase` in a JS variable and nothing ever read it back, so a refresh
+    (or a second tab) showed 'setup' while the leader was mid-session: no trial table, no
+    alarm feed, STOP greyed out, and the operator with no indication the rig was still
+    running. rig/task/session are reported so the page can say WHAT is loaded, not just
+    that something is."""
     return jsonify({
         "phase": state["phase"],
         "deployed": state["deployed"],
         "session_id": state["session_id"],
         "n_trials": len(_trials),
+        "rig": Path(state["rig_path"]).stem if state.get("rig_path") else None,
+        "task": Path(state["task_path"]).stem if state.get("task_path") else None,
+        "subject": (state.get("session") or {}).get("subject_id"),
     })
 
 

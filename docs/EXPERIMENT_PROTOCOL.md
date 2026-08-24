@@ -17,11 +17,12 @@ Leader (engine/leader.py)
   - Imperative trial loop + all GPIO devices (lick, reward, camera, photodiode)
   → UDP :5575 — display commands to Follower
 
-Follower (engine/follower.py)
-  - pygame display, renders from pre-generated stim NPZ
+Follower (displayd)
+  - KMS daemon; renderer child is sole DRM master, draws from the pre-generated stim NPZ
+  → UDP :5573 — stim_onset / hb_flash acks and display_health back to the Leader
 ```
 
-Ports are set in the rig config (`rigs/cheese.yaml`, `network:` block). Each trial
+Ports are set in the rig config (`rigs/cheddar.yaml`, `network:` block). Each trial
 runs the imperative loop in `engine/leader.py`:
 **ITI → pre-stim → stim onset → response delay → response window → post-stim → outcome.**
 All timing synchronized via NTP (chrony). Data is saved locally on the Leader Pi and
@@ -378,8 +379,9 @@ Lick-to-reward is on the same Pi (Leader), so latency is <1ms (no network hop).
 
 **Display not showing stimulus:**
 - Check the projector is on and connected to the follower
-- Run the projector startup sequence: `~/rig/start_projector.sh`
-- Check the Follower process: `curl http://192.168.10.102:5080/api/status`
+- Check displayd: `ssh <follower> curl -s :5581/status` — expect `RENDERER_UP` and `optics: ok`
+- Re-walk bring-up if not: `curl -sX POST http://127.0.0.1:5581/bringup` on the follower
+- Check pi_api: `curl http://192.168.10.102:5080/api/status`
 
 **Video has dropped frames / no file:**
 - Check the SSD is mounted: `df -h` on the leader, and that `data.video_dir` points to it

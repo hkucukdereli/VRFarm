@@ -17,7 +17,7 @@ diode over the sync patch.
 |------|--------------|
 | `sync_square_flash.py` | Flashes the red sync square (matches `display._draw_sync_square`): steady or per-frame pulse, single bottom-centre patch or a bottom-row sweep, colour compare. Photodiode bring-up + mounting-spot sweep. |
 | `dlp_color_test.py`    | Pushes full-frame / split solid colours (R/G/B/dark, left-right splits) — DLP colour-wheel / brightness-uniformity check. |
-| `run_sync_flash.sh`    | scp `sync_square_flash.py` to mozzarella and run it on `DISPLAY=:0` (ensures the projector X server is up). Args pass straight through. |
+| `run_sync_flash.sh`    | scp `sync_square_flash.py` to mozzarella and run it on kmsdrm (put displayd in STANDBY first: `curl -sX POST :5581/standby`). Args pass straight through. |
 
 ## sync_square_flash.py
 
@@ -56,7 +56,7 @@ cd display_diagnostics
 Or directly on mozzarella:
 
 ```bash
-SDL_AUDIODRIVER=dummy DISPLAY=:0 ~/miniforge3/envs/rig/bin/python sync_square_flash.py
+SDL_AUDIODRIVER=dummy /usr/bin/python3 sync_square_flash.py
 ```
 
 `ESC` / `q` / `Ctrl-C` quits.
@@ -76,7 +76,7 @@ Default: full R, G, B, dark (1 s each), then half-R, half-G, half-B. Use it to e
 colour-wheel behaviour and brightness uniformity.
 
 ```bash
-SDL_AUDIODRIVER=dummy DISPLAY=:0 ~/miniforge3/envs/rig/bin/python dlp_color_test.py
+SDL_AUDIODRIVER=dummy /usr/bin/python3 dlp_color_test.py
 ... dlp_color_test.py --seq "red:1s | red/black:1s"   # full then split
 ... dlp_color_test.py --cycles 20                     # stop after 20 loops
 ```

@@ -22,7 +22,7 @@ Timing modes:
                     vsync-locked, patch ON every Nth frame during the stim.
 
 Run on mozzarella (projector X must be up — see start_projector.sh), or use run_sync_flash.sh:
-  SDL_AUDIODRIVER=dummy DISPLAY=:0 ~/miniforge3/envs/rig/bin/python sync_square_flash.py
+  SDL_AUDIODRIVER=dummy /usr/bin/python3 sync_square_flash.py
   ...sync_square_flash.py --row 7              # bottom-row position sweep
   ...sync_square_flash.py --row 7 --pulse 5    # sweep with the real per-frame cadence
   ...sync_square_flash.py --color white        # compare red vs white edge on the scope
@@ -36,6 +36,17 @@ the color wheel. If an edge looks weak/inverted, try --color white and compare. 
 comparison is the point of this test.
 """
 
+import os
+
+# KMS, no X. Pinned before any pygame import (pygame is imported lazily below, so module
+# scope is early enough). MUST run on the SYSTEM /usr/bin/python3 — the conda `rig` env's
+# SDL has no kmsdrm backend and silently falls back to a null driver that renders nothing.
+# displayd owns DRM: ask it to stand aside first, and give it back afterwards:
+#   curl -sX POST http://127.0.0.1:5581/standby   ...   curl -sX POST :5581/resume
+os.environ["SDL_VIDEODRIVER"] = "kmsdrm"
+os.environ["SDL_HINT_NO_SIGNAL_HANDLERS"] = "1"
+os.environ["SDL_NO_SIGNAL_HANDLERS"] = "1"
+os.environ.pop("DISPLAY", None)
 import argparse
 import time
 

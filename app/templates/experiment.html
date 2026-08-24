@@ -2482,8 +2482,39 @@ document.getElementById('experiment-subsections')
     log('Parameter changed after Deploy — re-Deploy before GO.');
   });
 
+// The page keeps `phase` in a JS variable and never used to read the server's, so a refresh
+// mid-session dropped the operator to 'setup' while the leader kept running — no live feed,
+// no alarms, STOP greyed out, and nothing on screen saying the rig was still going.
+//
+// A running session is RESTORED (phase + SSE) so STOP and the alarm feed work again; history
+// from before the reload is gone and we say so rather than showing a misleadingly empty table.
+// 'deployed' is deliberately NOT restored: that would light GO while this tab's forms are
+// still empty, and starting a session whose parameters you cannot see is worse than
+// re-loading the rig and task.
+async function resyncFromServer() {
+  let s;
+  try {
+    s = await (await fetch('/api/state')).json();
+  } catch (e) {
+    return;                       // server down — the page is inert anyway
+  }
+  if (!s || !s.phase || s.phase === 'setup') return;
+  const what = [s.rig && `rig ${s.rig}`, s.task && `task ${s.task}`,
+                s.session_id].filter(Boolean).join(', ');
+  if (s.phase === 'running') {
+    setPhase('running');
+    startSSE();
+    log(`Reconnected to a session already running on the server (${what}). Live events and ` +
+        `STOP are active; trials from before this reload are not shown.`, 'warning');
+  } else {
+    log(`Server is at '${s.phase}' (${what || 'nothing loaded'}). Load the rig and task in ` +
+        `this tab to continue.`);
+  }
+}
+
 updateButtons();
 clearAllCanvases();
+resyncFromServer();
 </script>
 </body>
 </html>

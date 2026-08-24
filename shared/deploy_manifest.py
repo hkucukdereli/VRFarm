@@ -5,8 +5,8 @@ The single source of truth for which code files get deployed to a Pi's ~/rig.
 Consumed by BOTH the setup UI (Install over scp, Deploy over REST) and the
 experiment UI (Deploy step 0) — keep it that way: the two lists used to live
 separately in setup/app.py and app/app.py and had already diverged (the
-experiment UI never shipped the calibration tools or start_projector.sh),
-which is how a Pi ends up running mixed-generation display code.
+experiment UI never shipped the calibration tools), which is how a Pi ends
+up running mixed-generation display code.
 """
 
 from __future__ import annotations

@@ -11,11 +11,22 @@ the left. Numbered lines every `--spacing` px (default 100; bold every 5th). The
 frame is flipped as one unit (--flip-v on by default to cancel the projector's vertical
 inversion) so the numbers read upright with 0 at the physical top-left.
 
-Run on mozzarella:
-  DISPLAY=:0 ~/miniforge3/envs/rig/bin/python panel_grid.py [--spacing 100] [--flip-h]
+Run on the display Pi (see the SDL note below):
+  /usr/bin/python3 panel_grid.py [--spacing 100] [--flip-h]
 
 Headless-friendly: --duration N self-exits; SIGTERM/Q/ESC quit.
 """
+import os
+
+# KMS, no X. Pinned before any pygame import (pygame is imported lazily inside run(), so
+# module scope is early enough) — and this MUST run on the SYSTEM /usr/bin/python3: the
+# conda `rig` env's SDL has no kmsdrm backend and silently falls back to a null driver that
+# renders nothing. displayd owns DRM, so ask it to stand aside first:
+#   curl -sX POST http://127.0.0.1:5581/standby   (cal_start.sh does this for you)
+os.environ["SDL_VIDEODRIVER"] = "kmsdrm"
+os.environ["SDL_HINT_NO_SIGNAL_HANDLERS"] = "1"
+os.environ["SDL_NO_SIGNAL_HANDLERS"] = "1"
+os.environ.pop("DISPLAY", None)
 import argparse
 import signal
 import time

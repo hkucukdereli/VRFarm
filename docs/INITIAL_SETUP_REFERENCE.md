@@ -55,14 +55,15 @@ and `lgpio` live on the Pis, not here.
 ```
 ~/VRFarm/
 ├── experiments/*.yaml                 <- task/paradigm configs (stimulus/reward/session/adaptive)
-├── rigs/cheese.yaml                    <- rig hardware config (pins, cal, roles, IPs)
+├── rigs/cheddar.yaml                   <- rig hardware config (pins, cal, roles, IPs)
 ├── devices/                            <- device abstraction layer (one file per device)
-├── engine/                             <- trial loop: leader.py / follower.py
+├── engine/                             <- trial loop: leader.py
+├── displayd/                           <- KMS display daemon + renderer child (follower)
 ├── app/app.py                          <- experiment UI (localhost:5000)
 ├── setup/app.py                        <- rig setup UI (localhost:4999)
 ├── pi_api/api.py                       <- Pi REST API (deployed to each Pi)
 ├── shared/                             <- config loaders, stim generator, consolidate
-├── display_calibration/                <- projector geometry + warp scripts, start_projector.sh
+├── display_calibration/                <- projector geometry + warp scripts (kmsdrm)
 ├── data/                               <- transferred session data (auto-created; $VRFARM_DATA_DIR override)
 └── docs/                               <- documentation
 ```
@@ -297,28 +298,31 @@ EndSection
 EOF
 ```
 
-### Projector startup (before each display session)
+### Projector startup
 
-The DLP projector connects via DPI GPIO. Bring-up is `~/rig/start_projector.sh`
-(deployed by the setup UI, or triggered over REST via `/api/init_projector` — the setup
-UI's **Init Devices** and the Display card's **Reinit** button both call it). The script:
+The DLP projector connects via DPI GPIO. Under full KMS there is **no startup script and no
+X server**: `displayd.service` brings the projector up at boot and keeps it up, walking
+BOOT → CONFIG_OK → DLPC_ALIVE → VIDEO_UP → DLPC_LOCKED → CURTAIN_DOWN → RENDERER_UP. Force a
+re-walk with `curl -sX POST http://127.0.0.1:5581/bringup` on the follower; the setup UI's
+**Init Devices** and the Display card's **Reinit** both route there. Historically this was
+`start_projector.sh`, which also started X — deleted in phase 4. What bring-up does:
 
-```bash
-# 1. Set GPIO 0-21 to ALT2 (DPI parallel video output)
-for i in $(seq 0 21); do pinctrl set $i a2; done
-# 2. Enable video buffer (GPIO 25 high)
-pinctrl set 25 op dh
-# 3. Initialize DLPC3436 for external parallel video input
-source ~/miniforge3/etc/profile.d/conda.sh && conda activate rig
-cd ~/dlp && python3 init_parallel_mode.py
-# 4. Restart X11
-pkill -f 'Xorg :0' 2>/dev/null || true; sleep 1
-sudo X :0 -ac -s off -dpms > /tmp/xorg.log 2>&1 &
-sleep 3
-export DISPLAY=:0
-```
+1. **CONFIG_OK** — the `DPI-1` connector exists and our 1920x1080@57.46 mode is listed.
+   Under full KMS the pin muxing is the kernel's job (`vc4-kms-dpi-generic` in
+   `config.txt`), so there is no `pinctrl set ... a2` loop any more.
+2. **DLPC_ALIVE** — the DLPC3436 answers on the bit-banged I2C bus (GPIO23/22, addr 0x36).
+3. **VIDEO_UP** — TI's flash-select tri-state preamble, then the RGB666 parallel buffer is
+   enabled (this is what GPIO25-high used to do).
+4. **DLPC_LOCKED** — source set to external parallel, sync polarity negotiated
+   (hsync-invert, vsync-invert on this rig), lock confirmed by readback.
+5. **CURTAIN_DOWN** — image curtain lifted.
+6. **RENDERER_UP** — the renderer child is spawned on the system python3, takes DRM
+   master, and must pass its self-test (KMSDRM backend, 57.46 fps, blocking flip).
 
-`start_projector.sh` calls `~/dlp/init_parallel_mode.py`, from the **vendored TI DLPC SDK
+**No X server is started at any point**, and none may be: X would take DRM master away
+from the renderer and black the projector.
+
+displayd drives the DLPC through `displayd/dlpc.py`, which wraps the **vendored TI DLPC SDK
 in this repo's `dlp/`**, which the setup UI pushes to `~/dlp/` via scp on Deploy (follower
 only — `~/dlp` sits outside `~/rig`, so it rides scp, not the REST upload). A reflashed card
 gets it back on the next Deploy.
@@ -335,7 +339,6 @@ by hand, or `cd ~/dlp` fails and the DLPC never initializes:
 
 ```
 ~/rig/                          <- code deployed here (setup UI Deploy)
-~/rig/start_projector.sh        <- projector bring-up (deployed)
 ~/rig/calibration/              <- warp_map.npz, rig_geometry.yaml, calib tools
 ~/rig/stims/<session_id>/       <- pre-generated stim NPZ (pushed by Leader at deploy)
 ~/dlp/                          <- DLPC init SDK (vendored, pushed via scp on Deploy)
@@ -360,7 +363,7 @@ python setup/app.py    # opens localhost:4999
    bindings, uploads the code, pushes `~/dlp/` to the follower, and installs + enables the
    `vrfarm` systemd service (lgpio needs no daemon). Reboot the follower afterwards.
 3. **Deploy** (via REST API): re-uploads the code files and restarts `pi_api` so the new
-   code runs; the follower also gets `start_projector.sh` and the calibration tools.
+   code runs; the follower also gets `displayd/` and the calibration tools.
 4. **Initialize** — initializes each enabled device on its Pi (projector + display,
    lick, reward, camera, photodiode, encoder). It is disabled until every Pi is green, and
    **Deploy / Restart API reset it**, so re-press it after either.
@@ -469,8 +472,8 @@ No longer needed: `paramiko`, `pyzmq`, `psychopy`, `pyglet`, `psychtoolbox`, `li
 | REST API not responding | `sudo systemctl restart vrfarm` on Pi |
 | GPIO device won't init / claim fails | check wiring; confirm the header is `gpiochip0` (`gpiodetect`); set `gpiochip: 4` in the rig only on early Pi 5 images |
 | `import picamera2` fails | rig env Python must equal system Python (3.13); recreate env, re-run Install |
-| pygame display fails | check `DISPLAY=:0`; run `~/rig/start_projector.sh` (or Init Devices) |
-| Projector black / no image | run `~/rig/start_projector.sh` (GPIO ALT2 + GPIO25 high + DLPC3436 init) |
+| pygame renders nothing, no error | wrong interpreter — the display must run on **system** `/usr/bin/python3`; the conda env's SDL has no kmsdrm backend and falls back to a null driver |
+| Projector black / no image | `curl :5581/status` on the follower; if not `RENDERER_UP`, `curl -sX POST :5581/bringup`. Check no X or stray DRM client is running |
 | Clock drift between Pis | `sudo systemctl restart chrony` |
 | SSD not mounting | check `lsblk`, verify `/etc/fstab` entry |
 | Warp map not found | Generate Warp in the setup UI (built on the controller, scp'd to `~/rig/calibration/warp_map.npz`) |

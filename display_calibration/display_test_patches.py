@@ -1,4 +1,6 @@
 """
+LEGACY / reference only: this is a PsychoPy script and needs an X display.
+The rig runs full KMS with no X and no PsychoPy — use the setup UI's Intensity Cal flow instead.
 display_test_patches.py
 
 Displays gray patches at known azimuth/altitude positions so you can

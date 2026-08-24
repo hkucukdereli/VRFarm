@@ -1,4 +1,6 @@
 """
+LEGACY / reference only: this is a PsychoPy script and needs an X display.
+The rig runs full KMS with no X and no PsychoPy — use validate_calibration_pygame.py instead.
 validate_calibration.py
 
 Displays validation patterns on the projector to visually verify the warp map.

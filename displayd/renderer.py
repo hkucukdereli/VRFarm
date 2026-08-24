@@ -23,7 +23,7 @@ The Display is initialized from the composed display config displayd sends in th
 op ({"op":"mode","lease":...,"config":{...}}) — resolution/refresh_hz and the photodiode
 sync-square layout. That op can arrive before step 2, so start() drains it first; an older
 displayd sends no config and the Display defaults still apply. Parent death is watched
-explicitly (PR_SET_PDEATHSIG + a getppid() check): a SOCK_DGRAM socketpair never reports
+explicitly (a getppid() check): a SOCK_DGRAM socketpair never reports
 EOF, and an orphaned renderer would hold DRM master forever.
 
 Session drawing (load_stims/show) is a port of engine/follower.py's NPZ handling with
@@ -81,23 +81,19 @@ PARENT_CHECK_INTERVAL = 1.0   # s between getppid() checks (see Renderer.check_p
 WARP_PATH = Path.home() / "rig" / "calibration" / "warp_map.npz"
 
 
-def _install_parent_death_signal() -> bool:
-    """Best-effort PR_SET_PDEATHSIG(SIGTERM): ask the kernel to signal us the instant
-    displayd dies. Needed because an AF_UNIX SOCK_DGRAM socketpair never reports EOF when
-    the peer closes — a SIGKILLed displayd leaves this process alive forever as the SOLE
-    DRM master, and every later displayd bringup then fails its KMSDRM assert.
-
-    Linux-specific and cleared across exec in some spawn paths, so it is only half the
-    answer: Renderer.check_parent() watches getppid() as the portable backstop."""
-    try:
-        import ctypes
-        import signal
-
-        libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        PR_SET_PDEATHSIG = 1
-        return libc.prctl(PR_SET_PDEATHSIG, int(signal.SIGTERM), 0, 0, 0) == 0
-    except Exception:
-        return False
+# PR_SET_PDEATHSIG was used here and had to be REMOVED: on Linux the parent-death signal
+# fires when the parent THREAD that forked the child exits, not when the parent process
+# does. displayd spawns renderers from whatever thread is handling the request — usually
+# the short-lived HTTP handler serving /bringup — so the kernel SIGTERMed each brand-new
+# renderer the moment bringup returned. Every bringup therefore died once (exit rc=-15),
+# raised a spurious renderer_died ALARM, and only survived on the supervisor's respawn,
+# because the supervisor thread is long-lived. Harmless while nothing consumed the alarms;
+# a false page once those alarms started reaching Slack.
+#
+# Renderer.check_parent()'s getppid() watch was always the portable half of the answer and
+# is now the whole of it: it detects re-parenting within PARENT_CHECK_INTERVAL (1 s), well
+# inside the time any new displayd needs to walk the ladder to its renderer step, so an
+# orphan never holds DRM master long enough to break a later bringup.
 
 
 class _SockStop:
@@ -211,8 +207,9 @@ class Renderer:
         """False (and _quit set) once displayd is gone. The socketpair can NOT tell us: an
         AF_UNIX SOCK_DGRAM pair never reports EOF when the peer closes, so a SIGKILLed
         displayd would leave this process running forever as the sole DRM master and every
-        future displayd bringup would fail its KMSDRM assert. PR_SET_PDEATHSIG covers most
-        cases; this getppid() watch covers the rest (re-parenting to init/a subreaper).
+        future displayd bringup would fail its KMSDRM assert. This getppid() watch is the
+        ONLY guard now — see the note where PR_SET_PDEATHSIG used to be installed, which
+        was thread-scoped and killed healthy renderers.
         Throttled to PARENT_CHECK_INTERVAL — it is called from per-frame paths too."""
         now = time.time()
         if now - self._last_parent_check < PARENT_CHECK_INTERVAL:
@@ -283,12 +280,29 @@ class Renderer:
             self.fatal("SDL_ERROR", e)
         # Fail on pace or on a non-blocking flip; a few dropped frames during bringup are
         # reported, not fatal (>1/3 of the window means something is genuinely wrong).
-        if (abs(fps - TARGET_FPS) > FPS_TOL or med_block < MIN_FLIP_BLOCK_MS
-                or drops > SELF_TEST_FRAMES // 3):
-            self.fatal("FPS_OUT_OF_RANGE",
-                       f"fps={fps:.2f} (want {TARGET_FPS}±{FPS_TOL}), "
-                       f"median flip-block={med_block:.1f} ms (want >= {MIN_FLIP_BLOCK_MS}), "
-                       f"drops={drops}/{SELF_TEST_FRAMES}")
+        def _out_of_spec(fps, med_block, drops):
+            return (abs(fps - TARGET_FPS) > FPS_TOL or med_block < MIN_FLIP_BLOCK_MS
+                    or drops > SELF_TEST_FRAMES // 3)
+
+        if _out_of_spec(fps, med_block, drops):
+            # Re-measure once before condemning the display. The first window after a
+            # modeset can pace slow while the mode settles — measured on the rig at 53.93
+            # fps MEDIAN (not one stray frame: the whole distribution sat ~6% slow), with
+            # the very next window reading 57.46. That false positive cost a FAULT, a
+            # MODESET_KICK and three alarms per occurrence, roughly one bringup in five.
+            # A display that is genuinely wrong fails both windows.
+            self.log(f"self-test: re-measuring after out-of-spec first window "
+                     f"(fps={fps:.2f}, flip_block={med_block:.1f} ms, drops={drops})")
+            try:
+                fps, med_block, drops = self._self_test()
+            except Exception as e:
+                self.fatal("SDL_ERROR", e)
+            if _out_of_spec(fps, med_block, drops):
+                self.fatal("FPS_OUT_OF_RANGE",
+                           f"fps={fps:.2f} (want {TARGET_FPS}±{FPS_TOL}), "
+                           f"median flip-block={med_block:.1f} ms "
+                           f"(want >= {MIN_FLIP_BLOCK_MS}), "
+                           f"drops={drops}/{SELF_TEST_FRAMES} (two consecutive windows)")
         if drops:
             self.log(f"self-test: {drops}/{SELF_TEST_FRAMES} long frames (pace ok at "
                      f"{fps:.2f} fps)")
@@ -740,9 +754,6 @@ def main():
     # Parent-death detection, half 1: the kernel SIGTERMs us when displayd dies. Best
     # effort — half 2 (Renderer.check_parent's getppid() watch) covers the cases where
     # this is unavailable or was cleared across an exec.
-    if not _install_parent_death_signal():
-        print("[renderer] PR_SET_PDEATHSIG unavailable — falling back to the getppid() "
-              "watch", file=sys.stderr, flush=True)
     if os.getppid() == 1:
         # displayd died between fork and now: we would never see a ppid CHANGE, and an
         # orphan renderer holds DRM master forever. Refuse to start.

@@ -303,6 +303,44 @@ def logs():
     return jsonify({"lines": _process_log[-n:]})
 
 
+@app.route("/api/restart_displayd", methods=["POST"])
+def restart_displayd():
+    """Restart displayd so freshly deployed displayd/*.py actually runs.
+
+    Deploy restarts pi_api for exactly this reason — a long-running Python process does not
+    pick up overwritten files — and displayd is another such process. Without this, a Deploy
+    that shipped new daemon or renderer code left the OLD daemon running and the change
+    silently had no effect.
+
+    Refuses during a session lease (same rule as /api/restart): this bounces the renderer, so
+    it must never happen mid-experiment. Waits for the bringup ladder so the caller learns the
+    display actually came back, rather than getting an optimistic 200."""
+    if not _displayd_alive():
+        return jsonify({"ok": True, "skipped": "no displayd on this Pi"})
+    force = bool((request.get_json(silent=True) or {}).get("force", False))
+    st = _displayd_status()
+    if st is not None and (st.get("lease") or {}).get("mode") == "session" and not force:
+        return jsonify({"ok": False,
+                        "error": "session lease active — pass force:true to override"}), 409
+    try:
+        subprocess.run(["sudo", "systemctl", "restart", "displayd"],
+                       capture_output=True, timeout=30, check=True)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"ok": False, "error": f"restart failed: {e}"}), 500
+    deadline = time.time() + 90
+    state = None
+    while time.time() < deadline:
+        st = _displayd_status(timeout=2.0)
+        state = (st or {}).get("state")
+        if state in ("RENDERER_UP", "OPTICS_OK"):
+            return jsonify({"ok": True, "state": state})
+        if state == "FAULT":
+            return jsonify({"ok": False, "state": state,
+                            "error": (st or {}).get("fault", "FAULT")}), 500
+        time.sleep(2.0)
+    return jsonify({"ok": False, "state": state, "error": "displayd did not reach RENDERER_UP"}), 500
+
+
 @app.route("/api/restart", methods=["POST"])
 def restart():
     """Restart the pi_api process (systemd Restart=always respawns it). Graceful SIGTERM first,

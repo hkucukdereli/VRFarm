@@ -436,7 +436,32 @@ def deploy():
                 raise RuntimeError(f"{pi['name']} did not come back after restart")
         steps.append("Restarted pi_api on all Pis")
 
-        # 0c. Re-initialize projector on followers (restart killed Xorg)
+        # 0c. Restart displayd too, on any Pi that runs it. pi_api is not the only long-running
+        # process holding overwritten code: without this, a Deploy that shipped new
+        # displayd/renderer code left the OLD daemon running and the change silently did
+        # nothing. Best-effort and sequenced AFTER pi_api is back (the endpoint lives there).
+        # Safe here: Deploy only PUSHES the stim NPZ as a file; LOAD_STIMS is sent later at Go,
+        # so a daemon bounce now cannot lose a loaded session.
+        _displayd_steps = []
+        for pi in rig["pis"]:
+            try:
+                r = requests.post(f"http://{pi['ip']}:{api_port}/api/restart_displayd",
+                                  json={}, timeout=120)
+                d = r.json() if r.ok else {}
+                if d.get("skipped"):
+                    continue
+                _displayd_steps.append(
+                    f"displayd restarted on {pi['name']} ({d.get('state', '?')})" if d.get("ok")
+                    else f"WARNING: displayd restart failed on {pi['name']}: "
+                         f"{d.get('error', r.status_code)}")
+            except Exception as e:
+                _displayd_steps.append(f"WARNING: displayd restart error on {pi['name']}: {e}")
+        steps.extend(_displayd_steps)
+
+
+        # 0d. Confirm the projector is up on each follower. Under displayd this is a status
+        # check, not a re-init (pi_api answers from the daemon's ladder state); the old
+        # comment here said "restart killed Xorg", which stopped being true with the X stack.
         for fpi in followers:
             display_cfg = rig.get("devices", {}).get("display", {})
             if display_cfg.get("enabled", True) and "display" in fpi.get("devices", []):

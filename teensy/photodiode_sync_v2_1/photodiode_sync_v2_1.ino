@@ -64,7 +64,7 @@
 
 // ── Pins ─────────────────────────────────────────────────────────────────────
 const int PD_PIN  = A1;   // photodiode analog input  (MUST be <= 3.3 V at the pin)
-const int OUT_PIN = 1;    // digital square-pulse output -> RPi GPIO (idles LOW, pulses HIGH)
+const int OUT_PIN = 16;    // digital square-pulse output -> RPi GPIO (idles LOW, pulses HIGH)
 const int LED_PIN = 13;   // onboard LED mirrors the output — DEBUG builds only (quick visual check)
 
 // ── ADC / scaling ────────────────────────────────────────────────────────────

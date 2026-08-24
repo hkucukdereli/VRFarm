@@ -61,8 +61,8 @@ const bool  ACTIVE_HIGH = true;
 const bool  ADAPTIVE    = true;
 
 // Fixed thresholds — used ONLY when ADAPTIVE == false.
-const float THRESHOLD_HI_V = 1.8f;
-const float THRESHOLD_LO_V = 0.6f;
+const float THRESHOLD_HI_V = 1.1f;
+const float THRESHOLD_LO_V = 0.3f;
 
 // ── Adaptive tracker tuning ──────────────────────────────────────────────────
 const float BASELINE_FALL_TC_S = 0.05f;
@@ -75,7 +75,22 @@ const float MIN_PULSE_V = 0.30f;
 
 // ── Filters ──────────────────────────────────────────────────────────────────
 const uint32_t STEADY_US  = 150;
-const uint32_t HOLDOFF_US = 5000;
+// One TTL edge per COMMANDED FLASH, not per DLP colour sub-pulse.
+//
+// Measured on the rig 2026-08-24 (DEBUG capture, 58k samples at 4.8 kHz, every_n=5):
+// one sync-square frame produces **4 optical sub-pulses spaced 4.34 ms** (230 Hz red
+// segment rate), so the burst spans ~14 ms; flashes repeat every 87.0 ms (= 5/57.46).
+// HOLDOFF_US was 5000 — i.e. INSIDE that 4.34 ms train — so it accepted sub-pulses 1
+// and 3 and dropped 2 and 4: exactly 2 edges per flash, by accident of 5 ms vs 4.34 ms.
+//
+// That mattered because devices/photodiode.py's init verify is "missing-only"
+// (detected >= emitted - 1). At 2 edges per flash, HALF the flashes could fail and the
+// count still passed. At 1:1 a single missed flash is visible.
+//
+// Constraint: sub-pulse train (<=4 x 4.34 + 1.2 ~= 18.6 ms) < HOLDOFF < flash period
+// (every_n / 57.46). 30 ms gives 1.6x over the train and 2.9x under the 87 ms period.
+// ⚠️ If photodiode_sync_every_n drops below 3 (52 ms) this must come down with it.
+const uint32_t HOLDOFF_US = 30000;
 
 // ── Output pulse to the RPi ──────────────────────────────────────────────────
 const uint32_t OUT_PULSE_US = 5000;

@@ -1414,6 +1414,24 @@ function handleEvent(evt) {
       // range). 'warning' = orange, 'ok' = recovery. Same log channel as shepherd.
       log(`📉 ${evt.message}`, evt.level);
       break;
+    case 'display_abort':
+      // The leader stopped the session itself at a trial boundary — the display loop was
+      // broken, so every further stimulus would be unverifiable. 'ended' arrives right after
+      // via session_end; this line is the one that says WHY.
+      log(`🛑 EXPERIMENT ABORTED at trial ${evt.trial}: ${evt.reason || 'display fault'}`,
+          'critical');
+      break;
+    case 'display_health': {
+      // L3 heartbeat (source 'leader') and displayd's L1/L2 watchdogs (source 'displayd') share
+      // this envelope. Until this case existed the event arrived here and fell through the switch
+      // — no case, no default — so a projector that had gone dark showed the operator nothing.
+      const a = evt.alarm || {};
+      const where = evt.source ? `${evt.source}: ` : '';
+      const alarm = a.level === 'alarm';
+      log(`${alarm ? '🔴' : '🟢'} display ${where}${a.msg || a.kind || ''}`,
+          alarm ? 'critical' : 'ok');
+      break;
+    }
     case 'global_timeout':
       log(`Global timeout: no licks in ${(evt.phases || []).join('/')} for ${evt.n_dry} trials — aborting.`);
       break;

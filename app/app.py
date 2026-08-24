@@ -1482,6 +1482,23 @@ def _metrics_suffix(trials) -> str:
     return f", median RT={med_str} and hit rate={hr_str}"
 
 
+# Per-kind Slack throttle for display_health. Upstream is already edge-triggered (the leader
+# re-alerts a persisting heartbeat every HB_REALERT_S=60 s; displayd's alarms fire on the latch
+# edge, not per sweep), but the notifier is the boundary where a chatty producer becomes a pager
+# storm, so it does not depend on upstream restraint. Recoveries are never throttled — a "fixed"
+# message that arrives late is worse than one that arrives twice.
+_DISPLAY_NOTIFY_THROTTLE_S = 60.0
+_display_notify_t: dict[str, float] = {}
+
+
+def _display_notify_due(kind: str) -> bool:
+    now = time.time()
+    if now - _display_notify_t.get(kind, 0.0) < _DISPLAY_NOTIFY_THROTTLE_S:
+        return False
+    _display_notify_t[kind] = now
+    return True
+
+
 def _start_udp_listener(event_port: int):
     """Start background thread listening for UDP events from Leader."""
     global _udp_thread, _udp_running
@@ -1520,15 +1537,46 @@ def _start_udp_listener(event_port: int):
                     # also goes to Slack so it reaches you when the browser is closed.
                     if event.get("level") == "critical":
                         notify(f"🔴 {event.get('host', rig_name)} — {event.get('message', 'critical alert')}")
+                elif event.get("type") == "display_abort":
+                    # The leader ended the session at a trial boundary because the display loop
+                    # was broken. Paged immediately (not at session_end): finalize still has to
+                    # stop streams and close HDF5, and the operator should already be moving.
+                    notify(f"🛑 {rig_name} — EXPERIMENT ABORTED at trial "
+                           f"{event.get('trial', '?')}: {event.get('reason', 'display fault')} "
+                           f"({state['session_id']}){_metrics_suffix(_trials)}")
+                elif event.get("type") == "display_health":
+                    # Display-stack health, same envelope from either producer: the leader's L3
+                    # heartbeat correlator (source "leader") or displayd's own L1/L2 watchdogs
+                    # (source "displayd"). This branch is the ONLY thing that turns a detected
+                    # dark projector into something a human learns about — without it the alarm
+                    # reached this process, went to the SSE queue, and died in a browser switch
+                    # with no matching case. A blind mouse is a lost session, so an alarm pages
+                    # like a critical shepherd alert.
+                    a = event.get("alarm") or {}
+                    kind = a.get("kind", "display_health")
+                    msg = a.get("msg", kind)
+                    where = event.get("source", "display")
+                    if a.get("level") == "alarm":
+                        if _display_notify_due(kind):
+                            notify(f"🔴 {rig_name} — display [{where}]: {msg} "
+                                   f"({state['session_id']})")
+                    elif kind.endswith("_ok") or a.get("level") == "event":
+                        _display_notify_t.pop(kind.replace("_ok", "_lost"), None)
+                        notify(f"🟢 {rig_name} — display [{where}]: {msg} "
+                               f"({state['session_id']})")
                 elif event.get("type") == "global_timeout":
                     notify(f"⏱️ {rig_name} — GLOBAL TIMEOUT: {event.get('n_dry', '?')} dry "
                            f"trials, aborting at trial {event.get('trial', '?')} "
                            f"({state['session_id']}){_metrics_suffix(_trials)}")
                 elif event.get("type") == "session_end":
                     _session_end_seen = True
-                    notify(f"✅ {rig_name} — session ended: {event.get('n_completed', '?')}"
-                           f"/{event.get('n_planned', '?')} trials ({state['session_id']})"
-                           f"{_metrics_suffix(_trials)}")
+                    # A run cut short by a dark projector must never page as a clean ✅ finish.
+                    # The display_abort branch above already sent the reason a moment ago, so
+                    # this one stays silent and only the teardown below runs.
+                    if event.get("end_reason") != "display_fault":
+                        notify(f"✅ {rig_name} — session ended: {event.get('n_completed', '?')}"
+                               f"/{event.get('n_planned', '?')} trials ({state['session_id']})"
+                               f"{_metrics_suffix(_trials)}")
                     # A natural end MUST tear down server-side. Nothing else does: the browser
                     # sets only ITS OWN phase to 'ended' (which then disables the STOP button),
                     # while the server stays 'running' so /api/camera_stop returns early — and

@@ -165,9 +165,12 @@ def api_install_pi():
         if needs_gpio:
             apt_packages.append("python3-lgpio")
         if needs_display:
-            # The follower renders via pygame on Xorg (start_projector.sh runs X :0). Fresh
-            # trixie is Wayland-first, so Xorg + the modeset utils aren't guaranteed present.
-            apt_packages.extend(["xserver-xorg", "xserver-xorg-core", "x11-xserver-utils"])
+            # Deliberately NO X packages. Under full KMS displayd's renderer child is the sole
+            # DRM master; an X server would take that away and black the projector. The display
+            # packages that ARE needed (system pygame/numpy/yaml + libdrm-tests for modetest)
+            # are installed in the displayd step below, against the SYSTEM python3 — the conda
+            # env's SDL has no kmsdrm backend.
+            pass
         if apt_packages:
             apt_str = " ".join(apt_packages)
             _ssh(ssh_prefix,
@@ -225,7 +228,13 @@ def api_install_pi():
             "reward": ["scipy"],        # lgpio comes from apt + symlink (step 2/3), not pip
             "camera": ["h5py", "pillow", "simplejpeg", "piexif", "av"],
             "photodiode": ["pyserial"], # lgpio via apt+symlink; pyserial reads the Teensy V stream (USB)
-            "display": ["pygame"],
+            # NO pygame here on purpose. Everything that opens the display (displayd's
+            # renderer, calib_geo and the other calibration tools) runs on the SYSTEM
+            # python3 — see the apt step below. Putting pygame in the conda env would
+            # install an SDL with NO kmsdrm backend: it imports fine and then renders
+            # absolutely nothing, which is the single easiest way to lose an afternoon here.
+            # devices/display.py imports pygame lazily, so schema introspection is unaffected.
+            "display": [],
         }
         for dev in devices:
             packages.update(device_packages.get(dev, []))
@@ -267,23 +276,29 @@ def api_install_pi():
                 except Exception as e:
                     steps.append(f"WARN ~/dlp/ push skipped: {e}")
             # Projector boot config. The follower drives the DLPDLCR230NP over 18-bit DPI, which the
-            # stock trixie config does NOT set up. The validated recipe (see dlp/sample_config/
-            # config_dlp.txt) needs: FKMS — full KMS (vc4-kms-v3d) does NOT do DPI, it only leaves the
-            # DLPC on its internal test pattern — plus the DPI timing block, the i2c-gpio bus=22 control
-            # bus, and an Xorg "modesetting" binding so X reaches the DPI output. Install writes the
-            # known-good config.txt + /etc/X11/xorg.conf (both ride ~/dlp), backing up the pristine
-            # stock config first (cp -n, so a re-Install never clobbers the real default with an already
-            # -modified one), and sets console boot (multi-user.target) so start_projector.sh owns
-            # display :0. All of this needs a REBOOT.
+            # stock trixie config does NOT set up. The validated recipe is dlp/sample_config/
+            # config_kms.txt — byte-identical to what the working rig boots: vc4-kms-v3d plus
+            # vc4-kms-dpi-generic, the 125 MHz DPI timing block (1920x1080 @ 57.46 Hz,
+            # hsync/vsync inverted) and the i2c-gpio bus=22 control bus for the DLPC.
+            #
+            # This used to write config_dlp.txt (FKMS) + an Xorg modesetting binding, because the
+            # old stack drove DPI through X. Full KMS does DPI natively via vc4-kms-dpi-generic,
+            # and X would now steal DRM master from displayd's renderer — so KMS is written as the
+            # ACTIVE config, any stale xorg.conf is removed, and FKMS is kept only as a rollback
+            # copy. The pristine stock config is backed up first (cp -n, so a re-Install never
+            # clobbers the real default with an already-modified one). Console boot
+            # (multi-user.target) so nothing graphical claims the display. Needs a REBOOT.
             try:
                 _ssh(ssh_prefix,
                      "sudo cp -n /boot/firmware/config.txt /boot/firmware/config_default.txt; "
-                     "sudo cp ~/dlp/sample_config/config_dlp.txt /boot/firmware/config.txt; "
-                     "sudo install -D -m644 ~/dlp/sample_config/xorg.conf /etc/X11/xorg.conf; "
+                     "sudo cp ~/dlp/sample_config/config_kms.txt /boot/firmware/config.txt; "
+                     "sudo cp ~/dlp/sample_config/config_dlp.txt /boot/firmware/config_fkms_backup.txt; "
+                     "sudo rm -f /etc/X11/xorg.conf; "
                      "sudo systemctl set-default multi-user.target",
                      timeout=25)
-                steps.append("Projector: wrote config.txt (FKMS+DPI, i2c-gpio bus=22) + modesetting xorg.conf "
-                             "+ console boot; stock saved as config_default.txt — REBOOT the follower")
+                steps.append("Projector: wrote config.txt (FULL KMS + DPI, i2c-gpio bus=22) + console boot; "
+                             "stock saved as config_default.txt, FKMS kept as config_fkms_backup.txt; "
+                             "any /etc/X11/xorg.conf removed — REBOOT the follower")
             except Exception as e:
                 steps.append(f"WARN: projector config NOT applied ({e}) — no DPI/i2c-22, the DLP will only show "
                              "its test pattern. Fix passwordless sudo, then re-run Install and reboot")
@@ -327,22 +342,21 @@ def api_install_pi():
                 os.unlink(svc_tmp)
             _ssh(ssh_prefix,
                  "sudo mv /tmp/displayd.service /etc/systemd/system/displayd.service && "
-                 "sudo systemctl daemon-reload",
+                 "sudo systemctl daemon-reload && "
+                 "sudo systemctl enable displayd",
                  timeout=20)
-            steps.append("Installed displayd.service (disabled — phase 3 enables)")
-            # KMS boot config: staged as a CANDIDATE next to config.txt, never activated in
-            # phase 2 — the running config.txt (FKMS, step 5b) stays untouched. Switching to
-            # full KMS is a deliberate manual step (or phase 3).
-            kms_local = ROOT / "dlp" / "sample_config" / "config_kms.txt"
-            if kms_local.exists():
-                _scp(str(kms_local), f"{ssh_prefix}:/tmp/config_kms_candidate.txt")
-                _ssh(ssh_prefix,
-                     "sudo mv /tmp/config_kms_candidate.txt /boot/firmware/config_kms_candidate.txt",
-                     timeout=15)
-                steps.append("Staged /boot/firmware/config_kms_candidate.txt (KMS config — NOT active)")
-            else:
-                steps.append("WARN: dlp/sample_config/config_kms.txt missing locally — "
-                             "KMS candidate config not staged")
+            # ENABLED, not just installed: displayd owns the display, and since phase 4 there is
+            # no other way to drive it (no follower.py, no display worker, no X). A freshly
+            # installed Pi that left this disabled would simply have no projector.
+            # Not started here — the KMS config.txt written above only takes effect on reboot.
+            steps.append("Installed + enabled displayd.service (starts on the reboot below)")
+            # (The KMS config.txt is written as the ACTIVE boot config in step 5b above; it
+            # rides ~/dlp with the rest of the sample configs. It used to be staged here as an
+            # inactive candidate while FKMS was still the running stack — phase 4 made KMS the
+            # only stack, so there is nothing left to stage.)
+            if not (ROOT / "dlp" / "sample_config" / "config_kms.txt").exists():
+                steps.append("WARN: dlp/sample_config/config_kms.txt missing locally — the "
+                             "follower will NOT get a KMS boot config")
 
         # 6. Upload and enable systemd service
         _scp(str(ROOT / "pi_api" / "vrfarm.service"),
@@ -503,6 +517,21 @@ def api_deploy_pi():
                              "WARN pi_api did not respond after restart — re-check the Pi")
             except Exception as e:
                 steps.append(f"(pi_api restart skipped: {e})")
+
+            # displayd is the OTHER long-running process holding overwritten code. Restarting
+            # pi_api alone left a Deploy that shipped new daemon/renderer code with the old
+            # daemon still running, so the change silently did nothing. The endpoint is a no-op
+            # on Pis without the daemon and refuses during a session lease.
+            try:
+                r = requests.post(f"http://{ip}:{port}/api/restart_displayd",
+                                  json={}, timeout=120)
+                d = r.json() if r.ok else {}
+                if not d.get("skipped"):
+                    steps.append(f"displayd restarted ({d.get('state', '?')})" if d.get("ok")
+                                 else f"WARN displayd restart failed: "
+                                      f"{d.get('error', r.status_code)}")
+            except Exception as e:
+                steps.append(f"WARN displayd restart error: {e}")
 
         return jsonify({"ok": True, "steps": steps})
 
@@ -880,11 +909,11 @@ def api_lum_apply():
 def _displayd_active(target) -> bool:
     """True when the KMS display daemon owns the display on this Pi.
 
-    Geometry calibration is still an X application: cal_start.sh brings up Xorg via
-    start_projector.sh, and calib_geo.py opens on DISPLAY=:0. Under KMS that X server would
-    take DRM master away from displayd's renderer and black out a working rig — including
-    mid-session — leaving recovery to whoever knows to kill X and re-run bringup. So the
-    calibration paths refuse rather than break the display.
+    Used to decide how the display is driven on this Pi. The calibration tools now run on
+    kmsdrm and hand the display over themselves (cal_start.sh POSTs :5581/standby, cal_stop.sh
+    /resume), so under the daemon the setup UI must NOT also try to re-init the projector — and
+    must never start an X server, which would take DRM master from displayd's renderer and
+    black out a working rig, mid-session included.
 
     Probed, never read from config: enabling/stopping the unit IS the switch, the same rule
     pi_api's forwarding uses. A probe failure returns False (the operator is not blocked by
@@ -896,25 +925,29 @@ def _displayd_active(target) -> bool:
         return False
 
 
-_CALIB_KMS_MSG = (
-    "displayd (KMS) owns the display on this Pi — refusing to start an X server, which "
-    "would seize DRM master from displayd's renderer and black out the rig. Under KMS the "
-    "calibration scripts hand the display over themselves (cal_start.sh POSTs "
-    ":5581/standby, cal_stop.sh /resume); no X re-init is needed or wanted.")
 
 
 def _reinit_projector(target):
-    """Force a full projector bring-up on the display Pi over SSH: start_projector.sh sets
-    GPIO ALT2, re-inits the DLPC parallel input (fixes the common blank-projector case), and
-    kills+restarts X. Non-blocking (X starts backgrounded). Returns (ok, last-line-message).
+    """Force a full projector bring-up on the display Pi: displayd re-walks its ladder
+    (CONFIG_OK..RENDERER_UP), which is what fixes the common blank-projector case.
+    Returns (ok, message).
 
-    Refuses under displayd: this starts an X server, and X takes DRM master. Guarded here
-    rather than only at the callers so no later caller can reintroduce the footgun."""
-    if _displayd_active(target):
-        return False, _CALIB_KMS_MSG
+    This used to run ~/rig/start_projector.sh — GPIO ALT2, DLPC parallel init, restart X.
+    Phase 4 deleted that script with the rest of the X stack: displayd's ladder does the same
+    work, and an X server would now take DRM master away from its renderer. A display Pi with
+    no daemon has no way to drive the projector at all, so that is reported, not worked
+    around."""
+    if not _displayd_active(target):
+        return False, ("no displayd on this Pi — since phase 4 it is the only thing that can "
+                       "bring the projector up. Check: sudo systemctl status displayd")
     try:
-        out = _ssh(target, "bash ~/rig/start_projector.sh", timeout=60)
-        return True, (out.strip().splitlines() or ["projector re-initialized"])[-1]
+        out = _ssh(target, "curl -s -m 90 -X POST http://127.0.0.1:5581/bringup", timeout=110)
+        try:
+            st = json.loads(out).get("state", "?")
+        except Exception:
+            st = (out.strip().splitlines() or ["?"])[-1][:80]
+        ok = st in ("RENDERER_UP", "OPTICS_OK")
+        return ok, ("displayd bringup -> %s" % st)
     except Exception as e:
         return False, str(e)
 
@@ -1228,7 +1261,7 @@ def api_device_schemas():
 def _display_init_cfg(devices: dict) -> dict:
     """Display init payload: the display block plus the photodiode card's sync-square
     prefs (corner/size/brightness) — the square is drawn by the display renderer, but authored in
-    the photodiode card. Mirrors engine/follower.py's injection at session start."""
+    the photodiode card. Mirrors the injection engine/leader.py does at session start."""
     pd = devices.get("photodiode", {}) or {}
     cfg = dict(devices.get("display", {}) or {})
     for k in ("sync_corner", "sync_size_px", "sync_brightness"):

@@ -235,3 +235,10 @@ BonsaiBreakout
 
 # PCB breakout for RPi5
 hardware/
+
+# Live rig config: carries a Slack webhook_url in its `slack:` block, so it must never
+# reach git history (a secret in a commit is not undoable — it needs rotating). Kept
+# untracked deliberately; the tracked twin is rigs/cheese.yaml.
+# TODO: rotate the webhook, move it to an env var / secrets file, then track this file —
+# right now the LIVE rig config has no version control at all, which is its own risk.
+rigs/cheddar.yaml

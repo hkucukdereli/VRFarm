@@ -31,8 +31,8 @@ Controller ── setup UI :4999   build and service the rig
         delay → response window → post-stim, writing HDF5        │ SHOW / QUIT
         lick · reward · camera · photodiode · encoder            ▼
                                                           Follower Pi
-                                                    engine/follower.py: pygame
-                                                    renders from a pre-built NPZ
+                                                    displayd: KMS daemon, renderer
+                                                    child draws from a pre-built NPZ
 ```
 
 Three ideas carry most of the design:
@@ -96,7 +96,8 @@ then [INITIAL_SETUP_REFERENCE.md](docs/INITIAL_SETUP_REFERENCE.md).
 ```
 app/           experiment UI (Flask + SSE)          localhost:5000
 setup/         rig setup UI (Flask)                 localhost:4999
-engine/        leader.py (trial loop) · follower.py (renderer)   -> run on the Pis
+engine/        leader.py (trial loop)                -> runs on the Leader Pi
+displayd/      KMS display daemon + renderer child      -> runs on the Follower Pi
 devices/       one file per device type + the Device base class
 pi_api/        REST API deployed to each Pi (port 5080) + systemd unit
 shared/        config loaders, stimulus generator, HDF5 consolidation, notifications

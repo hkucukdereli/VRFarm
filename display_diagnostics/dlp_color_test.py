@@ -21,7 +21,7 @@ Default sequence (what was asked for):
     then half-RED 1s, half-GREEN 1s, half-BLUE 1s   (color left half, dark right half)
 
 Run on mozzarella (projector X must be up -- see start_projector.sh):
-    SDL_AUDIODRIVER=dummy DISPLAY=:0 ~/miniforge3/envs/rig/bin/python dlp_color_test.py
+    SDL_AUDIODRIVER=dummy /usr/bin/python3 dlp_color_test.py
     ... dlp_color_test.py --seq "red:1s | red/black:1s"   # full then split
     ... dlp_color_test.py --seq "red,green,blue:20"       # cycle per frame (20 frames)
     ... dlp_color_test.py --cycles 20                     # stop after 20 loops
@@ -32,6 +32,17 @@ quits. The projector Pi is headless, so to stop a backgrounded run:
     pkill -9 -f 'dlp_color_test[.]py'
 """
 
+import os
+
+# KMS, no X. Pinned before any pygame import (pygame is imported lazily below, so module
+# scope is early enough). MUST run on the SYSTEM /usr/bin/python3 — the conda `rig` env's
+# SDL has no kmsdrm backend and silently falls back to a null driver that renders nothing.
+# displayd owns DRM: ask it to stand aside first, and give it back afterwards:
+#   curl -sX POST http://127.0.0.1:5581/standby   ...   curl -sX POST :5581/resume
+os.environ["SDL_VIDEODRIVER"] = "kmsdrm"
+os.environ["SDL_HINT_NO_SIGNAL_HANDLERS"] = "1"
+os.environ["SDL_NO_SIGNAL_HANDLERS"] = "1"
+os.environ.pop("DISPLAY", None)
 import argparse
 import time
 

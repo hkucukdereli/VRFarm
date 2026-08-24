@@ -16,5 +16,5 @@ ssh "$PI" "mkdir -p ~/$DIR"
 scp "$HERE/sync_square_flash.py" "$PI:~/$DIR/sync_square_flash.py"
 
 ssh -t "$PI" "pgrep -x Xorg >/dev/null || bash ~/rig/start_projector.sh; \
-  cd ~/$DIR && SDL_AUDIODRIVER=dummy DISPLAY=:0 \
+  cd ~/$DIR && SDL_AUDIODRIVER=dummy \
   ~/miniforge3/envs/rig/bin/python sync_square_flash.py $*"

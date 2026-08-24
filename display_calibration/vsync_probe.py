@@ -2,11 +2,12 @@
 """
 vsync_probe.py — is the follower's pygame display actually vsync-locked to the projector?
 
-Run on the FOLLOWER, after start_projector.sh, in the rig conda env:
+Run on the FOLLOWER on the SYSTEM python3 (the conda env's SDL has no kmsdrm backend).
+Ask displayd to stand aside first: curl -sX POST http://127.0.0.1:5581/standby
 
     source ~/miniforge3/etc/profile.d/conda.sh && conda activate rig
-    DISPLAY=:0 python3 ~/rig/calibration/vsync_probe.py             # the real (vsync-requested) path
-    DISPLAY=:0 python3 ~/rig/calibration/vsync_probe.py --no-vsync  # baseline for comparison
+    /usr/bin/python3 ~/rig/calibration/vsync_probe.py             # the real (vsync-requested) path
+    /usr/bin/python3 ~/rig/calibration/vsync_probe.py --no-vsync  # baseline for comparison
 
 Why this exists: devices/display.py sets self._vsync = True whenever set_mode(vsync=1) doesn't
 RAISE — but SDL returning a surface does NOT prove vsync is active. On the FKMS/DPI + Xorg-

@@ -42,7 +42,9 @@ Controller  (app/app.py :5000, setup/app.py :4999)
 Leader Pi (engine/leader.py) ── trial loop + lick, reward, camera, photodiode, encoder
   │  UDP 5575 → SHOW / QUIT
   ▼
-Follower Pi (engine/follower.py) ── pygame renderer on the DLP projector
+Follower Pi (displayd) ── KMS daemon; renderer child is sole DRM master on the DLP projector
+  │  UDP 5573 → stim_onset / hb_flash acks, display_health
+  ▲
 ```
 
 ## Conventions

@@ -16,13 +16,24 @@ coherently with the image. Find the combination that makes the ENTIRE image read
 correctly on the physical screen — that combination is the projector's transform, and
 the same flip then gets baked into the warp generation so stimulus pixels land right.
 
-Run on mozzarella (projector X must be up — see start_projector.sh):
-  DISPLAY=:0 ~/miniforge3/envs/rig/bin/python validate_calibration_pygame.py \
+Run on the display Pi (see the SDL note below):
+  /usr/bin/python3 validate_calibration_pygame.py \
       --warp ~/rig/calibration/warp_map.npz [--flip-h] [--flip-v]
 
 Headless-friendly: --cycle SECONDS rotates patterns, --duration SECONDS self-exits.
 Honors SPACE/Q/ESC if a keyboard is attached, and SIGTERM (kill over SSH).
 """
+import os
+
+# KMS, no X. Pinned before any pygame import (pygame is imported lazily inside run(), so
+# module scope is early enough) — and this MUST run on the SYSTEM /usr/bin/python3: the
+# conda `rig` env's SDL has no kmsdrm backend and silently falls back to a null driver that
+# renders nothing. displayd owns DRM, so ask it to stand aside first:
+#   curl -sX POST http://127.0.0.1:5581/standby   (cal_start.sh does this for you)
+os.environ["SDL_VIDEODRIVER"] = "kmsdrm"
+os.environ["SDL_HINT_NO_SIGNAL_HANDLERS"] = "1"
+os.environ["SDL_NO_SIGNAL_HANDLERS"] = "1"
+os.environ.pop("DISPLAY", None)
 import argparse
 import signal
 import time

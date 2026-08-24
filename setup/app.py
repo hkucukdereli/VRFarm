@@ -877,10 +877,41 @@ def api_lum_apply():
     return jsonify({"ok": ok, "error": err, "mode": mode, "fit": fit, "steps": steps})
 
 
+def _displayd_active(target) -> bool:
+    """True when the KMS display daemon owns the display on this Pi.
+
+    Geometry calibration is still an X application: cal_start.sh brings up Xorg via
+    start_projector.sh, and calib_geo.py opens on DISPLAY=:0. Under KMS that X server would
+    take DRM master away from displayd's renderer and black out a working rig — including
+    mid-session — leaving recovery to whoever knows to kill X and re-run bringup. So the
+    calibration paths refuse rather than break the display.
+
+    Probed, never read from config: enabling/stopping the unit IS the switch, the same rule
+    pi_api's forwarding uses. A probe failure returns False (the operator is not blocked by
+    an unreachable Pi; the calibration SSH would fail on its own anyway)."""
+    try:
+        out = _ssh(target, "curl -s -m 2 http://127.0.0.1:5581/status || true", timeout=15)
+        return '"state"' in (out or "")
+    except Exception:
+        return False
+
+
+_CALIB_KMS_MSG = (
+    "displayd (KMS) owns the display on this Pi. Geometry calibration still runs under X, "
+    "which would seize DRM master from displayd's renderer and black out the rig. Stop the "
+    "daemon first (sudo systemctl stop displayd), calibrate, then restart it and re-run "
+    "bringup — or wait for calib_geo to be ported to kmsdrm.")
+
+
 def _reinit_projector(target):
     """Force a full projector bring-up on the display Pi over SSH: start_projector.sh sets
     GPIO ALT2, re-inits the DLPC parallel input (fixes the common blank-projector case), and
-    kills+restarts X. Non-blocking (X starts backgrounded). Returns (ok, last-line-message)."""
+    kills+restarts X. Non-blocking (X starts backgrounded). Returns (ok, last-line-message).
+
+    Refuses under displayd: this starts an X server, and X takes DRM master. Guarded here
+    rather than only at the callers so no later caller can reintroduce the footgun."""
+    if _displayd_active(target):
+        return False, _CALIB_KMS_MSG
     try:
         out = _ssh(target, "bash ~/rig/start_projector.sh", timeout=60)
         return True, (out.strip().splitlines() or ["projector re-initialized"])[-1]
@@ -924,6 +955,9 @@ def api_start_calibration():
     user = target_pi.get("user", "vruser")
     ip = target_pi["ip"]
     target = f"{user}@{ip}"
+
+    if _displayd_active(target):
+        return jsonify({"ok": False, "error": _CALIB_KMS_MSG}), 409
 
     name = (request.json or {}).get("geometry") or "rig_geometry.yaml"
     geo_data = (request.json or {}).get("geometry_data")   # live Display-card params

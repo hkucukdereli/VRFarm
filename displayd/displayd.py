@@ -334,6 +334,12 @@ class Displayd:
             # Fresh walk: take down a running renderer first so the RENDERER_UP
             # step is a clean spawn (and DRM is free for the modeset checks).
             self._stop_renderer()
+            # A re-init means the optics claim is unknown again, not known-bad: "lost"
+            # asserts the diode saw darkness, which we have no evidence for until the
+            # leader judges a heartbeat against THIS renderer. (_stop_renderer is a
+            # graceful path, so the renderer_died reset never fires here.)
+            self.optics = "unverified"
+            self._optics_ok_streak = self._optics_lost_streak = 0
             self._renderer_fail_streak = 0
             self._set_state(ST_BOOT)
             steps = [

@@ -1102,21 +1102,30 @@ async function deployExperiment() {
         trialTable = ttData.trials || [];
       } catch(e) { trialTable = []; }
       log('Deploy complete.');
+      // Phase FIRST, before anything cosmetic. This used to run after the session-estimate
+      // block, with only an outer try/finally and no catch: a throw in any of those left the
+      // deploy successful server-side, the button reset by `finally`, "Deploy complete."
+      // logged — and GO silently greyed with no error anywhere. A successful deploy must
+      // enable GO even if the estimate readout fails.
+      setPhase('deployed');
       // Deploy restarts pi_api on the Pi, which drops the camera. If the preview was live,
       // re-establish it fresh once the API is back up (a plain re-point would 400).
-      if (cameraLive) {
-        cameraLive = false;
-        setTimeout(() => { if (document.getElementById('cb-camera').checked) _startCamera(); }, 2500);
+      try {
+        if (cameraLive) {
+          cameraLive = false;
+          setTimeout(() => { if (document.getElementById('cb-camera').checked) _startCamera(); }, 2500);
+        }
+        // Estimated session time + session number, now that the trial table is known.
+        sessionEstimateMs = computeSessionEstimate();
+        estRemainingMs = null;
+        sessionShown = true;
+        renderSessionNum();
+        const _estEl = document.getElementById('est-clock');
+        if (_estEl) _estEl.textContent = (sessionEstimateMs != null) ? formatHMS(sessionEstimateMs) : '00:00:00';
+        initStimCanvas();
+      } catch (e) {
+        log('Deploy finished, but a panel failed to render: ' + e.message, 'warning');
       }
-      // Show the estimated session time + session number now that the trial table is known.
-      sessionEstimateMs = computeSessionEstimate();
-      estRemainingMs = null;
-      sessionShown = true;
-      renderSessionNum();
-      const _estEl = document.getElementById('est-clock');
-      if (_estEl) _estEl.textContent = (sessionEstimateMs != null) ? formatHMS(sessionEstimateMs) : '00:00:00';
-      setPhase('deployed');
-      initStimCanvas();
     } else {
       log('Deploy failed: ' + (data.error || ''));
     }

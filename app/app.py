@@ -1524,6 +1524,13 @@ def _metrics_suffix(trials) -> str:
 _DISPLAY_NOTIFY_THROTTLE_S = 60.0
 _display_notify_t: dict[str, float] = {}
 
+# Shepherd metrics whose criticals stay OUT of Slack. They still reach the UI log over SSE
+# and shepherd's own alerts file — this mutes the pager hop only. soc_temp_c trips at 70 °C,
+# which a fanless Pi reaches routinely under camera encode, so it pages without telling you
+# anything you can act on; the throttle bits (metric "throttled") are what actually report
+# that heat cost you frames, and those still page.
+_SLACK_MUTED_SHEPHERD_METRICS = {"soc_temp_c"}
+
 
 def _display_notify_due(kind: str) -> bool:
     now = time.time()
@@ -1568,8 +1575,10 @@ def _start_udp_listener(event_port: int):
                 elif event.get("type") == "shepherd_alert":
                     # Health alert from the shepherd monitor on a rig Pi. It flows to
                     # the SSE queue (below) for the UI log like any event; a CRITICAL
-                    # also goes to Slack so it reaches you when the browser is closed.
-                    if event.get("level") == "critical":
+                    # also goes to Slack so it reaches you when the browser is closed,
+                    # unless its metric is muted (see _SLACK_MUTED_SHEPHERD_METRICS).
+                    if (event.get("level") == "critical"
+                            and event.get("metric") not in _SLACK_MUTED_SHEPHERD_METRICS):
                         notify(f"🔴 {event.get('host', rig_name)} — {event.get('message', 'critical alert')}")
                 elif event.get("type") == "display_abort":
                     # The leader ended the session at a trial boundary because the display loop

@@ -43,6 +43,13 @@ Every threshold, direction, and **message** is editable in [`config.yaml`](confi
 - **critical** → red in the UI log, **and** a Slack message (so it reaches you with
   the browser closed)
 
+One exception: `soc_temp_c` is **muted on the Slack hop only**. A fanless Pi crosses the
+70 °C critical routinely under camera encode, so it paged constantly without naming an
+action. It still logs to the UI and to `alerts.log` at full level, and the `throttled`
+metric — which reports that heat actually cost you frames — still pages. The mute list is
+`_SLACK_MUTED_SHEPHERD_METRICS` in `app/app.py`, i.e. controller-side: no rig deploy needed
+to change it.
+
 Alerts are **edge-triggered** — fired when a metric changes level, not every
 second — so the log isn't spammed. A still-critical condition re-alerts every
 `realert_critical_s` (default 30 s). A return to normal logs a recovery line.

@@ -242,3 +242,6 @@ hardware/
 # TODO: rotate the webhook, move it to an env var / secrets file, then track this file —
 # right now the LIVE rig config has no version control at all, which is its own risk.
 rigs/cheddar.yaml
+
+# generated dither preview renders
+display_diagnostics/preview/

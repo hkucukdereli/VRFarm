@@ -235,13 +235,19 @@ class Display(Device):
             self._screen.fill((0, rgb, rgb))
         pygame.display.flip()
 
+    def field_drive(self, bg_lin):
+        """0..1 per-pixel drive for the uniform background field, before quantization. Split out of
+        _build_field_surface so it can be checked without a display (surface creation needs one);
+        display_diagnostics/dither_check.py drives the real thing through this."""
+        return bg_lin * self._corr_map   # _corr_map is 0 outside the visible screen
+
     def _build_field_surface(self, bg_lin):
         """Uniform background field with the full-field per-pixel luminance correction: valid
         pixels driven at bg_lin*C(az) (uniform delivered luminance), invisible area BLACK."""
         import numpy as np
         import pygame
         valid = np.asarray(self._warp["valid_map"], dtype=bool)
-        drive = bg_lin * self._corr_map   # _corr_map is 0 outside the visible screen
+        drive = self.field_drive(bg_lin)
         code = self._quantize(drive)
         pixels = np.zeros((self._corr_map.shape[0], self._corr_map.shape[1], 3), dtype=np.uint8)
         pixels[valid, 1] = code[valid]
@@ -372,18 +378,11 @@ class Display(Device):
                 skipped += 1
         return (built, skipped)
 
-    def _build_patch_surface(self, az0, alt0, size_deg, frac, bg_gray,
-                             shape="square", apply_lum=True):
-        """Compose the full (H, W) framebuffer for one patch: a bright stimulus over a background,
-        both green+blue only (R=0). `shape` is "square" (within size_deg/2 in BOTH azimuth and
-        altitude) or "circle" (radius size_deg/2 in the az/alt plane) — a visual-angle shape,
-        warp-shaped to the screen curvature. When apply_lum, EVERY pixel's drive (background AND
-        stimulus) is multiplied by the per-pixel correction C(az) so delivered luminance is uniform
-        across azimuth (the bright center is darkened to match the dim edges); Bg=1 then means full
-        LED at the edges and attenuated at center. The invisible area (~valid_map) stays BLACK —
-        off-screen, reserved for the red photodiode sync square (see _draw_sync_border)."""
+    def patch_drive(self, az0, alt0, size_deg, frac, bg_gray, shape="square", apply_lum=True):
+        """0..1 per-pixel drive for one stimulus patch over its background, before quantization.
+        Split out of _build_patch_surface for the same reason as field_drive: this is the part
+        worth checking, and the surface it feeds cannot be built without a display."""
         import numpy as np
-        import pygame
         az_map = self._warp["az_map"]
         alt_map = self._warp["alt_map"]
         valid = np.asarray(self._warp["valid_map"], dtype=bool)
@@ -401,9 +400,24 @@ class Display(Device):
         ideal = np.where(lit, stim_lin, bg_lin)
         # Full-field per-pixel luminance correction (or raw drive, masked to the visible screen).
         if apply_lum and self._corr_map is not None:
-            drive = ideal * self._corr_map
-        else:
-            drive = np.where(valid, ideal, 0.0)
+            return ideal * self._corr_map
+        return np.where(valid, ideal, 0.0)
+
+    def _build_patch_surface(self, az0, alt0, size_deg, frac, bg_gray,
+                             shape="square", apply_lum=True):
+        """Compose the full (H, W) framebuffer for one patch: a bright stimulus over a background,
+        both green+blue only (R=0). `shape` is "square" (within size_deg/2 in BOTH azimuth and
+        altitude) or "circle" (radius size_deg/2 in the az/alt plane) — a visual-angle shape,
+        warp-shaped to the screen curvature. When apply_lum, EVERY pixel's drive (background AND
+        stimulus) is multiplied by the per-pixel correction C(az) so delivered luminance is uniform
+        across azimuth (the bright center is darkened to match the dim edges); Bg=1 then means full
+        LED at the edges and attenuated at center. The invisible area (~valid_map) stays BLACK —
+        off-screen, reserved for the red photodiode sync square (see _draw_sync_border)."""
+        import numpy as np
+        import pygame
+        az_map = self._warp["az_map"]
+        valid = np.asarray(self._warp["valid_map"], dtype=bool)
+        drive = self.patch_drive(az0, alt0, size_deg, frac, bg_gray, shape, apply_lum)
         code = self._quantize(drive)                              # green+blue only, R=0
         pixels = np.zeros((az_map.shape[0], az_map.shape[1], 3), dtype=np.uint8)
         pixels[valid, 1] = code[valid]

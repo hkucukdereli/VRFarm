@@ -59,11 +59,57 @@ def block_mean_error(panel, ideal, valid, k=8):
     return float(np.abs(blocks(panel) - blocks(ideal))[mask].mean())
 
 
+def contrast_fidelity(dev, bg, bits, contrasts, az=80.0, alt=10.0, size=8.0):
+    """Delivered Weber contrast (stim - bg)/bg for a patch, truncated vs dithered.
+
+    This is a DIFFERENT question from the background-field metrics above. Those ask whether one
+    surface is smooth and at the right level; this asks whether the GAP between two surfaces
+    survives quantization -- which is what the paradigm actually depends on. They come apart: in
+    mode 'none' the field is flat, so it bands not at all and scores a perfect 0.000, while the
+    patch and the background land on the 4-code grid independently and the delivered contrast can
+    be tens of percent wrong.
+
+    The reference is the ACHIEVABLE contrast, not the nominal one: a `bits`-bit ladder tops out at
+    ((1<<bits)-1) << (8-bits) -- 252, not 255, for 6 bits -- so at frac=1.0 the requested contrast
+    is not physically representable and comparing against it would fail the panel for being a
+    panel. Clipping the ideal to that ceiling asks the fair question: given the levels this
+    hardware HAS, did we land on the right one?
+    """
+    ceiling = float(((1 << bits) - 1) << (8 - bits))
+    shift = 8 - bits
+    valid = np.asarray(dev._warp["valid_map"], dtype=bool)
+    az_map = np.asarray(dev._warp["az_map"], dtype=float)
+    alt_map = np.asarray(dev._warp["alt_map"], dtype=float)
+    inside = (np.abs(az_map - az) <= size / 2) & (np.abs(alt_map - alt) <= size / 2) & valid
+    ring = (np.abs(az_map - az) <= size) & (np.abs(alt_map - alt) <= size) & valid & ~inside
+    if inside.sum() < 64 or ring.sum() < 64:
+        return None                                  # patch fell off the visible screen
+
+    tile = _build_dither_tile(dev._corr_map.shape, bits)
+    rows = []
+    for frac in contrasts:
+        drive = dev.patch_drive(az, alt, size, frac, bg)       # the real render math
+        ideal = np.minimum(drive * 255.0, ceiling)
+        c_ideal = (ideal[inside].mean() - ideal[ring].mean()) / ideal[ring].mean()
+        out = {}
+        for name, d in (("trunc", None), ("dither", tile)):
+            dev._dither = d
+            panel = ((dev._quantize(drive) >> shift) << shift).astype(float)
+            out[name] = (panel[inside].mean() - panel[ring].mean()) / panel[ring].mean()
+        rows.append((frac, c_ideal, out["trunc"], out["dither"]))
+    dev._dither = tile
+    return rows
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("warp", nargs="?", default="display_calibration/warp_map.npz")
     ap.add_argument("--bg", type=float, default=0.75, help="background_gray to test at")
     ap.add_argument("--bits", type=int, default=6, help="panel bits per channel (DPI RGB666 = 6)")
+    ap.add_argument("--contrasts", type=float, nargs="+",
+                    default=[1.0, 0.25, 0.15, 0.125],
+                    help="stimulus contrasts to check delivery of; the defaults are the values "
+                         "attention_blocked_L25.yaml runs")
     ap.add_argument("--mode", choices=["empirical", "theoretical", "none"], default="theoretical",
                     help="force lum_correction_mode instead of using the one baked into the warp; "
                          "the banding this checks for only exists when a correction is applied, so "
@@ -118,7 +164,25 @@ def main() -> int:
     print(f"{'truncate only':16}{n_p:>8}{med_p:>12.0f}{max_p:>12}{err_p:>15.3f}")
     print(f"{'dithered':16}{n_d:>8}{med_d:>12.0f}{max_d:>12}{err_d:>15.3f}")
 
+    # ── contrast fidelity: does the stim-vs-background GAP survive quantization? ──
+    rows = contrast_fidelity(dev, a.bg, a.bits, a.contrasts)
+    worst_t = worst_d = 0.0
+    if rows is None:
+        print("\n[skip] contrast check: patch falls outside the visible screen for this warp")
+    else:
+        print(f"\ndelivered Weber contrast at az 80 (vs achievable ideal):")
+        print(f"{'nominal':>9}{'ideal':>10}{'truncated':>12}{'err%':>8}{'dithered':>12}{'err%':>8}")
+        for frac, ci, ct, cd in rows:
+            et, ed = 100 * (ct - ci) / ci, 100 * (cd - ci) / ci
+            worst_t, worst_d = max(worst_t, abs(et)), max(worst_d, abs(ed))
+            print(f"{frac:>9.3f}{ci:>10.4f}{ct:>12.4f}{et:>8.1f}{cd:>12.4f}{ed:>8.1f}")
+        print(f"{'worst':>9}{'':>10}{'':>12}{worst_t:>8.1f}{'':>12}{worst_d:>8.1f}")
+
     ok = True
+    if rows is not None and a.bits < 8 and not (worst_d < 2.0 and worst_d < worst_t):
+        print(f"\nFAIL: dithered contrast error {worst_d:.1f}% (truncated {worst_t:.1f}%)",
+              file=sys.stderr)
+        ok = False
     if a.bits < 8:
         # The point of the dither: local mean tracks the target instead of sitting a half-step dark.
         if not err_d < err_p / 4:

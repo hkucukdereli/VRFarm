@@ -892,10 +892,16 @@ def api_lum_apply():
         try:
             sys.path.insert(0, str(GEO_DIR))
             from fit_luminance_correction import (fit_luminance, save_luminance_cal,
+                                                  save_luminance_measurements,
                                                   azimuth_asymmetry)
+            # Raw readings first, BEFORE the fit: if the fit or the deploy fails below, the
+            # numbers the operator took off the meter still survive on disk.
+            raw = save_luminance_measurements(
+                valid, patch=data.get("patch"), method=data.get("method"), source="setup-ui")
+            steps.append(f"Saved {len(valid)} raw readings → {raw.name}")
             az, gain, corr = fit_luminance(valid)
-            out = save_luminance_cal(az, gain, corr, source_file="setup-ui")
-            steps.append(f"Fitted {len(valid)} readings → {out.name}")
+            out = save_luminance_cal(az, gain, corr, source_file=raw.name)
+            steps.append(f"Fitted → {out.name}")
             # The fit folds +az onto -az. Say out loud whether that was justified: nothing else
             # in the pipeline can tell the operator the screen is lopsided.
             asym = azimuth_asymmetry(valid)

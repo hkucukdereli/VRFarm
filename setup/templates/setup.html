@@ -1338,7 +1338,11 @@ async function lumFitApply() {
     const geo = document.getElementById('warp-geometry-select');
     const r = await fetch('/api/lum_apply', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({mode: 'empirical', measurements, geometry: geo ? geo.value : undefined})
+      body: JSON.stringify({mode: 'empirical', measurements,
+                            // Conditions the readings were taken under, for the raw record.
+                            patch: {size_deg: lumMeasure.size, alt_deg: lumMeasure.alt},
+                            method: lumMeasure.method,
+                            geometry: geo ? geo.value : undefined})
     }).then(x => x.json());
     (r.steps || []).forEach(s => log('  ' + s));
     if (r.ok) {

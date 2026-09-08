@@ -138,6 +138,42 @@ def save_luminance_cal(az_full, gain_fit, correction, source_file=None, cal_dir=
     return out
 
 
+def save_luminance_measurements(measurements, patch=None, method=None, source=None,
+                                cal_dir=CAL_DIR):
+    """Write the RAW readings to luminance_measurements_<ts>.yaml before anything is fitted.
+
+    The cal file holds a 211-point interpolated curve; these are the handful of numbers actually
+    taken off the meter. Keeping them means a fit can be redone later with a different spline,
+    a bad point can be dropped without re-measuring, and the record says under what conditions
+    the light was measured — which matters because the gain is measured at FULL drive and then
+    applied at partial drive, an assumption only the raw record lets you revisit.
+
+    The format is the one main() already reads, so `python fit_luminance_correction.py <file>`
+    re-fits a saved measurement set offline. Returns the written path."""
+    cal_dir = Path(cal_dir)
+    out = cal_dir / f"luminance_measurements_{datetime.now().strftime('%Y%m%d_%H%M')}.yaml"
+    rows = []
+    for m in measurements:
+        row = {"az_deg": float(m["az_deg"]), "reading": _reading(m)}
+        if m.get("alt_deg") is not None:
+            row["alt_deg"] = float(m["alt_deg"])
+        rows.append(row)
+    rows.sort(key=lambda r: r["az_deg"])
+    doc = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "source": source or "setup-ui",
+        "method": method,
+        # The render conditions the readings were taken under. contrast/bg/apply_lum are fixed by
+        # the measurement itself (max drive on black, correction OFF) — recorded so the file is
+        # self-describing rather than relying on the reader knowing the convention.
+        "patch": {"shape": "square", "contrast": 1, "bg_gray": 0, "apply_lum": False,
+                  **(patch or {})},
+        "measurements": rows,
+    }
+    out.write_text(yaml.dump(doc, default_flow_style=False, sort_keys=False))
+    return out
+
+
 def list_luminance_cals(cal_dir=CAL_DIR):
     """Saved luminance cal files, newest first, excluding the `latest` symlink. Returns a list of
     {name, mtime, is_latest} — is_latest marks which file luminance_cal_latest.yaml resolves to,

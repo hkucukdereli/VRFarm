@@ -2569,9 +2569,8 @@ function renderDisplayControls(dev) {
     </div>
 
     <div class="disp-section">
-      <span class="disp-label">CALIBRATION</span>
+      <span class="disp-label">INTENSITY</span>
       <div class="device-controls">
-        <button class="calib-btn btn ${calibrating ? 'btn-red' : 'btn-green'} btn-sm" onclick="toggleCalibration()">${calibrating ? 'Stop Calib' : 'Calibrate'}</button>
         <div class="device-field">
           <label>Intensity</label>
           <select id="lum-mode-select" onchange="onLumModeChange(this.value)" style="width:auto">
@@ -2613,6 +2612,7 @@ function renderDisplayControls(dev) {
           </select>
         </div>
         <button class="btn btn-gray btn-sm" onclick="refreshGeoList()" title="Reload the geometry list (pick up newly saved calibrations)">&#8635;</button>
+        <button class="calib-btn btn ${calibrating ? 'btn-red' : 'btn-green'} btn-sm" onclick="toggleCalibration()" title="Hand the display over to the geometry calibrator (displayd standby) and open the slider UI">${calibrating ? 'Stop Geometry Cal' : 'Geometry Cal'}</button>
         <button class="btn btn-blue btn-sm" onclick="sendGeometry()" title="Copy the selected geometry to the projector Pi as its rig_geometry.yaml">Send to projector</button>
         <button class="warp-btn btn ${warpBtnClass} btn-sm" onclick="generateWarp()" title="Ray-trace the selected geometry into warp_map.npz and deploy it to the Leader">${warpBtnText}</button>
         ${warpExists ? '<span style="font-size:10px; color:#4caf50">warp_map.npz found on Leader</span>' : '<span style="font-size:10px; color:#f44336">warp_map.npz not found on Leader</span>'}

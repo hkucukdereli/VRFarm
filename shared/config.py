@@ -63,6 +63,26 @@ def save_rig(config: dict, path: Union[str, Path]):
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
 
+def save_rig_atomic(config: dict, path: Union[str, Path]):
+    """Save a rig YAML by writing a temp file next to it and renaming it into place, so a
+    crash mid-write can never leave a half-written (unparseable) rig config behind."""
+    import os
+    import tempfile
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".yaml", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as f:
+            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 # ── Helpers ──
 
 def get_leader_pi(rig: dict) -> dict:

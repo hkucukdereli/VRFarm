@@ -2355,6 +2355,7 @@ const PHASE_ORDER = ['setup', 'connected', 'deployed', 'running', 'ended'];
 
 function setPhase(p) {
   phase = p;
+  try { if (window.parent !== window) window.parent.postMessage({type: 'vrfarm:phase', rig: RIG, phase: p}, '*'); } catch (e) {}
   const steps = document.querySelectorAll('.phase-step');
   const idx = PHASE_ORDER.indexOf(p);
   steps.forEach((el, i) => {
@@ -2490,6 +2491,26 @@ async function resyncFromServer() {
 updateButtons();
 clearAllCanvases();
 resyncFromServer();
+
+// ── shell integration ──
+// Hidden frames must not stream camera video; the shell tells us when we are shown/hidden.
+// The Setup tab tells the shell when this rig's YAML was saved; re-connect if nothing is running.
+window.addEventListener('message', ev => {
+  const m = ev.data || {};
+  if (m.type === 'vrfarm:visible') {
+    document.querySelectorAll('img').forEach(img => {
+      if (m.visible) {
+        if (img.dataset.pausedSrc) { img.src = img.dataset.pausedSrc.replace(/ts=\d+/, 'ts=' + Date.now()); delete img.dataset.pausedSrc; }
+      } else if ((img.getAttribute('src') || '').includes('camera_feed')) {
+        img.dataset.pausedSrc = img.getAttribute('src'); img.removeAttribute('src');
+      }
+    });
+  } else if (m.type === 'vrfarm:reload-config') {
+    if (phase === 'setup' || phase === 'connected') { log('Rig config changed in Setup — reconnecting.'); loadRig(); }
+    else log('Rig config changed in Setup; it applies after this session (press Connect).', 'warning');
+  }
+});
+if (window.parent !== window) { const q = document.getElementById('btn-quit'); if (q) q.style.display = 'none'; }
 </script>
 </body>
 </html>

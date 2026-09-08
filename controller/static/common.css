@@ -1,0 +1,69 @@
+/* controller/static/common.css — shared look for the shell and the new tab pages.
+   The toggle switch is the one from the old setup page (Slack / Monitor). */
+:root {
+  --bg: #1e1e1e; --bg2: #262626; --card: #2a2a2a; --line: #3a3a3a; --text: #ddd; --muted: #888;
+  --green: #7ac142; --red: #e05c5c; --amber: #e0a83c; --blue: #4a90d9; --teal: #3fb6a8;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+       font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; font-size: 13px; }
+h1, h2, h3 { margin: 0 0 8px; font-weight: 600; }
+h3 { font-size: 13px; color: #ccc; }
+a { color: var(--blue); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; margin-bottom: 12px; }
+.muted { color: var(--muted); font-size: 11px; }
+.btn { background: #444; color: #eee; border: 1px solid #555; border-radius: 4px; padding: 5px 10px;
+       font-size: 12px; cursor: pointer; }
+.btn:hover { background: #505050; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-sm { padding: 3px 7px; font-size: 11px; }
+.btn-green { background: #3d7a1f; border-color: #4c9426; }
+.btn-red { background: #8a2f2f; border-color: #a33a3a; }
+.btn-blue { background: #2f5f9a; border-color: #3a74bd; }
+.btn-teal { background: #2a7a72; border-color: #33978c; }
+input[type=text], input[type=number], select, textarea {
+  background: #1a1a1a; color: #ddd; border: 1px solid #444; border-radius: 3px; padding: 4px 6px; font-size: 12px; }
+input:disabled, select:disabled { opacity: 0.5; }
+label { font-size: 11px; color: #aaa; display: block; margin: 6px 0 2px; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); font-size: 12px; vertical-align: top; }
+th { color: #aaa; font-weight: 600; font-size: 11px; }
+
+/* status dots */
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #666; vertical-align: middle; margin-right: 4px; }
+.dot-green { background: var(--green); } .dot-red { background: var(--red); }
+.dot-amber { background: var(--amber); } .dot-grey { background: #666; } .dot-blue { background: var(--blue); }
+
+/* the toggle switch (from setup.html) */
+.toggle { position: relative; display: inline-block; width: 44px; height: 18px; flex: none; vertical-align: middle; }
+.toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
+.toggle .track { position: absolute; inset: 0; cursor: pointer; border-radius: 9px; background: #b8b8b8; transition: background 0.15s; }
+.toggle .track::before { content: ""; position: absolute; width: 14px; height: 14px; left: 2px; top: 2px; border-radius: 50%;
+  background: #fff; transition: transform 0.15s; box-shadow: 0 1px 2px rgba(0,0,0,0.4); }
+.toggle .track::after { content: "OFF"; position: absolute; right: 5px; top: 0; bottom: 0; display: flex; align-items: center;
+  font-size: 11px; font-weight: 700; color: #fff; letter-spacing: 0.3px; }
+.toggle input:checked + .track { background: #7ac142; }
+.toggle input:checked + .track::before { transform: translateX(26px); }
+.toggle input:checked + .track::after { content: "ON"; left: 6px; right: auto; }
+.toggle input:disabled + .track { opacity: 0.45; cursor: not-allowed; }
+
+/* modal */
+.modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 50; }
+.modal { background: var(--card); border: 1px solid #555; border-radius: 8px; padding: 16px 18px; min-width: 420px; max-width: 760px; max-height: 85vh; overflow: auto; }
+.modal h3 { font-size: 14px; }
+.modal .warn { background: #4a1f1f; border: 1px solid #8a2f2f; color: #f3c2c2; padding: 8px 10px; border-radius: 4px; margin: 10px 0; font-size: 12px; }
+.modal .note { background: #3a3417; border: 1px solid #6a5f2a; color: #f0dca0; padding: 8px 10px; border-radius: 4px; margin: 10px 0; font-size: 12px; }
+.modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+
+/* progress bar */
+.bar { background: #1a1a1a; border: 1px solid #444; border-radius: 3px; height: 12px; overflow: hidden; }
+.bar > span { display: block; height: 100%; background: var(--teal); width: 0; transition: width 0.3s; }
+
+/* log box */
+.log { background: #111; border: 1px solid #333; border-radius: 4px; padding: 6px 8px; font-family: Menlo, monospace;
+       font-size: 11px; max-height: 240px; overflow: auto; white-space: pre-wrap; }
+.chip { display: inline-block; background: #3a3a3a; border-radius: 10px; padding: 1px 7px; font-size: 10px; margin: 1px 2px; color: #ccc; }
+.badge { display: inline-block; border-radius: 3px; padding: 0 5px; font-size: 10px; font-weight: 600; color: #111; background: #888; }
+.badge-setup { background: #888; } .badge-connected { background: var(--blue); color: #fff; }
+.badge-deployed { background: var(--amber); } .badge-running { background: var(--green); }
+.badge-ended { background: var(--teal); color: #fff; } .badge-offline { background: #444; color: #bbb; }

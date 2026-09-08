@@ -21,6 +21,36 @@ os.environ["SDL_HINT_NO_SIGNAL_HANDLERS"] = "1"
 from .base import Device, DeviceInfo, IOType, register_device
 
 
+# 8x8 ordered (Bayer) dither matrix, threshold order 0..63. Used to break up the contouring the
+# 6-bit DPI panel would otherwise show in the luminance-corrected field: C(az) spans ~5:1, so an
+# 8-bit gradient of ~150 levels collapses to ~38 on the wire and reads as vertical columns.
+_BAYER8 = [[0, 32, 8, 40, 2, 34, 10, 42], [48, 16, 56, 24, 50, 18, 58, 26],
+           [12, 44, 4, 36, 14, 46, 6, 38], [60, 28, 52, 20, 62, 30, 54, 22],
+           [3, 35, 11, 43, 1, 33, 9, 41], [51, 19, 59, 27, 49, 17, 57, 25],
+           [15, 47, 7, 39, 13, 45, 5, 37], [63, 31, 55, 23, 61, 29, 53, 21]]
+
+
+def _build_dither_tile(shape, bits: int):
+    """Ordered-dither offsets tiled to `shape`, in [0, step) where step = 2**(8-bits) is the number
+    of 8-bit codes that collapse into ONE panel level.
+
+    The offset range is [0, step), NOT +/- step/2, because the panel TRUNCATES (drops low bits)
+    rather than rounding. For x = step*q + r, adding u ~ U[0, step) before the floor picks q with
+    probability (step-r)/step and q+1 with probability r/step, so the local mean lands on x exactly
+    -- unbiased. Centering the offset instead leaves the floor's systematic -step/2 darkening in
+    place, which is what a naive symmetric dither gets wrong (it de-bands but stays dark).
+
+    Returns None when step == 1 (an 8-bit panel needs no dither)."""
+    import numpy as np
+    step = 1 << (8 - int(bits))
+    if step <= 1:
+        return None
+    h, w = int(shape[0]), int(shape[1])
+    unit = np.asarray(_BAYER8, dtype=np.float32) / 64.0        # [0,1)
+    tile = np.tile(unit, (h // 8 + 1, w // 8 + 1))[:h, :w]
+    return (tile * step).astype(np.float32)
+
+
 def _prewarm_budget_surfaces(per_bytes: int) -> int:
     """Max full-frame surfaces to pre-warm: ~40% of MemAvailable, hard-capped at 512 MB, >= 1.
     Reads /proc/meminfo (Linux/Pi); on other platforms or a read failure, uses a conservative
@@ -63,6 +93,11 @@ class Display(Device):
         self._blank_cache = {}   # corrected uniform-field surfaces, keyed by bg value
         self._corr_map = None    # (H,W) per-pixel luminance correction C(az) in [0,1], 0 off-screen
         self._sync_rect = None   # cached photodiode sync square (corner, dead-band capped)
+        # Panel bit depth per channel. The DPI link is RGB666 (see dlp/sample_config/config_kms.txt:
+        # "RGB666 on GPIO0-21 is this overlay's DEFAULT format"), so the hardware DISCARDS the low
+        # 2 bits of every 8-bit value we write. 6 -> dither amplitude 4; 8 -> amplitude 1 (no-op).
+        self.panel_bits = max(1, min(8, int(rig_config.get("panel_bits", 6))))
+        self._dither = None      # (H,W) ordered-dither offsets in [0, 2**(8-panel_bits))
         # Photodiode sync-square prefs — authored in the setup UI's photodiode card, and
         # injected into this display config by engine/follower.py / setup's init_display payload.
         self.sync_corner = str(rig_config.get("sync_corner", "top-left"))
@@ -200,14 +235,20 @@ class Display(Device):
             self._screen.fill((0, rgb, rgb))
         pygame.display.flip()
 
+    def field_drive(self, bg_lin):
+        """0..1 per-pixel drive for the uniform background field, before quantization. Split out of
+        _build_field_surface so it can be checked without a display (surface creation needs one);
+        display_diagnostics/dither_check.py drives the real thing through this."""
+        return bg_lin * self._corr_map   # _corr_map is 0 outside the visible screen
+
     def _build_field_surface(self, bg_lin):
         """Uniform background field with the full-field per-pixel luminance correction: valid
         pixels driven at bg_lin*C(az) (uniform delivered luminance), invisible area BLACK."""
         import numpy as np
         import pygame
         valid = np.asarray(self._warp["valid_map"], dtype=bool)
-        drive = bg_lin * self._corr_map   # _corr_map is 0 outside the visible screen
-        code = np.clip(drive * 255.0, 0, 255).astype(np.uint8)
+        drive = self.field_drive(bg_lin)
+        code = self._quantize(drive)
         pixels = np.zeros((self._corr_map.shape[0], self._corr_map.shape[1], 3), dtype=np.uint8)
         pixels[valid, 1] = code[valid]
         pixels[valid, 2] = code[valid]
@@ -224,8 +265,24 @@ class Display(Device):
             self._blank_cache = {}
             self._sync_rect = None
             self._corr_map = self._build_corr_map()   # per-pixel luminance correction
+            # Keyed on the map geometry, not on _corr_map: the raw (apply_lum=False) path writes a
+            # gradient-free field that still gains from dithering, because truncation alone costs a
+            # systematic half-step of brightness.
+            keys = self._warp.files if hasattr(self._warp, "files") else list(self._warp.keys())
+            if "az_map" in keys:
+                self._dither = _build_dither_tile(self._warp["az_map"].shape, self.panel_bits)
             return True
         return False
+
+    def _quantize(self, drive):
+        """0..1 linear drive -> uint8 codes for the framebuffer, ordered-dithered so the panel's
+        6-bit truncation averages to the right luminance instead of contouring. Sole quantization
+        point for every corrected field: keep both callers on it so they cannot drift."""
+        import numpy as np
+        v = drive * 255.0
+        if self._dither is not None and self._dither.shape == drive.shape:
+            v = v + self._dither
+        return np.clip(v, 0, 255).astype(np.uint8)
 
     def _build_corr_map(self):
         """Per-pixel luminance correction C(az) in [0,1] from the warp's lum data, honoring
@@ -321,18 +378,11 @@ class Display(Device):
                 skipped += 1
         return (built, skipped)
 
-    def _build_patch_surface(self, az0, alt0, size_deg, frac, bg_gray,
-                             shape="square", apply_lum=True):
-        """Compose the full (H, W) framebuffer for one patch: a bright stimulus over a background,
-        both green+blue only (R=0). `shape` is "square" (within size_deg/2 in BOTH azimuth and
-        altitude) or "circle" (radius size_deg/2 in the az/alt plane) — a visual-angle shape,
-        warp-shaped to the screen curvature. When apply_lum, EVERY pixel's drive (background AND
-        stimulus) is multiplied by the per-pixel correction C(az) so delivered luminance is uniform
-        across azimuth (the bright center is darkened to match the dim edges); Bg=1 then means full
-        LED at the edges and attenuated at center. The invisible area (~valid_map) stays BLACK —
-        off-screen, reserved for the red photodiode sync square (see _draw_sync_border)."""
+    def patch_drive(self, az0, alt0, size_deg, frac, bg_gray, shape="square", apply_lum=True):
+        """0..1 per-pixel drive for one stimulus patch over its background, before quantization.
+        Split out of _build_patch_surface for the same reason as field_drive: this is the part
+        worth checking, and the surface it feeds cannot be built without a display."""
         import numpy as np
-        import pygame
         az_map = self._warp["az_map"]
         alt_map = self._warp["alt_map"]
         valid = np.asarray(self._warp["valid_map"], dtype=bool)
@@ -350,10 +400,25 @@ class Display(Device):
         ideal = np.where(lit, stim_lin, bg_lin)
         # Full-field per-pixel luminance correction (or raw drive, masked to the visible screen).
         if apply_lum and self._corr_map is not None:
-            drive = ideal * self._corr_map
-        else:
-            drive = np.where(valid, ideal, 0.0)
-        code = np.clip(drive * 255.0, 0, 255).astype(np.uint8)   # green+blue only, R=0
+            return ideal * self._corr_map
+        return np.where(valid, ideal, 0.0)
+
+    def _build_patch_surface(self, az0, alt0, size_deg, frac, bg_gray,
+                             shape="square", apply_lum=True):
+        """Compose the full (H, W) framebuffer for one patch: a bright stimulus over a background,
+        both green+blue only (R=0). `shape` is "square" (within size_deg/2 in BOTH azimuth and
+        altitude) or "circle" (radius size_deg/2 in the az/alt plane) — a visual-angle shape,
+        warp-shaped to the screen curvature. When apply_lum, EVERY pixel's drive (background AND
+        stimulus) is multiplied by the per-pixel correction C(az) so delivered luminance is uniform
+        across azimuth (the bright center is darkened to match the dim edges); Bg=1 then means full
+        LED at the edges and attenuated at center. The invisible area (~valid_map) stays BLACK —
+        off-screen, reserved for the red photodiode sync square (see _draw_sync_border)."""
+        import numpy as np
+        import pygame
+        az_map = self._warp["az_map"]
+        valid = np.asarray(self._warp["valid_map"], dtype=bool)
+        drive = self.patch_drive(az0, alt0, size_deg, frac, bg_gray, shape, apply_lum)
+        code = self._quantize(drive)                              # green+blue only, R=0
         pixels = np.zeros((az_map.shape[0], az_map.shape[1], 3), dtype=np.uint8)
         pixels[valid, 1] = code[valid]
         pixels[valid, 2] = code[valid]

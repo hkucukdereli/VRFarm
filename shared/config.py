@@ -99,8 +99,8 @@ def next_session_num(subject_id: str, today: str, db_dir: Union[str, Path]) -> i
 def register_session(subject_id: str, session_id: str, session_num: int,
                      date_str: str, task_config: dict,
                      db_dir: Union[str, Path],
-                     n_trials_completed: int = 0, notes: str = ""):
-    """Record a completed session in the subject database."""
+                     n_trials_completed: int = 0, notes: str = "", rig: str = ""):
+    """Record a completed session in the subject database (rig = which rig ran it)."""
     db_dir = Path(db_dir)
     db_dir.mkdir(parents=True, exist_ok=True)
     db_file = db_dir / f"{subject_id}.json"
@@ -129,6 +129,7 @@ def register_session(subject_id: str, session_id: str, session_num: int,
         "stim_size_deg": stim.get("size_deg", 0),
         "contrast_values": contrast_values,
         "notes": notes,
+        "rig": rig,
         "timestamp": datetime.now().isoformat(),
     })
 

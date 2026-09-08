@@ -21,7 +21,7 @@ The four Slack messages:
   • ⏱️  global timeout        → MOCK_END=timeout : dry trials, aborts mid-session after
                                 MOCK_DRY trials (global_timeout → session_end), like the real engine
 
-Env: MOCK_N=8  MOCK_ITI=2.5  MOCK_TRIAL_S=1.0  MOCK_END=end|timeout  MOCK_DRY=3
+Env: MOCK_N=8  MOCK_ITI=2.5  MOCK_TRIAL_S=1.0  MOCK_END=end|timeout  MOCK_DRY=3  MOCK_RIG=<name>
      API_PORT=5080  EVENT_PORT=5571  CMD_PORT=5572  CTRL_HOST=127.0.0.1
 """
 import json
@@ -42,6 +42,7 @@ TRIAL_S = float(os.environ.get("MOCK_TRIAL_S", 1.0))   # stim/response phase len
 END_MODE = os.environ.get("MOCK_END", "end")           # "end" (normal) or "timeout" (global abort)
 DRY_N = int(os.environ.get("MOCK_DRY", 3))             # timeout mode: abort after this many dry trials
 CTRL_HOST = os.environ.get("CTRL_HOST", "127.0.0.1")
+MOCK_RIG = os.environ.get("MOCK_RIG", "")                # rig name stamped on every event (multi-rig demux)
 
 app = Flask(__name__)
 _stop = threading.Event()       # set when the controller sends STOP
@@ -74,12 +75,16 @@ def download(p):
 
 @app.route("/api/status", methods=["GET"])
 def status():
-    return jsonify({"ok": True, "role": "leader", "running": _running.is_set()})
+    # process_running mirrors the real pi_api: the controller's GO refuses to send START if the
+    # "engine" is not running, and reads the log for the leader's ready line (below).
+    return jsonify({"ok": True, "role": "leader", "running": _running.is_set(),
+                    "process_running": True, "camera_recording": False, "hostname": f"mock-{MOCK_RIG or 'pi'}"})
 
 
 @app.route("/api/logs", methods=["GET"])
 def logs():
-    return jsonify({"ok": True, "lines": ["[mock-pi] fake leader — no real engine"]})
+    return jsonify({"ok": True, "lines": ["[mock-pi] fake leader — no real engine",
+                                          "Waiting for START command..."]})
 
 
 @app.route("/api/<path:endpoint>", methods=["GET", "POST"])
@@ -92,6 +97,8 @@ def catchall(endpoint):
 
 def _send(sock, evt):
     evt.setdefault("t", time.time())
+    if MOCK_RIG:
+        evt.setdefault("rig", MOCK_RIG)
     sock.sendto(json.dumps(evt).encode(), (CTRL_HOST, EVENT_PORT))
 
 

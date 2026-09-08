@@ -880,10 +880,24 @@ def api_lum_apply():
                             "error": "Need at least 2 azimuth readings to fit."}), 400
         try:
             sys.path.insert(0, str(GEO_DIR))
-            from fit_luminance_correction import fit_luminance, save_luminance_cal
+            from fit_luminance_correction import (fit_luminance, save_luminance_cal,
+                                                  azimuth_asymmetry)
             az, gain, corr = fit_luminance(valid)
             out = save_luminance_cal(az, gain, corr, source_file="setup-ui")
             steps.append(f"Fitted {len(valid)} readings → {out.name}")
+            # The fit folds +az onto -az. Say out loud whether that was justified: nothing else
+            # in the pipeline can tell the operator the screen is lopsided.
+            asym = azimuth_asymmetry(valid)
+            if asym is None:
+                steps.append("Only one side of centre measured — symmetry assumed, not checked")
+            else:
+                worst = max(asym["pairs"], key=lambda p: abs(p[3]))
+                steps.append(f"L/R symmetry: mean {100*asym['mean_rel']:.1f}%, "
+                             f"worst {100*worst[3]:+.1f}% at |az| {worst[0]:g}°")
+                if asym["max_rel"] > 0.10:
+                    steps.append("  ⚠ >10% left/right spread — the 1D symmetric correction is "
+                                 "averaging away a real gradient; check projector yaw / screen "
+                                 "mounting before trusting this fit")
             fit = {"az": [float(x) for x in az],
                    "gain": [float(x) for x in gain],
                    "correction": [float(x) for x in corr]}

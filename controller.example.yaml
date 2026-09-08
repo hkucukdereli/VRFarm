@@ -1,0 +1,18 @@
+# VRFarm controller settings — copy to controller.yaml (gitignored, machine-specific).
+# Everything here is controller-wide; per-rig settings stay in rigs/<rig>.yaml.
+
+ui_port: 5000                 # the one web UI port (use 5055 if macOS AirPlay squats 5000)
+controller_ip: 192.168.10.1   # this machine's address on the rig switch (drawn in Network)
+event_port: 5571              # every rig's leader sends events here; rig YAMLs must agree
+
+data_root: null               # where synced data lands; null -> $VRFARM_DATA_DIR or ~/VRFarm/data
+auto_purge: false             # Sync Now / Sync & Poweroff delete each folder on the Pi after a verified sync
+rsync_path: null              # null -> the vrfarm conda env's rsync (conda-forge, >= 3.1)
+
+sync:
+  parallel_rigs: 4            # rigs synced at the same time
+  bwlimit_mbps: 0             # 0 = unlimited
+  verify_checksum_before_purge: false   # full checksum pass before deleting on the Pi (slow, exact)
+  shepherd_logs_keep_days: 7
+
+groups: {}                    # "super rigs": name -> [rig, rig, ...], e.g. roomA: [cheddar, gouda]

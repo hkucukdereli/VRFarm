@@ -1217,7 +1217,10 @@ class Leader:
             s.close()
 
     def _publish(self, event: dict):
-        """Send event to Mac via UDP."""
+        """Send event to the controller via UDP. Every event carries this rig's name: the
+        controller sorts datagrams by sender IP first and by this field when the IP is
+        ambiguous (mock Pis on one machine, or a Pi whose IP was edited while loaded)."""
+        event.setdefault("rig", (self.rig or {}).get("name", ""))
         if self._mac_addr:
             self._event_sock.sendto(
                 json.dumps(event).encode(), self._mac_addr)

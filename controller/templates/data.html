@@ -1,10 +1,331 @@
 <!DOCTYPE html>
 <html lang="en">
-<head><meta charset="utf-8"><title>VRFarm — Data</title><link rel="stylesheet" href="/static/common.css">
-<style> body { padding: 18px; } </style></head>
+<head>
+<meta charset="utf-8">
+<title>VRFarm — Data</title>
+<link rel="stylesheet" href="/static/common.css">
+<style>
+  body { padding: 14px 18px; overflow: auto; height: 100vh; }
+  .topbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .topbar input[type=text] { min-width: 320px; flex: 1; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; }
+  .rigcard { border: 1px solid var(--line); border-radius: 6px; background: var(--card); padding: 8px 10px; }
+  .rigcard.off { opacity: 0.6; }
+  .rigcard h3 { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .rigcard h3 input { transform: scale(1.2); }
+  .kv { font-size: 11px; color: #aaa; }
+  .kv b { color: #ddd; font-weight: 600; }
+  .folders { margin-top: 6px; max-height: 160px; overflow: auto; font-size: 11px; }
+  .folders div { display: flex; justify-content: space-between; gap: 6px; padding: 1px 0; }
+  .g { color: var(--green); } .r { color: var(--red); } .y { color: var(--amber); } .x { color: #888; }
+  .actions { display: flex; gap: 10px; align-items: center; margin: 12px 0; flex-wrap: wrap; }
+  .actions .btn { padding: 8px 14px; font-size: 13px; }
+  #banner { display: none; background: #4a1f1f; border: 1px solid #8a2f2f; color: #f3c2c2; padding: 8px 10px; border-radius: 4px; margin-bottom: 10px; font-size: 12px; }
+  #progress { display: none; }
+  .rigbar { display: grid; grid-template-columns: 110px 1fr 220px; gap: 8px; align-items: center; margin: 3px 0; font-size: 12px; }
+  select[multiple] { min-height: 160px; width: 100%; font-family: Menlo, monospace; font-size: 12px; }
+  option.g { color: #7ac142; } option.r { color: #ff7b7b; } option.x { color: #999; }
+</style>
+</head>
 <body>
-<h2 style="font-size:16px">Data</h2>
-<div class="card">Sync Now, Sync &amp; Poweroff and Purge Data arrive in the next step (phase 3 of the multi-rig work).
-  Until then, session data stays on each leader Pi under <code>~/data</code> and the video SSD.</div>
+<h2 style="font-size:16px; margin-bottom:8px">Data</h2>
+<div id="banner"></div>
+
+<div class="card topbar">
+  <span>Load</span>
+  <select id="pick"><option value="">-- rig or group --</option></select>
+  <button class="btn btn-sm btn-blue" id="btn-load" onclick="loadPick()">Load</button>
+  <button class="btn btn-sm" onclick="refreshAll()" title="Re-read every loaded leader over SSH">Refresh</button>
+  <span style="flex:1"></span>
+  <span>Data root</span>
+  <input type="text" id="data-root" placeholder="~/VRFarm/data" onchange="saveRoot()">
+  <button class="btn btn-sm btn-blue" onclick="browseRoot()">Browse…</button>
+  <span style="display:inline-flex; align-items:center; gap:6px; margin-left:8px">
+    <span>Auto purge</span>
+    <label class="toggle"><input type="checkbox" id="auto-purge" onchange="onAutoPurge(this)"><span class="track"></span></label>
+  </span>
+</div>
+
+<div class="cards" id="cards"><div class="muted">Load a rig or a group to see its leader.</div></div>
+
+<div class="actions">
+  <button class="btn btn-teal" id="btn-sync" onclick="openSyncNow()" disabled>Sync Now</button>
+  <button class="btn btn-green" id="btn-syncoff" onclick="openSyncPoweroff()" disabled>Sync &amp; Poweroff</button>
+  <button class="btn btn-red" id="btn-purge" onclick="openPurge()" disabled>Purge Data</button>
+  <span class="muted" id="action-note"></span>
+</div>
+
+<div class="card" id="progress">
+  <h3 style="display:flex; align-items:center; gap:10px">Job <span id="job-kind" class="badge"></span>
+    <span id="job-status" class="muted"></span><span style="flex:1"></span>
+    <button class="btn btn-sm btn-red" id="btn-cancel" onclick="cancelJob()">Cancel</button></h3>
+  <div class="rigbar"><span>overall</span><div class="bar"><span id="bar-all"></span></div><span id="pct-all"></span></div>
+  <div id="rigbars"></div>
+  <div class="log" id="joblog" style="margin-top:8px; max-height:260px"></div>
+</div>
+
+<div class="card">
+  <h3>Log</h3>
+  <div class="log" id="log"></div>
+</div>
+
+<div id="modal-host"></div>
+
+<script>
+let S = {settings: null, cards: {}, job: null, poll: null};
+
+function log(msg) {
+  const el = document.getElementById('log');
+  el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}\n` + el.textContent;
+}
+async function api(method, path, body) {
+  const r = await fetch(path, {method, headers: body ? {'Content-Type': 'application/json'} : {}, body: body ? JSON.stringify(body) : undefined});
+  let d = {}; try { d = await r.json(); } catch (e) {}
+  if (!r.ok && d.error === undefined) d.error = `HTTP ${r.status}`;
+  return d;
+}
+const MB = b => (b / 1e6).toFixed(1) + ' MB';
+const GB = b => (b / 1e9).toFixed(2) + ' GB';
+const fmtT = t => t ? new Date(t * 1000).toLocaleString() : 'never';
+
+// ── settings + picker ──
+async function loadSettings() {
+  S.settings = await api('GET', '/api/data/settings');
+  const s = S.settings;
+  document.getElementById('data-root').value = s.data_root;
+  document.getElementById('auto-purge').checked = !!s.auto_purge;
+  const b = document.getElementById('banner');
+  if (!s.rsync.ok) { b.style.display = 'block'; b.innerHTML = `<b>rsync problem:</b> ${s.rsync.error} <span class="muted">(${s.rsync.path})</span> — sync and purge are disabled.`; }
+  else b.style.display = 'none';
+  const pick = document.getElementById('pick');
+  const cur = pick.value;
+  pick.innerHTML = '<option value="">-- rig or group --</option>' +
+    (s.rigs || []).map(r => `<option value="rig:${r}">${r}</option>`).join('') +
+    Object.keys(s.groups || {}).map(g => `<option value="group:${g}">★ ${g} (${s.groups[g].join(', ')})</option>`).join('');
+  pick.value = cur;
+  updateButtons();
+}
+async function saveRoot() {
+  const v = document.getElementById('data-root').value.trim();
+  const d = await api('PUT', '/api/data/settings', {data_root: v});
+  log('Data root: ' + d.data_root); loadSettings(); refreshAll();
+}
+async function browseRoot() {
+  const d = await api('POST', '/api/data/browse_folder');
+  if (d.ok) { document.getElementById('data-root').value = d.path; saveRoot(); }
+  else if (d.error !== 'cancelled') log('Browse failed: ' + d.error);
+}
+async function onAutoPurge(cb) {
+  if (cb.checked && !confirm('Auto purge ON: Sync Now and Sync & Poweroff will DELETE each date folder on the Pi right after its verified sync.\n\nContinue?')) { cb.checked = false; return; }
+  const d = await api('PUT', '/api/data/settings', {auto_purge: cb.checked});
+  log('Auto purge ' + (d.auto_purge ? 'ON' : 'off'));
+  S.settings.auto_purge = d.auto_purge;
+}
+async function loadPick() {
+  const v = document.getElementById('pick').value;
+  if (!v) return;
+  const [kind, name] = v.split(':');
+  const d = await api('POST', '/api/data/load', kind === 'group' ? {group: name} : {rig: name});
+  if (!d.ok) log('Load: ' + JSON.stringify(d.results || d.error));
+  (d.rigs || []).forEach(r => { if (!S.cards[r]) S.cards[r] = {name: r, selected: true, folders: []}; });
+  renderCards();
+  await refreshRigs(d.rigs || []);
+}
+function selectedRigs() { return Object.values(S.cards).filter(c => c.selected).map(c => c.name); }
+
+// ── inventory / cards ──
+async function refreshAll() { await refreshRigs(Object.keys(S.cards)); }
+async function refreshRigs(names) {
+  if (!names.length) return;
+  names.forEach(n => { if (S.cards[n]) S.cards[n].loading = true; });
+  renderCards();
+  const d = await api('POST', '/api/data/inventory', {rigs: names});
+  for (const [n, c] of Object.entries(d.rigs || {})) {
+    S.cards[n] = {...(S.cards[n] || {selected: true}), ...c, loading: false};
+    if (c.error) log(`${n}: ${c.error}`);
+  }
+  renderCards();
+}
+function statusClass(st) { return st === 'green' ? 'g' : st === 'red' ? 'r' : 'x'; }
+function renderCards() {
+  const host = document.getElementById('cards');
+  const cards = Object.values(S.cards);
+  if (!cards.length) { host.innerHTML = '<div class="muted">Load a rig or a group to see its leader.</div>'; updateButtons(); return; }
+  host.innerHTML = cards.map(c => {
+    const dot = c.loading ? 'dot-amber' : c.ssh_ok ? 'dot-green' : 'dot-red';
+    const nRed = (c.folders || []).filter(f => f.status !== 'green').length;
+    const nGreen = (c.folders || []).filter(f => f.status === 'green').length;
+    const dd = c.disk_data, dv = c.disk_video;
+    return `<div class="rigcard ${c.phase === 'offline' ? 'off' : ''}">
+      <h3><input type="checkbox" ${c.selected ? 'checked' : ''} onchange="S.cards['${c.name}'].selected = this.checked; updateButtons()">
+        <span class="dot ${dot}"></span>${c.name}
+        ${c.phase ? `<span class="badge badge-${c.phase}">${c.phase}</span>` : ''}
+        <span style="flex:1"></span><button class="btn btn-sm" onclick="refreshRigs(['${c.name}'])">↻</button></h3>
+      <div class="kv">leader <b>${c.leader ? c.leader.name + ' · ' + c.leader.ip : '?'}</b>${c.hostname ? ' (' + c.hostname + ')' : ''}
+        ${c.loading ? ' · <span class="y">checking…</span>' : c.ssh_ok ? ' · SSH ok' : ' · <span class="r">no SSH</span>'}</div>
+      ${c.error ? `<div class="r" style="font-size:11px">${c.error}</div>` : ''}
+      <div class="kv">engine <b class="${c.engine_running ? 'r' : ''}">${c.engine_running == null ? '?' : c.engine_running ? 'RUNNING' : 'stopped'}</b>
+        · data disk <b>${dd ? dd.free_gb + ' GB free' : '?'}</b>${dv ? ` · video SSD <b>${dv.free_gb} GB free</b>` : ''}</div>
+      <div class="kv">last sync <b>${fmtT(c.last_sync_t)}</b> · <span class="g">${nGreen} synced</span> · <span class="r">${nRed} unsynced</span></div>
+      <div class="folders">${(c.folders || []).map(f =>
+        `<div><span class="${statusClass(f.status)}">${f.status === 'green' ? '●' : f.status === 'red' ? '●' : '○'} ${f.key.split('/')[1]}</span>
+              <span class="x">${f.sessions.length} sess${f.n_unconsolidated ? ` · <span class="y">${f.n_unconsolidated} unconsolidated</span>` : ''}${f.video_only ? ' · video only' : ''} · ${MB(f.bytes)}</span></div>`).join('') ||
+        '<span class="muted">no date folders</span>'}</div>
+    </div>`;
+  }).join('');
+  updateButtons();
+}
+function updateButtons() {
+  const sel = selectedRigs().filter(n => S.cards[n] && S.cards[n].ssh_ok);
+  const busy = !!(S.job && ['queued', 'running'].includes(S.job.status));
+  const rsyncOk = S.settings && S.settings.rsync && S.settings.rsync.ok;
+  document.getElementById('btn-sync').disabled = busy || !sel.length || !rsyncOk;
+  document.getElementById('btn-syncoff').disabled = busy || !sel.length || !rsyncOk;
+  document.getElementById('btn-purge').disabled = busy || !sel.length || !rsyncOk;
+  document.getElementById('action-note').textContent = busy ? 'a job is running' :
+    !sel.length ? 'select at least one reachable rig' : `acting on: ${sel.join(', ')}` + (S.settings && S.settings.auto_purge ? ' · auto purge ON' : '');
+}
+
+// ── modals ──
+function modal(html) {
+  document.getElementById('modal-host').innerHTML = `<div class="modal-bg" onclick="if(event.target===this)closeModal()"><div class="modal">${html}</div></div>`;
+}
+function closeModal() { document.getElementById('modal-host').innerHTML = ''; }
+
+function openSyncNow() {
+  const rigs = selectedRigs().filter(n => S.cards[n].ssh_ok);
+  const opts = [];
+  rigs.forEach(n => (S.cards[n].folders || []).forEach(f => {
+    const cls = statusClass(f.status);
+    opts.push(`<option class="${cls}" value="${n}|${f.key}" ${f.status !== 'green' ? 'selected' : ''}>${f.status === 'green' ? '✓' : f.status === 'red' ? '✗' : '?'} ${n} · ${f.key.split('/')[1]} · ${f.sessions.length} sess · ${MB(f.bytes)}</option>`);
+  }));
+  const auto = S.settings && S.settings.auto_purge;
+  modal(`<h3>Sync Now</h3>
+    <div class="muted">Pick the mouse/date folders to copy into <code>${S.settings.data_root}</code>. Green = already synced, red = unsynced. All unsynced are pre-selected.</div>
+    <div style="margin:8px 0"><select id="sync-sel" multiple size="12">${opts.join('') || '<option disabled>no folders</option>'}</select></div>
+    <div style="display:flex; gap:8px"><button class="btn btn-sm" onclick="selAll(true)">select all unsynced</button><button class="btn btn-sm" onclick="selAll(false)">select all</button></div>
+    ${auto ? '<div class="warn">Auto purge is ON: each folder is deleted on the Pi right after its verified copy.</div>' : ''}
+    <div class="actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-teal" onclick="runSyncNow()">Sync</button></div>`);
+}
+function selAll(onlyRed) {
+  [...document.querySelectorAll('#sync-sel option')].forEach(o => { o.selected = onlyRed ? !o.classList.contains('g') : true; });
+}
+async function runSyncNow() {
+  const items = {};
+  [...document.querySelectorAll('#sync-sel option:checked')].forEach(o => { const [rig, key] = o.value.split('|'); (items[rig] = items[rig] || []).push(key); });
+  if (!Object.keys(items).length) { log('Nothing selected'); return; }
+  closeModal();
+  const d = await api('POST', '/api/data/sync', {items});
+  if (!d.ok) { log('Sync refused: ' + d.error); return; }
+  startJob(d.job);
+}
+
+async function openSyncPoweroff() {
+  const rigs = selectedRigs();
+  const d = await api('POST', '/api/data/sync_poweroff/preview', {rigs});
+  const rows = [], skipped = [];
+  let total = 0;
+  for (const [n, e] of Object.entries(d.rigs || {})) {
+    if (e.skipped_reason) { skipped.push(`${n}: ${e.skipped_reason}`); continue; }
+    const fol = e.followers.map(f => `${f.name} ${f.ssh_ok ? '✓' : '<span class="r">no SSH — cannot power off</span>'}`).join(', ');
+    rows.push(`<tr><td><b>${n}</b><div class="muted">followers: ${fol || 'none'}</div></td><td>${e.folders.map(f => `${f.key.split('/')[1]} (${f.sessions.length} sess, ${MB(f.bytes)})`).join('<br>') || '<span class="muted">nothing unsynced — will just power off</span>'}</td><td>${MB(e.bytes)}</td></tr>`);
+    total += e.bytes;
+  }
+  const go = rows.length;
+  modal(`<h3>Sync &amp; Poweroff</h3>
+    <table><thead><tr><th>Rig</th><th>Will sync (unsynced mouse/date folders)</th><th>Size</th></tr></thead><tbody>${rows.join('') || '<tr><td colspan="3" class="muted">no rig can be synced</td></tr>'}</tbody></table>
+    <div style="text-align:right; margin-top:4px">total ${GB(total)}</div>
+    ${skipped.length ? `<div class="note">Skipped: ${skipped.join('; ')}</div>` : ''}
+    ${d.auto_purge ? '<div class="note">Auto purge is ON: each folder is deleted on the Pi after its verified copy.</div>' : ''}
+    <div class="warn"><b>After the transfer completes, ALL Pis of ${go ? Object.keys(d.rigs).filter(n => !d.rigs[n].skipped_reason).join(', ') : 'these rigs'} (leaders and followers) will be POWERED OFF.</b>
+      Do not cut power or close this page until every rig shows OFF. A rig whose sync fails is not powered off.</div>
+    <div class="actions"><button class="btn" onclick="closeModal()">No, cancel</button>
+      <button class="btn btn-green" ${go ? '' : 'disabled'} onclick="runSyncPoweroff(${JSON.stringify(Object.keys(d.rigs).filter(n => !d.rigs[n].skipped_reason)).replace(/"/g, '&quot;')})">Yes — sync and power off ${go} rig${go === 1 ? '' : 's'}</button></div>`);
+}
+async function runSyncPoweroff(rigs) {
+  closeModal();
+  const d = await api('POST', '/api/data/sync_poweroff', {rigs, confirm: true});
+  if (!d.ok) { log('Refused: ' + d.error); return; }
+  startJob(d.job);
+}
+
+async function openPurge() {
+  const rigs = selectedRigs();
+  const d = await api('POST', '/api/data/purge/preview', {rigs});
+  const rows = [], skipped = [];
+  let total = 0, n = 0;
+  const items = {};
+  for (const [rig, e] of Object.entries(d.rigs || {})) {
+    if (e.skipped_reason) { skipped.push(`${rig}: ${e.skipped_reason}`); continue; }
+    e.folders.forEach(f => { (items[rig] = items[rig] || []).push(f.key); n++; total += f.bytes;
+      rows.push(`<tr><td>${rig}</td><td>${f.key}</td><td>${f.sessions.length}</td><td>${MB(f.bytes)}</td></tr>`); });
+  }
+  modal(`<h3>Purge Data</h3>
+    <div class="muted">Date folders that are fully synced (verified identical under <code>${d.data_root}</code>) and consolidated. Unsynced or unconsolidated folders are not listed and will not be touched.</div>
+    <table style="margin-top:6px"><thead><tr><th>Rig</th><th>Folder</th><th>Sessions</th><th>Size</th></tr></thead><tbody>${rows.join('') || '<tr><td colspan="4" class="muted">nothing to purge</td></tr>'}</tbody></table>
+    <div style="text-align:right; margin-top:4px">total ${GB(total)}</div>
+    ${skipped.length ? `<div class="note">Skipped: ${skipped.join('; ')}</div>` : ''}
+    <div class="warn">This deletes ${n} folder${n === 1 ? '' : 's'} on the Pi(s), in both the data and video trees. Each folder is re-verified against the data root right before deletion.</div>
+    <div class="actions"><button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-red" ${n ? '' : 'disabled'} onclick='runPurge(${JSON.stringify(items)})'>Delete ${n} folder${n === 1 ? '' : 's'} on the Pis</button></div>`);
+}
+async function runPurge(items) {
+  closeModal();
+  const d = await api('POST', '/api/data/purge', {items, confirm: true});
+  if (!d.ok) { log('Refused: ' + d.error); return; }
+  startJob(d.job);
+}
+
+// ── jobs ──
+function startJob(job) {
+  S.job = job;
+  document.getElementById('progress').style.display = 'block';
+  log(`Started ${job.kind} job ${job.id} on ${job.rigs.join(', ')}`);
+  updateButtons();
+  clearInterval(S.poll);
+  S.poll = setInterval(pollJob, 1000);
+  pollJob();
+}
+async function pollJob() {
+  if (!S.job) return;
+  const j = await api('GET', `/api/data/jobs/${S.job.id}`);
+  if (j.error) return;
+  S.job = j;
+  document.getElementById('job-kind').textContent = j.kind;
+  document.getElementById('job-status').textContent = j.status + (j.error ? ' — ' + j.error : '');
+  document.getElementById('bar-all').style.width = j.overall_pct + '%';
+  document.getElementById('pct-all').textContent = j.overall_pct + '%';
+  document.getElementById('rigbars').innerHTML = Object.entries(j.progress).map(([rig, p]) => {
+    const r = j.result[rig] || {};
+    const off = r.poweroff ? ` · power: <b class="${r.poweroff === 'off' ? 'g' : r.poweroff === 'failed' ? 'r' : 'y'}">${r.poweroff === 'off' ? 'OFF — safe to cut power' : r.poweroff}</b>` : '';
+    return `<div class="rigbar"><span>${rig}</span><div class="bar"><span style="width:${p.pct || 0}%"></span></div>
+      <span class="muted">${p.state}${p.current ? ' · ' + p.current.split('/')[1] : ''}${p.rate ? ' · ' + p.rate : ''}${off}</span></div>`;
+  }).join('');
+  document.getElementById('joblog').textContent = (j.log || []).map(l => `[${new Date(l.t * 1000).toLocaleTimeString()}] ${l.rig || '-'}: ${l.msg}`).reverse().join('\n');
+  document.getElementById('btn-cancel').disabled = !['queued', 'running'].includes(j.status);
+  if (!['queued', 'running'].includes(j.status)) {
+    clearInterval(S.poll); S.poll = null;
+    log(`Job ${j.id} ${j.status}` + (j.error ? ': ' + j.error : ''));
+    updateButtons();
+    refreshRigs(j.rigs);
+  }
+}
+async function cancelJob() {
+  if (!S.job) return;
+  const d = await api('POST', `/api/data/jobs/${S.job.id}/cancel`);
+  if (!d.ok) log('Cancel: ' + d.error);
+}
+
+// ── boot ──
+loadSettings().then(async () => {
+  // rigs already loaded elsewhere (Setup / Experiment) show up as cards straight away
+  (S.settings.loaded || []).forEach(r => { S.cards[r] = {name: r, selected: true, folders: []}; });
+  renderCards();
+  if (S.settings.loaded && S.settings.loaded.length) refreshRigs(S.settings.loaded);
+  const jobs = await api('GET', '/api/data/jobs');
+  if (jobs.current) startJob(jobs.current);
+});
+window.addEventListener('message', ev => { if (ev.data && ev.data.type === 'vrfarm:visible' && ev.data.visible) loadSettings(); });
+</script>
 </body>
 </html>

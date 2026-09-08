@@ -2139,6 +2139,7 @@ function renderPiList() {
     </div>`;
   }).join('');
   syncLogHeight();
+  if (uiBusy) _applyLockState();   // same reason as renderDeviceList: fresh buttons default to enabled
 }
 
 // Keep the Log card exactly as tall as the Pis card (measured with align-items:flex-start so log
@@ -2189,6 +2190,11 @@ function renderDeviceList() {
 
   el.innerHTML = `<div class="device-tabs">${tabs}</div><div class="device-panels">${panels}</div>`;
   if (lumMeasure) renderLumPanel();   // re-hydrate an open intensity-cal panel after a re-render
+  // A re-render replaces every button element, and fresh elements are enabled by default — so a
+  // re-render DURING a locked operation silently unlocked the UI. renderAll() already guarded
+  // itself; the ~20 direct callers of this function did not. generateWarp was one of them: it
+  // locks, then saveGeometry() re-renders, and the whole UI came back live mid-deploy.
+  if (uiBusy) _applyLockState();
 }
 
 // Switch the visible device tab in place (no full re-render, so input state is preserved).

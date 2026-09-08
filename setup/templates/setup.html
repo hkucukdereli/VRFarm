@@ -1131,20 +1131,44 @@ async function applyIntensity() {
   finally { _unlockUI(); }
 }
 
-// Both sides of centre. The fit still folds to |az| (the correction is 1D and symmetric), so the
-// negative half is not extra resolution — it is a TEST of the symmetry assumption, which nothing
-// in the geometry can verify: lateral_offset_cm=0 makes the model symmetric, but projector yaw,
-// DLP illumination asymmetry (TIR prism / LED placement) and screen mounting are not modelled at
-// all. Fit & Apply reports the left/right spread; if it is large, the 1D symmetric correction is
-// the wrong shape and no amount of fitting will fix it.
-// Ordered as a single sweep across the screen so the meter moves one way.
-const LUM_AZIMUTHS = [-100, -80, -60, -40, -20, 0, 20, 40, 60, 80, 100];
+// Azimuth MAGNITUDES; the side is chosen with the panel's checkbox. The fit folds to |az| (the
+// correction is 1D and symmetric about centre), so measuring the second side is not extra
+// resolution — it is a TEST of that symmetry, which nothing in the geometry can verify:
+// lateral_offset_cm=0 makes the MODEL symmetric, but projector yaw is not a parameter at all, and
+// DLP illumination asymmetry (TIR prism / LED placement) and screen mounting are outside it.
+// Readings are keyed by SIGNED azimuth, so flipping the checkbox keeps what you already measured
+// and Fit & Apply submits both sides at once — that is what lets the fit report the L/R spread.
+const LUM_AZ_MAGNITUDES = [0, 20, 40, 60, 80, 100];
+// The meter needs the new patch to actually be on the screen before it integrates. SHOW->flip
+// measured at ~62 ms; a PM100D integrates over ~100-300 ms on top of that.
+const LUM_SETTLE_MS = 400;
+
+function lumAzList(sign) {
+  return LUM_AZ_MAGNITUDES.map(a => (a === 0 ? 0 : a * sign));   // avoid -0 as an object key
+}
 function openLumPanel(method) {
   const p = document.getElementById('lum-panel');
   if (!p) return;
-  lumMeasure = {method, azs: LUM_AZIMUTHS.slice(), idx: 0, size: 15, alt: 0, readings: {}};
+  // Inherit the patch geometry from the Display card's stimulus test so the meter sees the same
+  // shape the experiment will. Contrast/bg/apply_lum deliberately do NOT inherit — the fit needs
+  // max drive on black with the correction OFF, or it would measure the curve it is deriving.
+  const altEl = document.getElementById('test-stim-alt');
+  const sizeEl = document.getElementById('test-stim-size');
+  const alt = altEl ? (parseFloat(altEl.value) || 0) : 0;
+  const size = sizeEl ? (parseFloat(sizeEl.value) || 15) : 15;
+  lumMeasure = {method, sign: 1, azs: lumAzList(1), idx: 0, size, alt, readings: {}};
   renderLumPanel();
   showLumPatch();   // light the first patch so the operator sees where to aim
+}
+// Flip which side of centre is being measured. Readings already taken are kept (they are keyed by
+// signed azimuth), so measure one side, flip, measure the other, and Fit & Apply sees both.
+async function lumSetSign(negative) {
+  if (!lumMeasure) return;
+  lumMeasure.sign = negative ? -1 : 1;
+  lumMeasure.azs = lumAzList(lumMeasure.sign);
+  lumMeasure.idx = Math.min(lumMeasure.idx, lumMeasure.azs.length - 1);
+  renderLumPanel();
+  await showLumPatch();
 }
 function closeLumPanel() {
   lumMeasure = null;
@@ -1155,6 +1179,9 @@ function renderLumPanel() {
   const p = document.getElementById('lum-panel');
   if (!p || !lumMeasure) return;
   const m = lumMeasure;
+  const totalDone = Object.keys(m.readings).length;
+  const sideDone = m.azs.filter(az => az in m.readings).length;
+  const otherDone = totalDone - sideDone;
   const rows = m.azs.map((az, i) => {
     const val = (az in m.readings) ? m.readings[az] : '';
     const hl = (i === m.idx) ? ' style="background:#2d2d2d"' : '';
@@ -1175,12 +1202,19 @@ function renderLumPanel() {
       Measuring (${m.method}) — aim the PM100D at each white patch, Read (or type), then Fit &amp; Apply.
       Patch size <input type="number" value="${m.size}" min="1" step="1" style="width:52px"
         onchange="lumMeasure.size=parseFloat(this.value)||15; showLumPatch()">°
+      &nbsp; Altitude <input type="number" value="${m.alt}" step="any" style="width:52px"
+        onchange="lumMeasure.alt=parseFloat(this.value)||0; showLumPatch()">°
+      <label style="margin-left:10px; cursor:pointer">
+        <input type="checkbox" ${m.sign < 0 ? 'checked' : ''}
+               onchange="lumSetSign(this.checked)"> negative azimuth
+      </label>
     </div>
     <table style="font-size:12px; border-collapse:collapse">${rows}</table>
     <div style="margin-top:6px; display:flex; align-items:center; gap:8px">
       <button class="btn btn-green btn-sm" onclick="lumFitApply()">Fit &amp; Apply</button>
       <button class="btn btn-gray btn-sm" onclick="closeLumPanel()">Cancel</button>
-      <span style="font-size:10px; color:#888">${Object.keys(m.readings).length}/${m.azs.length} measured</span>
+      <span style="font-size:10px; color:#888">${sideDone}/${m.azs.length} this side${
+        otherDone ? ` · ${totalDone} total (both sides → L/R symmetry check)` : ''}</span>
     </div>`;
 }
 async function showLumPatch() {
@@ -1209,7 +1243,16 @@ function lumSetReading(i, val) {
 }
 async function lumRead(i) {
   if (!lumMeasure) return;
-  lumMeasure.idx = i;
+  // The Read button exists on EVERY row, but the projector only ever shows lumMeasure.idx. Reading
+  // a row that is not the one on screen would file the displayed patch's luminance under a
+  // different azimuth — silently, and the fit would have no way to know. Show it first, and give
+  // the patch time to reach the glass before the meter integrates.
+  if (i !== lumMeasure.idx) {
+    lumMeasure.idx = i;
+    renderLumPanel();
+    await showLumPatch();
+    await new Promise(res => setTimeout(res, LUM_SETTLE_MS));
+  }
   const r = await fetch('/api/lum_read', {
     method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
   }).then(x => x.json()).catch(e => ({ok: false, error: String(e)}));
@@ -1227,7 +1270,14 @@ async function lumAdvance() {
     const j = (m.idx + k) % m.azs.length;
     if (!(m.azs[j] in m.readings)) { next = j; break; }
   }
-  if (next === -1) { log('All azimuths measured — click Fit & Apply.'); renderLumPanel(); return; }
+  if (next === -1) {
+    const other = Object.keys(m.readings).some(az => (parseFloat(az) || 0) * m.sign < 0);
+    log(other
+      ? 'Both sides measured — click Fit & Apply (the fit will report L/R symmetry).'
+      : 'This side measured — Fit & Apply now, or tick "negative azimuth" to check the other side.');
+    renderLumPanel();
+    return;
+  }
   m.idx = next;
   renderLumPanel();
   await showLumPatch();

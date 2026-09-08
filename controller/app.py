@@ -22,7 +22,7 @@ from flask import Flask, jsonify, render_template, request, abort   # noqa: E402
 
 from controller import settings, events                              # noqa: E402
 from controller.registry import registry                             # noqa: E402
-from controller import experiment, setup, network                    # noqa: E402
+from controller import experiment, setup, network, data              # noqa: E402
 
 
 def create_app() -> Flask:
@@ -30,6 +30,7 @@ def create_app() -> Flask:
     app.register_blueprint(experiment.bp)
     app.register_blueprint(setup.bp)
     app.register_blueprint(network.bp)
+    app.register_blueprint(data.bp)
 
     def _tasks():
         return sorted(p.stem for p in (ROOT / "experiments").glob("*.yaml"))

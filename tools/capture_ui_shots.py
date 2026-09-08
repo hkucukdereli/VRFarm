@@ -291,6 +291,30 @@ def capture_shell(pw, shots: Shots) -> None:
     browser.close()
 
 
+# ── the Data tab ──
+
+def capture_data(pw, shots: Shots) -> None:
+    print("\nData tab (:%d)" % UI_PORT)
+    browser = pw.chromium.launch()
+    page = browser.new_page(viewport=VIEWPORT, device_scale_factor=SCALE)
+    page.goto(f"http://127.0.0.1:{UI_PORT}/data", wait_until="networkidle")
+    quiet(page)
+    page.select_option("#pick", f"rig:{DOC_RIG}")
+    page.click("#btn-load")
+    page.wait_for_timeout(4000)          # inventory over the loopback "leader"
+    shots.page(page, "data-01-cards", full=True)
+    if shots.want("data-02-sync-poweroff"):
+        page.click("#btn-syncoff")
+        page.wait_for_timeout(1500)
+        shots.element(page, ".modal", "data-02-sync-poweroff")
+        page.click("text=No, cancel")
+    if shots.want("data-03-purge"):
+        page.click("#btn-purge")
+        page.wait_for_timeout(1500)
+        shots.element(page, ".modal", "data-03-purge")
+    browser.close()
+
+
 # ── the experiment UI walkthrough ──
 
 def capture_experiment(pw, shots: Shots) -> None:
@@ -348,6 +372,7 @@ def main() -> None:
     ap.add_argument("--skip-shell", action="store_true")
     ap.add_argument("--skip-setup", action="store_true")
     ap.add_argument("--skip-experiment", action="store_true")
+    ap.add_argument("--skip-data", action="store_true")
     args = ap.parse_args()
 
     if shutil.which("ssh") is None:
@@ -371,6 +396,8 @@ def main() -> None:
                 capture_setup(pw, shots)
             if not args.skip_experiment:
                 capture_experiment(pw, shots)
+            if not args.skip_data:
+                capture_data(pw, shots)
     finally:
         if args.keep_open:
             print(f"\nservers still up: controller :{UI_PORT}  mock :{MOCK_API_PORT}")

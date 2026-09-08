@@ -41,6 +41,8 @@ _LEADER = [
     ("shepherd/shepherd.py", "shepherd/shepherd.py"),
     # camera feasibility sweep (run by hand on the Pi to validate mode/fps/CPU combos)
     ("tools/camera_sweep.py", "tools/camera_sweep.py"),
+    # the controller's Data tab runs this over SSH: inventory / consolidate / purge / prune-logs
+    ("shared/leader_data.py", "shared/leader_data.py"),
 ]
 
 _FOLLOWER = [

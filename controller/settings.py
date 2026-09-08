@@ -21,7 +21,9 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-SETTINGS_PATH = ROOT / "controller.yaml"
+# VRFARM_SETTINGS points the app at another settings file (the smoke tests use a scratch one
+# so they never touch the real data root or groups).
+SETTINGS_PATH = Path(os.environ["VRFARM_SETTINGS"]).expanduser() if os.environ.get("VRFARM_SETTINGS") else ROOT / "controller.yaml"
 EXAMPLE_PATH = ROOT / "controller.example.yaml"
 
 DEFAULTS = {

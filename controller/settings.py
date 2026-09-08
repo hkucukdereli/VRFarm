@@ -89,9 +89,12 @@ def save(new: dict) -> dict:
 
 
 def update(**changes) -> dict:
-    """Merge a few keys into the settings and save."""
+    """Replace the given top-level keys and save. Top-level keys are REPLACED, not deep-merged:
+    a deep merge could never delete a group or a sync option."""
     with _lock:
-        return save(_merge(load(), changes))
+        cur = load()
+        cur.update(changes)
+        return save(cur)
 
 
 # ── Paths ──

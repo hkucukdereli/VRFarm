@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VRFarm</title>
+<link rel="stylesheet" href="/static/common.css">
+<style>
+  html, body { height: 100%; overflow: hidden; }
+  #app { display: flex; height: 100vh; }
+  #rail { width: 140px; flex: none; background: #151515; border-right: 1px solid #333; display: flex; flex-direction: column; }
+  #rail .brand { padding: 14px 12px 10px; font-weight: 700; font-size: 15px; color: #fff; letter-spacing: 0.3px; }
+  #rail .brand small { display: block; font-weight: 400; font-size: 10px; color: #777; }
+  .tab { padding: 18px 14px; font-size: 15px; font-weight: 600; color: #bbb; cursor: pointer; border-left: 4px solid transparent; }
+  .tab:hover { background: #1f1f1f; color: #fff; }
+  .tab.active { background: #262626; color: #fff; border-left-color: var(--green); }
+  .tab .sub { display: block; font-size: 10px; font-weight: 400; color: #777; margin-top: 2px; }
+  #rail .spacer { flex: 1; }
+  #rail .quit { margin: 10px; }
+  #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #substrip { display: none; align-items: center; gap: 4px; padding: 6px 10px; background: #202020; border-bottom: 1px solid #333; min-height: 40px; }
+  #substrip.show { display: flex; }
+  .rigtab { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 5px 5px 0 0; background: #2a2a2a;
+            border: 1px solid #3a3a3a; border-bottom: none; cursor: pointer; font-size: 13px; color: #ccc; }
+  .rigtab.active { background: #333; color: #fff; border-color: #555; }
+  .rigtab .x { color: #777; font-size: 12px; padding: 0 2px; }
+  .rigtab .x:hover { color: #f66; }
+  .rigtab .info { font-size: 10px; color: #999; }
+  #loadmenu { position: relative; margin-left: 6px; }
+  #loadmenu .menu { display: none; position: absolute; top: 28px; left: 0; background: #2a2a2a; border: 1px solid #555; border-radius: 5px;
+                    min-width: 200px; z-index: 20; padding: 4px 0; box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
+  #loadmenu.open .menu { display: block; }
+  .menu .hdr { padding: 4px 10px; font-size: 10px; color: #777; text-transform: uppercase; letter-spacing: 0.5px; }
+  .menu .item { padding: 5px 12px; cursor: pointer; font-size: 12px; color: #ddd; display: flex; justify-content: space-between; }
+  .menu .item:hover { background: #3a3a3a; }
+  .menu .item small { color: #777; }
+  #frames { flex: 1; position: relative; min-height: 0; }
+  #frames iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: none; background: var(--bg); }
+  #frames iframe.hidden { visibility: hidden; }
+  #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #666; font-size: 14px; }
+  #toast { position: fixed; bottom: 14px; right: 14px; background: #3a1f1f; border: 1px solid #8a2f2f; color: #f3c2c2;
+           padding: 8px 12px; border-radius: 5px; font-size: 12px; display: none; z-index: 60; max-width: 420px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="rail">
+    <div class="brand">VRFarm <small id="brand-sub">controller</small></div>
+    <div class="tab" data-tab="network" onclick="showTab('network')">Network<span class="sub">rigs, Pis, groups</span></div>
+    <div class="tab" data-tab="setup" onclick="showTab('setup')">Setup<span class="sub">devices, install, calibrate</span></div>
+    <div class="tab" data-tab="experiment" onclick="showTab('experiment')">Experiment<span class="sub">deploy, go, live</span></div>
+    <div class="tab" data-tab="data" onclick="showTab('data')">Data<span class="sub">sync, purge, power off</span></div>
+    <div class="spacer"></div>
+    <div id="fleet-summary" class="muted" style="padding:0 12px 8px"></div>
+    <button class="btn btn-sm quit" onclick="quitApp()" title="Stop the controller server">Quit server</button>
+  </div>
+  <div id="main">
+    <div id="substrip">
+      <span id="rigtabs" style="display:flex; gap:4px; align-items:flex-end"></span>
+      <div id="loadmenu">
+        <button class="btn btn-sm btn-blue" onclick="toggleLoadMenu(event)">Load rig ▾</button>
+        <div class="menu" id="loadmenu-items"></div>
+      </div>
+      <span class="muted" id="substrip-hint" style="margin-left:10px"></span>
+    </div>
+    <div id="frames"><div id="empty">Pick a tab on the left.</div></div>
+  </div>
+</div>
+<div id="toast"></div>
+<script src="/static/shell.js"></script>
+</body>
+</html>

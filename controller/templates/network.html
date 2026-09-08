@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VRFarm — Network</title>
+<link rel="stylesheet" href="/static/common.css">
+<style>
+  body { padding: 14px 18px; overflow: auto; height: 100vh; }
+  .cols { display: grid; grid-template-columns: 1.6fr 1fr; gap: 14px; align-items: start; }
+  .topo { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 8px 0; }
+  .node { background: #222; border: 1px solid #555; border-radius: 6px; padding: 6px 12px; font-size: 12px; text-align: center; }
+  .node.ctl { border-color: var(--green); }
+  .switch { width: 70%; height: 18px; background: #333; border: 1px solid #666; border-radius: 3px; font-size: 10px; color: #aaa;
+            display: flex; align-items: center; justify-content: center; }
+  .rigs { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; width: 100%; }
+  .rigbox { background: #262626; border: 1px solid #555; border-radius: 6px; padding: 6px 8px; min-width: 170px; }
+  .rigbox.loaded { border-color: var(--blue); }
+  .rigbox .name { font-weight: 600; color: #fff; display: flex; justify-content: space-between; gap: 6px; }
+  .pinode { background: #1c1c1c; border: 1px solid #444; border-radius: 4px; padding: 3px 6px; margin-top: 4px; font-size: 11px; }
+  .pinode .role { color: #999; font-size: 10px; }
+  .pirow { display: grid; grid-template-columns: 1.1fr 1.3fr 0.9fr 0.9fr 1.6fr auto; gap: 4px; align-items: center; margin-bottom: 4px; }
+  .pirow input, .pirow select { width: 100%; }
+  .vline { width: 2px; height: 14px; background: #555; }
+  #drawer { display: none; }
+  #drawer.open { display: block; }
+  .grp { display: flex; align-items: center; gap: 6px; margin: 3px 0; font-size: 12px; }
+  .grp .members { color: #aaa; flex: 1; }
+</style>
+</head>
+<body>
+<h2 style="font-size:16px; margin-bottom:10px">Network</h2>
+<div class="cols">
+  <div>
+    <div class="card">
+      <h3 style="display:flex; align-items:center; gap:8px">Rigs
+        <button class="btn btn-sm btn-blue" onclick="checkAll()">Check all</button>
+        <button class="btn btn-sm btn-green" onclick="startCreate()">Add rig</button>
+        <span class="muted" id="check-note"></span>
+      </h3>
+      <table id="rigs-table">
+        <thead><tr><th>Rig</th><th>Pis</th><th>State</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card" id="drawer">
+      <h3 id="drawer-title">Edit rig</h3>
+      <div id="drawer-name-row" style="display:flex; gap:8px; align-items:center; margin-bottom:6px">
+        <label style="margin:0">Name</label><input type="text" id="d-name" placeholder="gouda" style="width:160px">
+        <span class="muted">lowercase letters, digits, - or _</span>
+      </div>
+      <div class="pirow" style="font-size:10px; color:#999"><span>Pi name</span><span>IP</span><span>Role</span><span>User</span><span>Devices</span><span></span></div>
+      <div id="d-pis"></div>
+      <div style="display:flex; gap:6px; margin-top:6px; flex-wrap:wrap">
+        <button class="btn btn-sm" onclick="addPiRow()">+ Pi</button>
+        <button class="btn btn-sm" onclick="suggestIps()" title="Fill the next free .1xx pair">Suggest IPs</button>
+        <span style="flex:1"></span>
+        <button class="btn btn-sm" onclick="closeDrawer()">Cancel</button>
+        <button class="btn btn-sm btn-green" onclick="saveDrawer()">Save</button>
+      </div>
+      <div class="muted" style="margin-top:6px">Devices: comma-separated names from the rig's device list (e.g. lick_sensor, reward, photodiode, camera, encoder / display). Device settings themselves live in Setup.</div>
+      <div id="d-error" style="color:#f88; font-size:12px; margin-top:4px"></div>
+    </div>
+
+    <div class="card">
+      <h3>Groups (super rigs)</h3>
+      <div id="groups"></div>
+      <div style="display:flex; gap:6px; align-items:center; margin-top:8px; flex-wrap:wrap">
+        <input type="text" id="g-name" placeholder="group name (e.g. roomA)" style="width:170px">
+        <span id="g-rigs"></span>
+        <button class="btn btn-sm btn-green" onclick="saveGroup()">Save group</button>
+      </div>
+      <div class="muted" style="margin-top:4px">A group loads all its rigs at once from the Load menu in Setup / Experiment and from the Data tab.</div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h3>Architecture</h3>
+      <div class="topo" id="topo"></div>
+      <div class="muted" id="udp-note"></div>
+    </div>
+    <div class="card">
+      <h3>Log</h3>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+let rigs = [], groups = {}, topo = null;
+let drawer = {mode: null, rig: null};
+
+function log(msg) {
+  const el = document.getElementById('log');
+  el.textContent = `[${new Date().toLocaleTimeString()}] ${msg}\n` + el.textContent;
+}
+async function api(method, path, body) {
+  const r = await fetch(path, {method, headers: body ? {'Content-Type': 'application/json'} : {}, body: body ? JSON.stringify(body) : undefined});
+  let d = {}; try { d = await r.json(); } catch (e) {}
+  if (!r.ok && d.error === undefined) d.error = `HTTP ${r.status}`;
+  return d;
+}
+
+function dotFor(check) {
+  if (!check) return '<span class="dot dot-grey" title="not checked"></span>';
+  if (check.api && check.ssh) return '<span class="dot dot-green" title="SSH + API ok"></span>';
+  if (check.api || check.ssh) return `<span class="dot dot-amber" title="${check.ssh ? 'SSH ok, API down' : 'API ok, SSH failed'}"></span>`;
+  return '<span class="dot dot-red" title="unreachable"></span>';
+}
+
+async function refresh() {
+  const d = await api('GET', '/api/network/rigs');
+  rigs = d.rigs || []; groups = d.groups || {};
+  topo = await api('GET', '/api/network/topology');
+  renderTable(); renderGroups(); renderTopo();
+}
+
+function renderTable() {
+  const tb = document.querySelector('#rigs-table tbody');
+  tb.innerHTML = rigs.map(r => `
+    <tr>
+      <td><b>${r.name}</b>${r.error ? `<div style="color:#f88">${r.error}</div>` : ''}</td>
+      <td>${(r.pis || []).map(p => `<div>${dotFor(p.check)}${p.name} <span class="muted">${p.role} · ${p.ip}</span></div>`).join('')}</td>
+      <td>${r.loaded ? `<span class="badge badge-${r.phase}">${r.phase}</span>` : '<span class="muted">not loaded</span>'}</td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-sm" onclick="checkRig('${r.name}')">Check</button>
+        <button class="btn btn-sm" onclick="startEdit('${r.name}')" ${r.phase === 'running' ? 'disabled' : ''}>Edit</button>
+        <button class="btn btn-sm btn-blue" onclick="openIn('setup','${r.name}')" title="Open in Setup">Setup</button>
+        <button class="btn btn-sm btn-blue" onclick="openIn('experiment','${r.name}')" title="Open in Experiment">Exp</button>
+        <button class="btn btn-sm btn-red" onclick="deleteRig('${r.name}')" ${r.loaded ? 'disabled title="unload it first"' : ''}>Delete</button>
+      </td>
+    </tr>`).join('') || '<tr><td colspan="4" class="muted">No rigs yet — Add rig.</td></tr>';
+}
+
+function openIn(tab, rig) {
+  if (window.parent !== window) window.parent.postMessage({type: 'vrfarm:open', tab, rig}, '*');
+  else window.open(`/${tab}/${rig}`, '_blank');
+}
+
+// ── checks ──
+async function checkAll() {
+  document.getElementById('check-note').textContent = 'checking…';
+  const d = await api('POST', '/api/network/check', {});
+  document.getElementById('check-note').textContent = '';
+  for (const [rig, pis] of Object.entries(d.results || {}))
+    for (const [pi, c] of Object.entries(pis)) log(`${rig}/${pi}: SSH ${c.ssh ? 'ok' : 'FAIL'}, API ${c.api ? 'ok' : 'FAIL'}`);
+  refresh();
+}
+async function checkRig(name) {
+  const d = await api('POST', '/api/network/check', {rig: name});
+  for (const [pi, c] of Object.entries((d.results || {})[name] || {})) log(`${name}/${pi}: SSH ${c.ssh ? 'ok' : 'FAIL'}, API ${c.api ? 'ok' : 'FAIL'}`);
+  refresh();
+}
+
+// ── create / edit drawer ──
+function piRowHtml(p = {}) {
+  return `<div class="pirow">
+    <input type="text" class="p-name" value="${p.name || ''}" placeholder="cheddar">
+    <input type="text" class="p-ip" value="${p.ip || ''}" placeholder="192.168.10.101">
+    <select class="p-role"><option value="leader" ${p.role === 'leader' ? 'selected' : ''}>leader</option><option value="follower" ${p.role === 'follower' ? 'selected' : ''}>follower</option></select>
+    <input type="text" class="p-user" value="${p.user || 'vruser'}">
+    <input type="text" class="p-devices" value="${(p.devices || []).join(', ')}" placeholder="lick_sensor, reward, …">
+    <button class="btn btn-sm btn-red" onclick="this.parentElement.remove()">✕</button>
+  </div>`;
+}
+function readPiRows() {
+  return [...document.querySelectorAll('#d-pis .pirow')].map(row => ({
+    name: row.querySelector('.p-name').value.trim(),
+    ip: row.querySelector('.p-ip').value.trim(),
+    role: row.querySelector('.p-role').value,
+    user: row.querySelector('.p-user').value.trim() || 'vruser',
+    devices: row.querySelector('.p-devices').value.split(',').map(s => s.trim()).filter(Boolean),
+  }));
+}
+async function startCreate() {
+  drawer = {mode: 'create', rig: null};
+  document.getElementById('drawer-title').textContent = 'Add rig';
+  document.getElementById('d-name').value = ''; document.getElementById('d-name').disabled = false;
+  document.getElementById('d-error').textContent = '';
+  const s = await api('GET', '/api/network/suggest_ips');
+  document.getElementById('d-pis').innerHTML =
+    piRowHtml({name: '', ip: s.leader, role: 'leader', user: 'vruser', devices: ['lick_sensor', 'reward', 'photodiode', 'camera', 'encoder']}) +
+    piRowHtml({name: '', ip: s.follower, role: 'follower', user: 'vruser', devices: ['display']});
+  document.getElementById('drawer').classList.add('open');
+  document.getElementById('d-name').oninput = () => {
+    const n = document.getElementById('d-name').value.trim();
+    const rows = document.querySelectorAll('#d-pis .pirow');
+    if (rows[0] && !rows[0].dataset.touched) rows[0].querySelector('.p-name').value = n;
+    if (rows[1] && !rows[1].dataset.touched) rows[1].querySelector('.p-name').value = n ? n + '-dlp' : '';
+  };
+  document.querySelectorAll('#d-pis .p-name').forEach(i => i.oninput = () => i.closest('.pirow').dataset.touched = '1');
+}
+function startEdit(name) {
+  const r = rigs.find(x => x.name === name); if (!r) return;
+  drawer = {mode: 'edit', rig: name};
+  document.getElementById('drawer-title').textContent = `Edit rig ${name}`;
+  document.getElementById('d-name').value = name; document.getElementById('d-name').disabled = true;
+  document.getElementById('d-name').oninput = null;
+  document.getElementById('d-error').textContent = '';
+  document.getElementById('d-pis').innerHTML = (r.pis || []).map(piRowHtml).join('');
+  document.getElementById('drawer').classList.add('open');
+}
+function addPiRow() { document.getElementById('d-pis').insertAdjacentHTML('beforeend', piRowHtml({role: 'follower'})); }
+async function suggestIps() {
+  const s = await api('GET', '/api/network/suggest_ips');
+  const rows = document.querySelectorAll('#d-pis .pirow');
+  rows.forEach(row => { const role = row.querySelector('.p-role').value; row.querySelector('.p-ip').value = role === 'leader' ? s.leader : s.follower; });
+}
+function closeDrawer() { document.getElementById('drawer').classList.remove('open'); drawer = {mode: null, rig: null}; }
+async function saveDrawer() {
+  const pis = readPiRows();
+  const err = document.getElementById('d-error');
+  let d;
+  if (drawer.mode === 'create') d = await api('POST', '/api/network/rigs', {name: document.getElementById('d-name').value.trim(), pis});
+  else d = await api('PATCH', `/api/network/rigs/${drawer.rig}`, {pis});
+  if (!d.ok) { err.textContent = d.error || 'failed'; return; }
+  log((drawer.mode === 'create' ? 'Created rig ' : 'Saved rig ') + d.rig.name);
+  closeDrawer(); refresh();
+}
+async function deleteRig(name) {
+  if (!confirm(`Delete rig "${name}"?\nIts YAML moves to rigs/.trash/ (recoverable).`)) return;
+  const d = await api('DELETE', `/api/network/rigs/${name}`);
+  if (!d.ok) { log('Delete failed: ' + d.error); return; }
+  log(`Deleted ${name} -> ${d.trashed}`); refresh();
+}
+
+// ── groups ──
+function renderGroups() {
+  const el = document.getElementById('groups');
+  const names = Object.keys(groups).sort();
+  el.innerHTML = names.length ? names.map(g => `<div class="grp"><b>★ ${g}</b><span class="members">${groups[g].join(', ') || '(empty)'}</span>
+      <button class="btn btn-sm" onclick="editGroup('${g}')">Edit</button><button class="btn btn-sm btn-red" onclick="deleteGroup('${g}')">✕</button></div>`).join('')
+    : '<div class="muted">No groups yet.</div>';
+  document.getElementById('g-rigs').innerHTML = rigs.map(r =>
+    `<label style="display:inline-flex; align-items:center; gap:3px; margin:0 6px 0 0"><input type="checkbox" class="g-rig" value="${r.name}"> ${r.name}</label>`).join('');
+}
+function editGroup(g) {
+  document.getElementById('g-name').value = g;
+  document.querySelectorAll('.g-rig').forEach(cb => cb.checked = (groups[g] || []).includes(cb.value));
+}
+async function saveGroup() {
+  const name = document.getElementById('g-name').value.trim();
+  const members = [...document.querySelectorAll('.g-rig:checked')].map(cb => cb.value);
+  if (!name) { log('Group needs a name'); return; }
+  const d = await api('PUT', `/api/network/groups/${name}`, {rigs: members});
+  if (!d.ok) { log('Group save failed: ' + d.error); return; }
+  log(`Saved group ${name}: ${members.join(', ')}`); refresh();
+}
+async function deleteGroup(g) {
+  if (!confirm(`Delete group "${g}"?`)) return;
+  await api('DELETE', `/api/network/groups/${g}`); refresh();
+}
+
+// ── topology ──
+function renderTopo() {
+  if (!topo) return;
+  const el = document.getElementById('topo');
+  const rigBoxes = (topo.rigs || []).map(r => `
+    <div class="rigbox ${r.loaded ? 'loaded' : ''}">
+      <div class="name"><span>${r.name}</span>${r.loaded ? `<span class="badge badge-${r.phase}">${r.phase}</span>` : ''}</div>
+      ${(r.pis || []).map(p => `<div class="pinode">${dotFor(p.check)}${p.name} <span class="role">${p.role}</span><div class="muted">${p.ip}${(p.devices || []).length ? ' · ' + p.devices.join(', ') : ''}</div></div>`).join('')}
+    </div>`).join('');
+  el.innerHTML = `
+    <div class="node ctl">Controller <div class="muted">${topo.controller_ip} · UI :${topo.ui_port} · events UDP :${topo.event_port}</div></div>
+    <div class="vline"></div>
+    <div class="switch">switch 192.168.10.0/24</div>
+    <div class="vline"></div>
+    <div class="rigs">${rigBoxes || '<span class="muted">no rigs</span>'}</div>`;
+  const unk = Object.entries(topo.unknown_senders || {});
+  const udp = topo.udp || {};
+  document.getElementById('udp-note').innerHTML =
+    (udp.received != null ? `UDP: ${udp.received} received, ${udp.routed} routed, ${udp.unknown} unknown. ` : '') +
+    (unk.length ? 'Unknown senders: ' + unk.map(([ip, u]) => `${ip} (${u.count}, last type ${u.sample && u.sample.type})`).join('; ') : '');
+}
+
+refresh();
+setInterval(async () => { topo = await api('GET', '/api/network/topology'); renderTopo(); }, 5000);
+</script>
+</body>
+</html>

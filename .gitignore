@@ -256,3 +256,6 @@ display_calibration/luminance_measurements_*.yaml
 
 # Controller-wide settings (machine-specific: data root, groups, ports)
 controller.yaml
+
+# soft-deleted rig configs (Network tab -> Delete)
+rigs/.trash/

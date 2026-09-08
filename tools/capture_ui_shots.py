@@ -3,8 +3,8 @@
 tools/capture_ui_shots.py — regenerate the UI screenshots used by docs/SETUP_UI.md
 and docs/EXPERIMENT_UI.md, with no rig hardware attached.
 
-It starts everything it needs (mock Pi + both Flask UIs) on loopback, drives the
-pages with Playwright, writes PNGs to docs/images/, and tears the processes down.
+It starts everything it needs (a mock Pi + the one controller app) on loopback, drives
+the pages with Playwright, writes PNGs to docs/images/, and tears the processes down.
 (docs/assets/ is the gitignored local stash for audits and design notes — not this.)
 Because it uses the `demo` rig (both Pis at 127.0.0.1) it can never reach the real
 rig — a stray Deploy or Install in a captured state hits the mock, not a Pi.
@@ -33,9 +33,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "docs" / "images"
 
-SETUP_PORT = 4999
-EXP_PORT = 5055           # not 5000: macOS AirPlay Receiver squats on it
+UI_PORT = 5055            # the one controller port (not 5000: macOS AirPlay Receiver squats on it)
 MOCK_API_PORT = 5080
+DOC_RIG = "demo"          # rigs/demo.yaml: both Pis at 127.0.0.1 -> the mock
 
 # A short, dense session: enough trials to fill the rasters and plots quickly.
 MOCK_ENV = {"MOCK_N": "14", "MOCK_ITI": "1.2", "MOCK_TRIAL_S": "0.8", "MOCK_END": "end"}
@@ -63,8 +63,8 @@ def _wait_port(port: int, timeout: float = 25.0, host: str = "127.0.0.1") -> boo
 
 
 def _spawn(name: str, args: list[str], env_extra: dict | None = None) -> subprocess.Popen:
-    # setup/app.py opens a browser tab 1.5 s after boot and has no --no-browser flag;
-    # webbrowser honours $BROWSER, so point it at a no-op instead of Chrome.
+    # webbrowser honours $BROWSER, so point it at a no-op instead of Chrome (belt and braces
+    # next to --no-browser).
     # (Do NOT set WERKZEUG_RUN_MAIN here — werkzeug then expects an inherited socket fd
     # from a reloader parent that doesn't exist, and dies on KeyError WERKZEUG_SERVER_FD.)
     env = {**os.environ, "PYTHONUNBUFFERED": "1", "BROWSER": "echo",
@@ -80,11 +80,10 @@ def _spawn(name: str, args: list[str], env_extra: dict | None = None) -> subproc
 def start_servers() -> list[subprocess.Popen]:
     (ROOT / "logs").mkdir(exist_ok=True)
     procs = [
-        _spawn("mock_pi", ["tools/mock_pi.py"], MOCK_ENV),
-        _spawn("setup_ui", ["setup/app.py"]),
-        _spawn("exp_ui", ["app/app.py", "--port", str(EXP_PORT), "--no-browser"]),
+        _spawn("mock_pi", ["tools/mock_pi.py"], {**MOCK_ENV, "MOCK_RIG": DOC_RIG}),
+        _spawn("controller", ["controller/app.py", "--port", str(UI_PORT), "--no-browser"]),
     ]
-    for port, what in ((MOCK_API_PORT, "mock pi_api"), (SETUP_PORT, "setup UI"), (EXP_PORT, "experiment UI")):
+    for port, what in ((MOCK_API_PORT, "mock pi_api"), (UI_PORT, "controller UI")):
         if not _wait_port(port):
             stop_servers(procs)
             raise SystemExit(f"{what} never came up on :{port} — see logs/capture_*.log")
@@ -209,21 +208,19 @@ def quiet(page) -> None:
 # ── the setup UI walkthrough ──
 
 def capture_setup(pw, shots: Shots) -> None:
-    print("\nSetup UI (:%d)" % SETUP_PORT)
+    print("\nSetup tab (:%d)" % UI_PORT)
     browser = pw.chromium.launch()
     page = browser.new_page(viewport=VIEWPORT, device_scale_factor=SCALE)
-    page.goto(f"http://127.0.0.1:{SETUP_PORT}/", wait_until="networkidle")
+    page.goto(f"http://127.0.0.1:{UI_PORT}/setup/{DOC_RIG}", wait_until="networkidle")
     quiet(page)
     page.wait_for_timeout(600)
 
     shots.page(page, "setup-01-fresh", full=True)
-    shots.element(page, "div.card:has(#rig-select)", "setup-15-rig-card")
+    shots.element(page, "div.card:has(#rig-name)", "setup-15-rig-card")
     shots.element(page, "#device-catalog", "setup-02-catalog")
 
-    # Load the demo rig — this also runs checkWarp() + checkAllPis() against the mock.
-    page.select_option("#rig-select", "demo")
-    page.click("text=Load Rig")
-    page.wait_for_timeout(4000)                       # SSH probe times out, then the API check answers
+    # The page loads its rig on open (checkWarp() + checkAllPis() against the mock).
+    page.wait_for_timeout(4000)
     shots.page(page, "setup-03-rig-loaded", full=True)
     shots.element(page, "#pi-list", "setup-04-pi-cards")
 
@@ -270,14 +267,38 @@ def _tab_label(dev: str) -> str:
             "encoder": "Running Wheel", "calibration_probe": "Calibration Probe"}[dev]
 
 
+# ── the shell and the Network tab ──
+
+def capture_shell(pw, shots: Shots) -> None:
+    print("\nShell + Network tab (:%d)" % UI_PORT)
+    browser = pw.chromium.launch()
+    page = browser.new_page(viewport=VIEWPORT, device_scale_factor=SCALE)
+    page.goto(f"http://127.0.0.1:{UI_PORT}/network", wait_until="networkidle")
+    quiet(page)
+    page.wait_for_timeout(1500)
+    shots.page(page, "net-01-network", full=True)
+
+    page.goto(f"http://127.0.0.1:{UI_PORT}/", wait_until="networkidle")
+    page.wait_for_timeout(1200)
+    shots.page(page, "shell-01-tabs")
+    # Open the demo rig in the Experiment tab through the Load menu, as a user would.
+    page.click('.tab[data-tab="experiment"]')
+    page.click("text=Load rig")
+    page.wait_for_timeout(400)
+    page.locator(f'#loadmenu-items .item:has-text("{DOC_RIG}")').first.click()
+    page.wait_for_timeout(2500)
+    shots.page(page, "shell-02-experiment-tab")
+    browser.close()
+
+
 # ── the experiment UI walkthrough ──
 
 def capture_experiment(pw, shots: Shots) -> None:
-    print("\nExperiment UI (:%d)" % EXP_PORT)
+    print("\nExperiment tab (:%d)" % UI_PORT)
     browser = pw.chromium.launch()
     page = browser.new_page(viewport=VIEWPORT, device_scale_factor=SCALE)
     page.on("dialog", lambda d: d.accept())           # Deploy's alert(), Quit's confirm()
-    page.goto(f"http://127.0.0.1:{EXP_PORT}/", wait_until="networkidle")
+    page.goto(f"http://127.0.0.1:{UI_PORT}/experiment/{DOC_RIG}", wait_until="networkidle")
     quiet(page)
     page.wait_for_timeout(600)
 
@@ -290,8 +311,7 @@ def capture_experiment(pw, shots: Shots) -> None:
     shots.element(page, "#experiment-subsections", "exp-02-task-params")
     shots.element(page, "#card-session", "exp-03-session-card")
 
-    # Load Rig = the connect step (no separate Connect button exists).
-    page.select_option("#rig-select", "demo")
+    # Connect = stop leftovers, release + init devices on every Pi of the rig.
     page.click("#btn-load-rig")
     page.wait_for_timeout(4000)
     shots.page(page, "exp-04-connected", full=True)
@@ -325,6 +345,7 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--only", help="capture only shots whose name starts with this")
     ap.add_argument("--keep-open", action="store_true", help="leave the servers running at the end")
+    ap.add_argument("--skip-shell", action="store_true")
     ap.add_argument("--skip-setup", action="store_true")
     ap.add_argument("--skip-experiment", action="store_true")
     args = ap.parse_args()
@@ -344,14 +365,16 @@ def main() -> None:
     procs = start_servers()
     try:
         with sync_playwright() as pw, TaskFileGuard(DOC_TASK):
+            if not args.skip_shell:
+                capture_shell(pw, shots)
             if not args.skip_setup:
                 capture_setup(pw, shots)
             if not args.skip_experiment:
                 capture_experiment(pw, shots)
     finally:
         if args.keep_open:
-            print(f"\nservers still up: setup :{SETUP_PORT}  experiment :{EXP_PORT}  mock :{MOCK_API_PORT}")
-            print("stop them with:  pkill -f 'mock_pi.py|setup/app.py|app/app.py'")
+            print(f"\nservers still up: controller :{UI_PORT}  mock :{MOCK_API_PORT}")
+            print("stop them with:  pkill -f 'mock_pi.py|controller/app.py'")
         else:
             stop_servers(procs)
 

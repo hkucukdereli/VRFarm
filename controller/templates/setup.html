@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>VRFarm Rig Setup</title>
+<title>VRFarm Rig Setup — {{ rig }}</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -135,17 +135,12 @@
   <!-- Sidebar -->
   <div>
     <div class="card">
-      <h3>Rig</h3>
-      <label>Load existing</label>
-      <select id="rig-select">
-        <option value="">-- select --</option>
-        {% for r in rigs %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
-      </select>
+      <h3>Rig <span id="rig-name" style="font-weight:normal; color:#7ac142;">{{ rig }}</span></h3>
       <div class="btn-row">
-        <button class="btn btn-blue" onclick="loadRig()">Load Rig</button>
-        <button class="btn btn-green" onclick="createRig()">New Rig</button>
-        <button class="btn btn-blue" onclick="saveRig()">Save Rig</button>
+        <button class="btn btn-blue" onclick="saveRig()" title="Write this rig's YAML (rigs/{{ rig }}.yaml)">Save Rig</button>
+        <button class="btn" onclick="loadRig()" title="Re-read the YAML from disk and re-check the Pis">Reload</button>
       </div>
+      <div style="font-size:10px; color:#666; margin-top:2px">Pi names / IPs / roles are edited in the Network tab. Rigs are created and deleted there too.</div>
       <div style="margin-top:8px; border-top:1px solid #333; padding-top:6px">
         <div style="display:flex; align-items:center; gap:6px">
           <span style="display:inline-block; flex:none; width:56px; font-size:12px; white-space:nowrap">Slack</span>
@@ -178,43 +173,6 @@
                  style="flex:1; min-width:0; font-size:11px" oninput="onDataDirChange()">
         </div>
         <div style="font-size:10px; color:#666; margin-top:2px">Leader-Pi paths, saved in the rig. Put Video Dir on the SSD (e.g. /media/vruser/ssd/video).</div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h3>Pi Management</h3>
-
-      <div style="font-size:12px; color:#ccc; font-weight:700; margin-bottom:4px">Add a Pi</div>
-      <label>Name</label>
-      <input type="text" id="add-pi-name" placeholder="e.g. cheddar">
-      <label>IP</label>
-      <input type="text" id="add-pi-ip" placeholder="192.168.10.101">
-      <label>User</label>
-      <input type="text" id="add-pi-user" value="vruser">
-      <label>Role</label>
-      <select id="add-pi-role">
-        <option value="leader">Leader</option>
-        <option value="follower">Follower</option>
-      </select>
-      <div class="btn-row">
-        <button class="btn btn-green" onclick="addPi()">Add Pi</button>
-      </div>
-
-      <div style="border-top:1px solid #333; margin:12px 0 8px"></div>
-      <div style="font-size:12px; color:#ccc; font-weight:700; margin-bottom:4px">Update / remove an existing Pi</div>
-      <label>Target Pi (name or IP)</label>
-      <input type="text" id="manage-pi-id" placeholder="cheddar or 192.168.10.101" oninput="syncUpdatePiValue()">
-      <label>Field to update</label>
-      <select id="update-pi-field" onchange="syncUpdatePiValue()">
-        <option value="name">Name</option>
-        <option value="ip">IP</option>
-        <option value="user">User</option>
-        <option value="role">Role</option>
-      </select>
-      <input type="text" id="update-pi-value" placeholder="e.g. cheddar">
-      <div class="btn-row">
-        <button class="btn btn-blue" onclick="updatePi()">Update Pi</button>
-        <button class="btn btn-red" onclick="removePi()">Remove Pi</button>
       </div>
     </div>
 
@@ -252,6 +210,9 @@
 </div>
 
 <script>
+// This page is scoped to ONE rig (the controller hosts one copy per rig).
+const RIG = {{ rig|tojson }};
+const SAPI = '/api/rigs/' + encodeURIComponent(RIG) + '/setup';
 let rig = null;
 let deviceSchemas = {};
 let catalogSel = '';        // remembered Device Catalog dropdown selection
@@ -283,7 +244,7 @@ function getPiForDevice(devName) {
 
 async function proxyPi(ip, endpoint, payload = {}, method = 'POST') {
   try {
-    const r = await fetch('/api/proxy', {
+    const r = await fetch(SAPI + '/proxy', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ip, port: rig.network.api_port, endpoint, method, payload})
     });
@@ -377,9 +338,9 @@ async function checkAllPis() {
   log('Checking all Pis...');
   const promises = rig.pis.map(async (pi) => {
     try {
-      const r = await fetch('/api/check_pi', {
+      const r = await fetch(SAPI + '/check_pi', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ip: pi.ip, api_port: rig.network.api_port})
+        body: JSON.stringify({ip: pi.ip, user: pi.user, api_port: rig.network.api_port})
       });
       const data = await r.json();
       piState[pi.ip] = {checked: true, ok: data.api, ssh: data.ssh, api: data.api};
@@ -401,16 +362,12 @@ async function checkAllPis() {
 }
 
 async function loadRig() {
-  const name = document.getElementById('rig-select').value;
-  if (!name) return;
   _lockUI();
-  log('Loading rig ' + name + '...');
+  log('Loading rig ' + RIG + '...');
   try {
-    const r = await fetch('/api/load_rig', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name})
-    });
+    const r = await fetch(SAPI + '/config');
     rig = await r.json();
+    if (rig.error) { log('Error: ' + rig.error); return; }
     deviceState = {};
     piState = {};
     devicesInitialized = false;
@@ -423,34 +380,17 @@ async function loadRig() {
   }
 }
 
-async function createRig() {
-  const name = prompt('New rig name:');
-  if (!name) return;
-  const r = await fetch('/api/create_rig', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({name})
-  });
-  rig = await r.json();
-  deviceState = {};
-  piState = {};
-  devicesInitialized = false;
-  document.getElementById('init-btn').disabled = true;
-  renderAll();
-  checkWarp();
-  log('Created rig: ' + name);
-  checkAllPis();
-}
-
 async function saveRig() {
   if (!rig) return;
   // Save rig hardware config (cheese.yaml) ...
-  await fetch('/api/save_rig', {
+  await fetch(SAPI + '/save', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(rig)
   });
+  try { if (window.parent !== window) window.parent.postMessage({type: 'vrfarm:rig-saved', rig: RIG}, '*'); } catch (e) {}
   // ... and any edited geometry to its own file (rig_geometry.yaml), one unified Save.
   if (geoData && geoCurrentName) {
-    const r = await fetch('/api/save_geometry', {
+    const r = await fetch(SAPI + '/save_geometry', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name: geoCurrentName, geometry: geoData})
     });
@@ -462,89 +402,12 @@ async function saveRig() {
 }
 
 // ── Pi management ──
-
-function addPi() {
-  if (!rig) { log('Load or create a rig first'); return; }
-  const pi = {
-    name: document.getElementById('add-pi-name').value,
-    ip: document.getElementById('add-pi-ip').value,
-    user: document.getElementById('add-pi-user').value,
-    role: document.getElementById('add-pi-role').value,
-    devices: [],
-  };
-  if (!pi.name || !pi.ip) { log('Name and IP required'); return; }
-  rig.pis.push(pi);
-  renderAll();
-  log('Added Pi: ' + pi.name);
-}
-
-// Find a Pi by exact name or IP (case-insensitive name match). Returns its index or -1.
-function _findPiIndex(identifier) {
-  if (!rig || !rig.pis) return -1;
-  const q = (identifier || '').trim().toLowerCase();
-  if (!q) return -1;
-  return rig.pis.findIndex(p =>
-    (p.name || '').toLowerCase() === q || (p.ip || '').toLowerCase() === q);
-}
-
-// Live-fill the Update value box with the target Pi's CURRENT value for the selected field,
-// so the user edits from what's there. Fires on Target-input and Field-dropdown changes.
-function syncUpdatePiValue() {
-  const valEl = document.getElementById('update-pi-value');
-  const field = document.getElementById('update-pi-field').value;
-  const idx = _findPiIndex(document.getElementById('manage-pi-id').value);
-  valEl.value = idx >= 0 ? (rig.pis[idx][field] ?? '') : '';
-  valEl.placeholder = field === 'role' ? 'leader / follower'
-    : field === 'ip' ? 'e.g. 192.168.10.101'
-    : field === 'user' ? 'e.g. vruser' : 'e.g. cheddar';
-}
-
-function removePi() {
-  if (!rig) { log('Load or create a rig first'); return; }
-  const id = document.getElementById('manage-pi-id').value;
-  const idx = _findPiIndex(id);
-  if (idx < 0) { log('No Pi matches "' + (id || '').trim() + '"'); return; }
-  const pi = rig.pis[idx];
-  if (!confirm(`Remove Pi "${pi.name}" (${pi.ip})?\nThis unconfigures it from the rig. Save Rig to persist.`)) return;
-  delete piState[pi.ip];
-  rig.pis.splice(idx, 1);
-  document.getElementById('manage-pi-id').value = '';
-  renderAll();
-  log('Removed Pi: ' + pi.name + ' — Save Rig to persist.');
-}
-
-function updatePi() {
-  if (!rig) { log('Load or create a rig first'); return; }
-  const id = document.getElementById('manage-pi-id').value;
-  const idx = _findPiIndex(id);
-  if (idx < 0) { log('No Pi matches "' + (id || '').trim() + '"'); return; }
-  const pi = rig.pis[idx];
-  const field = document.getElementById('update-pi-field').value;
-  let val = document.getElementById('update-pi-value').value.trim();
-  if (!val) { log('Enter a new value for ' + field); return; }
-  if (field === 'role') {
-    val = val.toLowerCase();
-    if (val !== 'leader' && val !== 'follower') { log('Role must be leader or follower'); return; }
-  }
-  if ((field === 'name' || field === 'ip')) {
-    // guard against colliding with another Pi
-    const clashIdx = _findPiIndex(val);
-    if (clashIdx >= 0 && clashIdx !== idx) { log('Another Pi already uses "' + val + '"'); return; }
-  }
-  const old = pi[field];
-  if (field === 'ip' && val !== pi.ip && piState[pi.ip]) {   // piState is keyed by ip — migrate the entry
-    piState[val] = piState[pi.ip];
-    delete piState[pi.ip];
-  }
-  pi[field] = val;
-  document.getElementById('update-pi-value').value = '';
-  renderAll();
-  log(`Updated ${pi.name} ${field}: ${old} → ${val} — Save Rig to persist.`);
-}
+// Pi identity (name / IP / role / user) is edited in the Network tab; the cards below only
+// check, install, deploy and restart the Pis this rig already lists.
 
 async function checkPi(ip) {
   log('Checking ' + ip + '...');
-  const r = await fetch('/api/check_pi', {
+  const r = await fetch(SAPI + '/check_pi', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ip, api_port: rig.network.api_port})
   });
@@ -562,7 +425,7 @@ async function installPi(idx) {
   _lockUI();
   log('Installing ' + pi.name + '...');
   try {
-    const r = await fetch('/api/install_pi', {
+    const r = await fetch(SAPI + '/install_pi', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       // shepherd_enabled rides along so Install brings the leader monitor up or takes it down.
       body: JSON.stringify({...pi, shepherd_enabled: (rig.shepherd?.enabled ?? true)})
@@ -581,7 +444,7 @@ async function rebootPi(idx) {
   _lockUI();
   log('Rebooting ' + pi.name + '...');
   try {
-    const r = await fetch('/api/reboot_pi', {
+    const r = await fetch(SAPI + '/reboot_pi', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ip: pi.ip, user: pi.user || 'vruser'})
     });
@@ -598,7 +461,7 @@ async function shutdownPi(idx) {
   _lockUI();
   log('Shutting down ' + pi.name + '...');
   try {
-    const r = await fetch('/api/shutdown_pi', {
+    const r = await fetch(SAPI + '/shutdown_pi', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ip: pi.ip, user: pi.user || 'vruser'})
     });
@@ -614,7 +477,7 @@ async function deployPi(idx) {
   _lockUI();
   log('Deploying to ' + pi.name + '...');
   try {
-    const r = await fetch('/api/deploy_pi', {
+    const r = await fetch(SAPI + '/deploy_pi', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ip: pi.ip, role: pi.role, api_port: rig.network.api_port})
     });
@@ -652,9 +515,9 @@ async function restartPiApi(idx) {
   _lockUI();
   log(`Restarting pi_api on ${pi.name}...`);
   try {
-    const r = await fetch('/api/restart_pi', {
+    const r = await fetch(SAPI + '/restart_pi', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ip: pi.ip, api_port: rig.network.api_port})
+      body: JSON.stringify({ip: pi.ip, user: pi.user, api_port: rig.network.api_port})
     });
     const data = await r.json();
     (data.steps || []).forEach(s => log('  ' + s));
@@ -697,7 +560,7 @@ async function initDevices() {
   btn.textContent = 'Initializing...';
   log('Initializing devices...');
   try {
-    const r = await fetch('/api/init_devices', {
+    const r = await fetch(SAPI + '/init_devices', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({})
     });
@@ -726,7 +589,7 @@ async function initDevices() {
 async function _reinitDeviceInner(name) {
   log('Reinitializing ' + name + '...');
   try {
-    const r = await fetch('/api/reinit_device', {
+    const r = await fetch(SAPI + '/reinit_device', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({device: name})
     });
@@ -848,7 +711,7 @@ async function stopCameraStream() {
 let _cameraImgRetry = null;
 function cameraImgError(img) {
   clearTimeout(_cameraImgRetry);
-  _cameraImgRetry = setTimeout(() => { img.src = '/api/camera_feed?ts=' + Date.now(); }, 1500);
+  _cameraImgRetry = setTimeout(() => { img.src = SAPI + '/camera_feed?ts=' + Date.now(); }, 1500);
 }
 
 async function testCheckers() {
@@ -913,7 +776,7 @@ function correctTestContrast() {
 
 async function checkWarp() {
   try {
-    const r = await fetch('/api/check_warp');
+    const r = await fetch(SAPI + '/check_warp');
     const data = await r.json();
     warpExists = data.exists;
   } catch (e) { warpExists = false; }
@@ -942,7 +805,7 @@ async function generateWarp() {
     log('Generating warp map...');
     const btn = document.querySelector('.warp-btn');
     if (btn) btn.textContent = 'Generating...';   // already disabled by _lockUI
-    const r = await fetch('/api/generate_warp', {
+    const r = await fetch(SAPI + '/generate_warp', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({geometry: geoCurrentName || undefined})
     });
@@ -968,7 +831,7 @@ async function generateWarp() {
 
 async function loadGeoList() {
   try {
-    const r = await fetch('/api/list_geometries');
+    const r = await fetch(SAPI + '/list_geometries');
     geoFiles = await r.json();
   } catch (e) { geoFiles = []; }
   await loadLumCalList();
@@ -979,7 +842,7 @@ async function loadGeoList() {
 // symlink), so it is the effective selection, not just a recency marker.
 async function loadLumCalList() {
   try {
-    const r = await fetch('/api/list_lum_cals');
+    const r = await fetch(SAPI + '/list_lum_cals');
     const j = await r.json();
     lumCalFiles = Array.isArray(j) ? j : [];
   } catch (e) { lumCalFiles = []; }
@@ -1000,7 +863,7 @@ async function applySavedLumCal() {
   try {
     log('Applying saved intensity cal ' + name + '...');
     const geo = document.getElementById('warp-geometry-select');
-    const r = await fetch('/api/lum_apply', {
+    const r = await fetch(SAPI + '/lum_apply', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({mode: 'empirical', cal_file: name,
                             geometry: geo ? geo.value : undefined})
@@ -1019,7 +882,7 @@ async function applySavedLumCal() {
 async function loadGeometry(name) {
   name = name || 'rig_geometry.yaml';
   try {
-    const r = await fetch('/api/load_geometry', {
+    const r = await fetch(SAPI + '/load_geometry', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name})
     });
@@ -1041,7 +904,7 @@ function refreshDerivedAz() {
   _derivedAzTimer = setTimeout(async () => {
     if (!geoData) return;
     try {
-      const r = await fetch('/api/derived_geometry', {
+      const r = await fetch(SAPI + '/derived_geometry', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({geometry_data: geoData})
       });
@@ -1061,7 +924,7 @@ async function saveGeometry(name) {
   if (!geoData) return;
   name = name || geoCurrentName || 'rig_geometry.yaml';
   try {
-    const r = await fetch('/api/save_geometry', {
+    const r = await fetch(SAPI + '/save_geometry', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name, geometry: geoData})
     });
@@ -1089,7 +952,7 @@ async function sendGeometry() {
   if (!name) { log('No geometry selected'); return; }
   log('Sending ' + name + ' to projector...');
   try {
-    const r = await fetch('/api/send_geometry', {
+    const r = await fetch(SAPI + '/send_geometry', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({name})
     });
@@ -1178,7 +1041,7 @@ async function applyIntensity() {
   try {
     log('Applying luminance correction: ' + sel + '...');
     const geo = document.getElementById('warp-geometry-select');
-    const r = await fetch('/api/lum_apply', {
+    const r = await fetch(SAPI + '/lum_apply', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({mode: sel, geometry: geo ? geo.value : undefined})
     }).then(x => x.json());
@@ -1311,7 +1174,7 @@ async function lumRead(i) {
     await showLumPatch();
     await new Promise(res => setTimeout(res, LUM_SETTLE_MS));
   }
-  const r = await fetch('/api/lum_read', {
+  const r = await fetch(SAPI + '/lum_read', {
     method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
   }).then(x => x.json()).catch(e => ({ok: false, error: String(e)}));
   if (!r.ok) { log('Meter read failed (' + (r.error || '') + ') — type the value manually'); return; }
@@ -1350,7 +1213,7 @@ async function lumFitApply() {
   try {
     log('Fitting ' + measurements.length + ' readings and deploying...');
     const geo = document.getElementById('warp-geometry-select');
-    const r = await fetch('/api/lum_apply', {
+    const r = await fetch(SAPI + '/lum_apply', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({mode: 'empirical', measurements,
                             // Conditions the readings were taken under, for the raw record.
@@ -1393,7 +1256,7 @@ async function startCalibration() {
   const btn = document.querySelector('.calib-btn');
   if (btn) btn.textContent = 'Starting…';
   try {
-    const r = await fetch('/api/start_calibration', {
+    const r = await fetch(SAPI + '/start_calibration', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({geometry: geoCurrentName || undefined, geometry_data: geoData || undefined})
     });
@@ -1424,7 +1287,7 @@ async function stopCalibration() {
   if (btn) btn.textContent = 'Stopping…';
   let stopped = false;
   try {
-    const r = await fetch('/api/stop_calibration', {
+    const r = await fetch(SAPI + '/stop_calibration', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
     });
     const data = await r.json();
@@ -2348,7 +2211,7 @@ function renderCameraControls(dev) {
   const pi = getPiForDevice('camera');
   // Proxied through the setup app (same-origin) rather than hitting the Pi directly, so the
   // preview works from any browser that can reach this app — the Pi hop runs server-side.
-  const streamUrl = pi ? ('/api/camera_feed?ts=' + Date.now()) : '';   // cache-bust so each Live re-requests a fresh stream
+  const streamUrl = pi ? (SAPI + '/camera_feed?ts=' + Date.now()) : '';   // cache-bust so each Live re-requests a fresh stream
 
   return `
     <div class="device-controls">
@@ -2806,7 +2669,7 @@ async function uploadTeensyFirmware() {
   log(`Teensy upload: ${teensyInoFile ? teensyInoFile.name : 'newest repo sketch'} (DEBUG=${debug ? 1 : 0})...`);
   _lockUI();
   try {
-    const r = await fetch('/api/teensy_upload', {
+    const r = await fetch(SAPI + '/teensy_upload', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ino_name: teensyInoFile?.name, ino_text: teensyInoFile?.text, debug})
     });
@@ -2979,6 +2842,22 @@ async function quitApp() {
   document.title = 'VRFarm Setup (closed)';
   document.body.innerHTML = '<div style="text-align:center;margin-top:40vh;color:#888;font-size:16px">Server stopped. You can close this tab.</div>';
 }
+
+// ── shell integration ──
+// Hidden frames must not stream camera video; the shell tells us when we are shown/hidden.
+window.addEventListener('message', ev => {
+  const m = ev.data || {};
+  if (m.type !== 'vrfarm:visible') return;
+  document.querySelectorAll('img').forEach(img => {
+    if (m.visible) {
+      if (img.dataset.pausedSrc) { img.src = img.dataset.pausedSrc.replace(/ts=\d+/, 'ts=' + Date.now()); delete img.dataset.pausedSrc; }
+    } else if ((img.getAttribute('src') || '').includes('camera_feed')) {
+      img.dataset.pausedSrc = img.getAttribute('src'); img.removeAttribute('src');
+    }
+  });
+});
+if (window.parent !== window) { const q = document.getElementById('btn-quit'); if (q) q.style.display = 'none'; }
+loadRig();
 </script>
 </body>
 </html>

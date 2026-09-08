@@ -40,11 +40,43 @@ def _reading(m):
     return float(m["luminance_cdm2"])
 
 
+def azimuth_asymmetry(measurements):
+    """Compare +az against -az for every |az| measured on both sides.
+
+    fit_luminance folds to |az| because the correction is 1D and symmetric, an assumption the
+    geometry cannot check: lateral_offset_cm=0 makes the MODEL symmetric, but projector yaw (not
+    a parameter at all), DLP illumination asymmetry, and screen mounting are outside it. Measuring
+    both sides is the only thing that tests it.
+
+    Returns None if no |az| was measured on both sides, else
+      {"pairs": [(az, left, right, rel)], "max_rel": float, "mean_rel": float}
+    where rel = (right - left) / mean(left, right), signed so a positive value means the +az side
+    is brighter. A few percent is measurement noise; a large spread means the symmetric 1D
+    correction is the wrong shape and folding is averaging away a real gradient."""
+    by_az = defaultdict(list)
+    for m in measurements:
+        by_az[float(m["az_deg"])].append(_reading(m))
+    mags = sorted({abs(a) for a in by_az} - {0.0})
+    pairs = []
+    for mag in mags:
+        if mag in by_az and -mag in by_az:
+            left, right = np.mean(by_az[-mag]), np.mean(by_az[mag])
+            mean = (left + right) / 2.0
+            if mean > 0:
+                pairs.append((mag, float(left), float(right), float((right - left) / mean)))
+    if not pairs:
+        return None
+    rels = [abs(p[3]) for p in pairs]
+    return {"pairs": pairs, "max_rel": max(rels), "mean_rel": float(np.mean(rels))}
+
+
 def fit_luminance(measurements):
     """Fit a per-azimuth luminance correction from raw measurements.
 
     measurements: list of {az_deg, alt_deg, reading | luminance_cdm2}. Readings are averaged over
-    altitude per |azimuth| (the correction is 1D along azimuth).
+    altitude AND over sign per |azimuth| (the correction is 1D along azimuth and symmetric about
+    centre). Measuring both sides therefore buys noise averaging, not resolution — its real value
+    is that azimuth_asymmetry() can then check whether the symmetry it assumes actually holds.
 
     Returns (az_full, gain_fit, correction) as numpy arrays over az 0..105°:
       - gain_fit:   relative luminance, 1.0 at center (az=0), lower toward the edges

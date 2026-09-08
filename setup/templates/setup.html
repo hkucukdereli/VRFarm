@@ -1131,7 +1131,14 @@ async function applyIntensity() {
   finally { _unlockUI(); }
 }
 
-const LUM_AZIMUTHS = [0, 20, 40, 60, 80, 100];
+// Both sides of centre. The fit still folds to |az| (the correction is 1D and symmetric), so the
+// negative half is not extra resolution — it is a TEST of the symmetry assumption, which nothing
+// in the geometry can verify: lateral_offset_cm=0 makes the model symmetric, but projector yaw,
+// DLP illumination asymmetry (TIR prism / LED placement) and screen mounting are not modelled at
+// all. Fit & Apply reports the left/right spread; if it is large, the 1D symmetric correction is
+// the wrong shape and no amount of fitting will fix it.
+// Ordered as a single sweep across the screen so the meter moves one way.
+const LUM_AZIMUTHS = [-100, -80, -60, -40, -20, 0, 20, 40, 60, 80, 100];
 function openLumPanel(method) {
   const p = document.getElementById('lum-panel');
   if (!p) return;

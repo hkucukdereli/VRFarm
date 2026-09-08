@@ -2442,7 +2442,7 @@ function renderDisplayControls(dev) {
   // Saved intensity cals, newest first; the in-use one is preselected and marked.
   const lumCalOptions = lumCalFiles.map(c =>
     `<option value="${c.name}" ${c.is_latest ? 'selected' : ''}>${
-      c.name.replace('luminance_cal_','').replace('.yaml','')}${c.is_latest ? ' ●' : ''}</option>`
+      c.name.replace('.yaml','')}${c.is_latest ? ' ●' : ''}</option>`
   ).join('');
 
   // Geometry param fields (only shown when loaded)
@@ -2583,7 +2583,7 @@ function renderDisplayControls(dev) {
       <div class="device-controls" style="margin-top:6px">
         <div class="device-field">
           <label>Saved</label>
-          <select id="lum-cal-select" style="min-width:180px; max-width:280px">
+          <select id="lum-cal-select" style="min-width:240px; max-width:320px">
             ${lumCalOptions || '<option value="">(none saved)</option>'}
           </select>
         </div>

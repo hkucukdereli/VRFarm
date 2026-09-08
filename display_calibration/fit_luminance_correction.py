@@ -24,7 +24,7 @@ import sys
 import yaml
 import numpy as np
 from pathlib import Path
-from datetime import date
+from datetime import date, datetime
 from collections import defaultdict
 from scipy.interpolate import UnivariateSpline
 
@@ -116,7 +116,10 @@ def save_luminance_cal(az_full, gain_fit, correction, source_file=None, cal_dir=
     compute_warp_map.py `--lum-mode empirical` re-injects this into warp_map.npz on every build,
     so the measured correction survives warp regeneration. Returns the written file path."""
     cal_dir = Path(cal_dir)
-    out = cal_dir / f"luminance_cal_{date.today().isoformat()}.yaml"
+    # Timestamped to the MINUTE, matching the rig_geometry_YYYYmmdd_HHMM convention. Keying on the
+    # date alone meant every run on a given day silently overwrote the previous one, so a session
+    # of successive fits left exactly one file and nothing to compare or fall back to.
+    out = cal_dir / f"luminance_cal_{datetime.now().strftime('%Y%m%d_%H%M')}.yaml"
     cal_data = {
         'date':        date.today().isoformat(),
         'source_file': str(source_file) if source_file else None,
@@ -133,6 +136,43 @@ def save_luminance_cal(az_full, gain_fit, correction, source_file=None, cal_dir=
         latest.unlink()
     latest.symlink_to(out.name)
     return out
+
+
+def list_luminance_cals(cal_dir=CAL_DIR):
+    """Saved luminance cal files, newest first, excluding the `latest` symlink. Returns a list of
+    {name, mtime, is_latest} — is_latest marks which file luminance_cal_latest.yaml resolves to,
+    i.e. the one a warp rebuild with --lum-mode empirical would actually pick up."""
+    cal_dir = Path(cal_dir)
+    latest = cal_dir / "luminance_cal_latest.yaml"
+    target = latest.resolve().name if latest.exists() else None
+    out = []
+    for f in cal_dir.glob("luminance_cal_*.yaml"):
+        if f.name == "luminance_cal_latest.yaml":
+            continue
+        out.append({"name": f.name, "mtime": f.stat().st_mtime, "is_latest": f.name == target})
+    return sorted(out, key=lambda d: d["mtime"], reverse=True)
+
+
+def select_luminance_cal(name, cal_dir=CAL_DIR):
+    """Point luminance_cal_latest.yaml at a saved cal file so the next warp rebuild uses it.
+
+    This is the whole mechanism for re-applying an earlier measurement: compute_warp_map's
+    `--lum-mode empirical` reads _load_empirical_cal(), which only ever opens the `latest` symlink.
+    Returns the resolved Path. Raises FileNotFoundError / ValueError on a bad name."""
+    cal_dir = Path(cal_dir)
+    safe = Path(name).name                       # no traversal: basename only, same as the geo picker
+    if not safe.startswith("luminance_cal_") or not safe.endswith(".yaml"):
+        raise ValueError(f"Not a luminance cal file: {name}")
+    if safe == "luminance_cal_latest.yaml":
+        raise ValueError("Pick a dated cal file, not the 'latest' pointer")
+    target = cal_dir / safe
+    if not target.exists():
+        raise FileNotFoundError(f"No such cal file: {safe}")
+    latest = cal_dir / "luminance_cal_latest.yaml"
+    if latest.exists() or latest.is_symlink():
+        latest.unlink()
+    latest.symlink_to(target.name)
+    return target
 
 
 def inject_into_warp(az_full, gain_fit, correction, warp_map=WARP_MAP):

@@ -872,7 +872,18 @@ def api_lum_apply():
 
     steps = []
     fit = None
-    if mode == "empirical":
+    if mode == "empirical" and data.get("cal_file") and not data.get("measurements"):
+        # Re-apply a SAVED cal instead of fitting fresh readings. Nothing is refitted: point the
+        # `latest` symlink at the chosen file, and the warp rebuild below picks it up the same way
+        # it would a brand-new fit.
+        try:
+            sys.path.insert(0, str(GEO_DIR))
+            from fit_luminance_correction import select_luminance_cal
+            chosen = select_luminance_cal(data["cal_file"])
+            steps.append(f"Using saved cal {chosen.name} (no refit)")
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"Could not select cal: {e}"}), 400
+    elif mode == "empirical":
         valid = [m for m in (data.get("measurements") or [])
                  if m.get("reading") not in (None, "") and m.get("az_deg") is not None]
         if len(valid) < 2:
@@ -1146,6 +1157,17 @@ def api_check_warp():
 
 
 # ── Geometry files ──
+
+@app.route("/api/list_lum_cals")
+def api_list_lum_cals():
+    """List saved luminance-cal files, newest first, flagging which one `latest` points at."""
+    try:
+        sys.path.insert(0, str(GEO_DIR))
+        from fit_luminance_correction import list_luminance_cals
+        return jsonify(list_luminance_cals())
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/list_geometries")
 def api_list_geometries():

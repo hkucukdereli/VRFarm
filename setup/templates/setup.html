@@ -261,6 +261,7 @@ let piState = {};       // ip -> {checked: bool}
 let lickPollInterval = null;
 let devicesInitialized = false;
 let geoFiles = [];          // available geometry YAML filenames
+let lumCalFiles = [];       // saved intensity cals: [{name, mtime, is_latest}], newest first
 let geoData = null;         // loaded geometry object
 let geoCurrentName = '';    // currently loaded filename
 let derivedAz = { min: null, max: null };  // az range the warp fills (server ray-trace)
@@ -956,6 +957,49 @@ async function loadGeoList() {
     const r = await fetch('/api/list_geometries');
     geoFiles = await r.json();
   } catch (e) { geoFiles = []; }
+  await loadLumCalList();
+}
+
+// Saved intensity calibrations, newest first. The one flagged is_latest is what a warp rebuild
+// with --lum-mode empirical would actually pick up (compute_warp_map only ever reads the `latest`
+// symlink), so it is the effective selection, not just a recency marker.
+async function loadLumCalList() {
+  try {
+    const r = await fetch('/api/list_lum_cals');
+    const j = await r.json();
+    lumCalFiles = Array.isArray(j) ? j : [];
+  } catch (e) { lumCalFiles = []; }
+}
+async function refreshLumCalList() {
+  await loadLumCalList();
+  renderDeviceList();
+  log('Intensity cal list reloaded (' + lumCalFiles.length + ' files).');
+}
+// Re-apply a saved cal: repoint `latest` at it and rebuild the warp. No refit — the stored curve
+// is used verbatim, which is the point (it is how you get back to a measurement you trust).
+async function applySavedLumCal() {
+  if (uiBusy) return;
+  const sel = document.getElementById('lum-cal-select');
+  const name = sel && sel.value;
+  if (!name) { log('No saved intensity cal selected'); return; }
+  _lockUI();
+  try {
+    log('Applying saved intensity cal ' + name + '...');
+    const geo = document.getElementById('warp-geometry-select');
+    const r = await fetch('/api/lum_apply', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode: 'empirical', cal_file: name,
+                            geometry: geo ? geo.value : undefined})
+    }).then(x => x.json());
+    (r.steps || []).forEach(s => log('  ' + s));
+    if (r.ok) {
+      if (rig.devices.display) rig.devices.display.luminance_correction = 'empirical';
+      await loadLumCalList();
+      renderDeviceList();
+    }
+    log(r.ok ? ('Applied ' + name + '.') : ('Apply failed: ' + (r.error || '')));
+  } catch (e) { log('Apply error: ' + e); }
+  finally { _unlockUI(); }
 }
 
 async function loadGeometry(name) {
@@ -2395,6 +2439,12 @@ function renderDisplayControls(dev) {
     `<option value="${f}" ${f === geoCurrentName ? 'selected' : ''}>${f.replace('.yaml','')}</option>`
   ).join('');
 
+  // Saved intensity cals, newest first; the in-use one is preselected and marked.
+  const lumCalOptions = lumCalFiles.map(c =>
+    `<option value="${c.name}" ${c.is_latest ? 'selected' : ''}>${
+      c.name.replace('luminance_cal_','').replace('.yaml','')}${c.is_latest ? ' ●' : ''}</option>`
+  ).join('');
+
   // Geometry param fields (only shown when loaded)
   let geoFields = '';
   if (geoData) {
@@ -2529,6 +2579,21 @@ function renderDisplayControls(dev) {
         </div>
         <button class="btn btn-orange btn-sm" onclick="applyIntensity()">Intensity Cal</button>
         <span id="lum-status" style="font-size:10px; color:#888">${lumStatusText()}</span>
+      </div>
+      <div class="device-controls" style="margin-top:6px">
+        <div class="device-field">
+          <label>Saved</label>
+          <select id="lum-cal-select" style="min-width:180px; max-width:280px">
+            ${lumCalOptions || '<option value="">(none saved)</option>'}
+          </select>
+        </div>
+        <button class="btn btn-gray btn-sm" onclick="refreshLumCalList()" title="Reload the saved intensity-cal list">&#8635;</button>
+        <button class="btn btn-blue btn-sm" onclick="applySavedLumCal()"
+                title="Re-apply this saved measurement (no refit) and rebuild the warp"
+                ${lumCalFiles.length ? '' : 'disabled'}>Apply saved</button>
+        ${lumCalFiles.length
+          ? `<span style="font-size:10px; color:#888">${lumCalFiles.length} saved · ● = in use by warp rebuild</span>`
+          : '<span style="font-size:10px; color:#888">no measurements saved yet</span>'}
       </div>
       <div id="lum-panel" style="display:none; margin-top:8px"></div>
     </div>

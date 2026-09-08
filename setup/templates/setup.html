@@ -720,9 +720,10 @@ async function initDevices() {
   }
 }
 
-// Reinitialize just one device from its card, without re-initing the whole rig.
-async function reinitDevice(name) {
-  _lockUI();
+// Reinit one device WITHOUT touching the UI lock. _lockUI/_unlockUI are not reentrant — the
+// inner _unlockUI would release a lock the caller still needs — so a longer locked operation
+// that wants to chain a reinit calls this, and only the outermost caller owns the lock.
+async function _reinitDeviceInner(name) {
   log('Reinitializing ' + name + '...');
   try {
     const r = await fetch('/api/reinit_device', {
@@ -740,7 +741,14 @@ async function reinitDevice(name) {
       renderDeviceList();
     }
     log(data.ok ? (name + ' reinitialized.') : (name + ' reinit failed: ' + (data.error || '')));
-  } catch (e) { log('Reinit error: ' + e); }
+    return !!data.ok;
+  } catch (e) { log('Reinit error: ' + e); return false; }
+}
+
+// Reinitialize just one device from its card, without re-initing the whole rig.
+async function reinitDevice(name) {
+  _lockUI();
+  try { await _reinitDeviceInner(name); }
   finally { _unlockUI(); }
 }
 
@@ -943,6 +951,12 @@ async function generateWarp() {
     if (data.ok) {
       warpExists = true;
       log('Warp map generated and deployed.');
+      // The renderer caches the warp in memory and never re-reads it on its own, so a freshly
+      // deployed warp_map.npz does nothing until the display is reinitialized. Chain it here
+      // rather than leaving it as a step the operator has to remember: same endpoint the Reinit
+      // button uses, under the lock this function already holds.
+      if (btn) btn.textContent = 'Reinitializing...';
+      await _reinitDeviceInner('display');
     } else {
       log('Warp generation failed: ' + (data.error || ''));
     }
@@ -2614,10 +2628,16 @@ function renderDisplayControls(dev) {
         <button class="btn btn-gray btn-sm" onclick="refreshGeoList()" title="Reload the geometry list (pick up newly saved calibrations)">&#8635;</button>
         <button class="calib-btn btn ${calibrating ? 'btn-red' : 'btn-green'} btn-sm" onclick="toggleCalibration()" title="Hand the display over to the geometry calibrator (displayd standby) and open the slider UI">${calibrating ? 'Stop Geometry Cal' : 'Geometry Cal'}</button>
         <button class="btn btn-blue btn-sm" onclick="sendGeometry()" title="Copy the selected geometry to the projector Pi as its rig_geometry.yaml">Send to projector</button>
-        <button class="warp-btn btn ${warpBtnClass} btn-sm" onclick="generateWarp()" title="Ray-trace the selected geometry into warp_map.npz and deploy it to the Leader">${warpBtnText}</button>
-        ${warpExists ? '<span style="font-size:10px; color:#4caf50">warp_map.npz found on Leader</span>' : '<span style="font-size:10px; color:#f44336">warp_map.npz not found on Leader</span>'}
       </div>
       ${geoFields}
+    </div>
+
+    <div class="disp-section">
+      <span class="disp-label">APPLY CALIBRATION</span>
+      <div class="device-controls">
+        <button class="warp-btn btn ${warpBtnClass} btn-sm" onclick="generateWarp()" title="Ray-trace the selected geometry (with the active intensity correction) into warp_map.npz, deploy it, and reinitialize the display so it takes effect">${warpBtnText}</button>
+        ${warpExists ? '<span style="font-size:10px; color:#4caf50">warp_map.npz found on Leader</span>' : '<span style="font-size:10px; color:#f44336">warp_map.npz not found on Leader</span>'}
+      </div>
     </div>`;
 }
 

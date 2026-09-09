@@ -5,30 +5,31 @@
 <title>VRFarm — Data</title>
 <link rel="stylesheet" href="/static/common.css">
 <style>
-  body { padding: 14px 18px; overflow: auto; height: 100vh; }
-  .topbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
-  .topbar input[type=text] { min-width: 320px; flex: 1; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; }
-  .rigcard { border: 1px solid var(--line); border-radius: 6px; background: var(--card); padding: 8px 10px; }
-  .rigcard.off { opacity: 0.6; }
-  .rigcard h3 { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  body { padding: 16px; overflow: auto; height: 100vh; }
+  .topbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .topbar select { width: auto; min-width: 200px; }
+  .topbar input[type=text] { min-width: 320px; flex: 1; width: auto; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+  .rigcard { background: #0f3460; border-radius: 6px; padding: 10px 12px; }      /* = .pi-card */
+  .rigcard.off { opacity: 0.55; }
+  .rigcard h3 { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; text-transform: none; letter-spacing: 0; color: #fff; font-size: 14px; }
   .rigcard h3 input { transform: scale(1.2); }
-  .kv { font-size: 11px; color: #aaa; }
-  .kv b { color: #ddd; font-weight: 600; }
-  .folders { margin-top: 6px; max-height: 160px; overflow: auto; font-size: 11px; }
+  .kv { font-size: 11px; color: #888; }
+  .kv b { color: #e0e0e0; font-weight: 600; }
+  .folders { margin-top: 6px; max-height: 160px; overflow: auto; font-size: 11px; background: #16213e; border-radius: 4px; padding: 4px 6px; }
   .folders div { display: flex; justify-content: space-between; gap: 6px; padding: 1px 0; }
-  .g { color: var(--green); } .r { color: var(--red); } .y { color: var(--amber); } .x { color: #888; }
-  .actions { display: flex; gap: 10px; align-items: center; margin: 12px 0; flex-wrap: wrap; }
-  .actions .btn { padding: 8px 14px; font-size: 13px; }
-  #banner { display: none; background: #4a1f1f; border: 1px solid #8a2f2f; color: #f3c2c2; padding: 8px 10px; border-radius: 4px; margin-bottom: 10px; font-size: 12px; }
+  .g { color: #4caf50; } .r { color: #f44336; } .y { color: #f9a825; } .x { color: #888; }
+  .actions { display: flex; gap: 10px; align-items: center; margin: 14px 0; flex-wrap: wrap; }
+  .actions .btn { padding: 8px 16px; font-size: 13px; }
+  #banner { display: none; background: #3a1520; border-left: 4px solid #c62828; color: #f5c6c6; padding: 8px 10px; border-radius: 4px; margin-bottom: 12px; font-size: 12px; }
   #progress { display: none; }
-  .rigbar { display: grid; grid-template-columns: 110px 1fr 220px; gap: 8px; align-items: center; margin: 3px 0; font-size: 12px; }
-  select[multiple] { min-height: 160px; width: 100%; font-family: Menlo, monospace; font-size: 12px; }
-  option.g { color: #7ac142; } option.r { color: #ff7b7b; } option.x { color: #999; }
+  .rigbar { display: grid; grid-template-columns: 110px 1fr 240px; gap: 8px; align-items: center; margin: 3px 0; font-size: 12px; }
+  select[multiple] { min-height: 160px; width: 100%; font-family: monospace; font-size: 12px; }
+  option.g { color: #4caf50; } option.r { color: #f44336; } option.x { color: #888; }
 </style>
 </head>
 <body>
-<h2 style="font-size:16px; margin-bottom:8px">Data</h2>
+<h1>Data</h1>
 <div id="banner"></div>
 
 <div class="card topbar">

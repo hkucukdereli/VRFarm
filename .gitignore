@@ -253,6 +253,9 @@ display_diagnostics/preview/
 # in the calibrator and worth diffing; these are instrument readings.)
 display_calibration/luminance_cal_*.yaml
 display_calibration/luminance_measurements_*.yaml
+# ... and the same inside the per-rig folders (display_calibration/<rig>/)
+display_calibration/*/luminance_cal_*.yaml
+display_calibration/*/luminance_measurements_*.yaml
 
 # Controller-wide settings (machine-specific: data root, groups, ports)
 controller.yaml

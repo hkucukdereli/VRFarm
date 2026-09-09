@@ -34,7 +34,7 @@ Project overview and repo layout are in the [root README](../README.md).
 ## Map of the system
 
 ```
-Controller  (app/app.py :5000, setup/app.py :4999)
+Controller  (controller/app.py :5000 — Network / Setup / Experiment / Data tabs)
   │  REST 5080  ─ deploy, config, device init, camera
   │  UDP  5572 →  START / STOP / REWARD
   │  UDP  5571 ←  trial, lick, reward, stim, sync events

@@ -16,7 +16,12 @@ imperative loop in `engine/leader.py`. Devices are pluggable. Named after cheese
 Follower `cheddar-dlp` (192.168.10.102, **Pi 4**, drives the projector).
 Live rig config is `rigs/cheddar.yaml` (NOT cheese.yaml, which is its tracked twin).
 
-**Controller:** `fystyk` (192.168.10.1), conda at `~/miniforge3`, env `vrfarm`, Python 3.11.
+**Controller:** `fystyk` (192.168.10.1), env `vrfarm` (Python 3.11) under the Homebrew miniforge at
+`/opt/homebrew/Caskroom/miniforge/base/envs/vrfarm` (`~/miniforge3` is a second install holding only
+`base`/`caiman`). ONE web app runs everything: `python controller/app.py` → http://localhost:5000 with
+four tabs, Network / Setup / Experiment / Data. Controller-wide settings (data root, auto purge, rig
+groups) live in `controller.yaml` (gitignored; template `controller.example.yaml`). Full guide:
+`docs/MULTI_RIG.md`.
 **Both Pis:** Debian 13 (trixie), conda env `rig`, user `vruser`. The `rig` env Python
 **must match the system Python** (3.13 on trixie) — the camera bindings
 (`python3-libcamera`/`python3-picamera2`) are apt-built for the system Python and symlinked
@@ -35,7 +40,8 @@ into the env, so a version mismatch breaks `import picamera2`. Create with
 ```
 ~/VRFarm/                              <- project root on the Controller
 ├── rigs/
-│   └── cheddar.yaml                   <- rig hardware config (pins, cal, ports, roles) — YAML
+│   ├── cheddar.yaml                   <- rig hardware config (pins, cal, ports, roles) — YAML, one per rig
+│   └── _template.yaml                 <- new-rig template (Network tab -> Add rig); '_' files are not rigs
 ├── experiments/
 │   └── *.yaml                         <- task/paradigm configs (stimulus/reward/session/adaptive)
 ├── devices/                           <- one file per device type (base.py = Device, DEVICE_REGISTRY)
@@ -48,12 +54,19 @@ into the env, so a version mismatch breaks `import picamera2`. Create with
 │   ├── dlpc.py                        <- defensive DLPC3436 I2C wrapper
 │   ├── PROTOCOL.md                    <- THE interface contract — read before changing anything
 │   └── displayd.service
-├── app/                               <- experiment UI, localhost:5000
-├── setup/                             <- rig setup UI, localhost:4999
+├── controller/                        <- THE controller UI, localhost:5000 (replaced app/ and setup/)
+│   ├── app.py                         <- shell (4 tabs) + global routes; opens the ONE UDP socket (5571)
+│   ├── registry.py  events.py         <- a RigState per loaded rig; UDP demux by sender IP; SSE fan-out
+│   ├── experiment.py  setup.py        <- /api/rigs/<rig>/...  and  /api/rigs/<rig>/setup/...
+│   ├── network.py  data.py            <- rigs/Pis/groups CRUD; Data tab (SSH/rsync sync, purge, poweroff)
+│   ├── sync.py  jobs.py  ssh.py       <- Data-tab engine, background jobs, ssh/scp helpers
+│   └── templates/ static/             <- shell.html + one page per tab (per-rig pages run in iframes)
+├── controller.yaml                    <- controller-wide settings (gitignored; see controller.example.yaml)
 ├── pi_api/api.py                      <- Flask REST API on each Pi, port 5080
 ├── shared/
 │   ├── config.py  stim_generator.py  notify.py
-│   └── deploy_manifest.py             <- single deploy file list for both UIs
+│   ├── leader_data.py                 <- Pi-side inventory / consolidate / purge for the Data tab (over SSH)
+│   └── deploy_manifest.py             <- single deploy file list (Install and Deploy)
 ├── display_calibration/               <- geometry calibration (kmsdrm; calib_geo.py + cal_start/stop.sh)
 ├── shepherd/                          <- Pi-side health monitor
 └── data/subjects/                     <- session history JSONs
@@ -79,8 +92,10 @@ Controller to both Pis.
 
 | Port | Direction | Purpose |
 |------|-----------|---------|
-| 5080 | Controller → Pi | pi_api REST (deploy, start/stop, device init, transfer) |
-| 5571 | Leader → Controller | events (trial, lick, reward, sync, display_health, display_abort) |
+| 5000 | browser → Controller | the one controller UI (Network / Setup / Experiment / Data) |
+| 22 | Controller → Pi | SSH: Install, calibration hand-off, and the Data tab (rsync sync, purge, poweroff) |
+| 5080 | Controller → Pi | pi_api REST (deploy, start/stop, device init, camera) |
+| 5571 | Leader → Controller | events (trial, lick, reward, sync, display_health, display_abort) from EVERY rig — one socket, sorted by sender IP (+ the `rig` field each event carries) |
 | 5572 | Controller → Leader | commands (START, STOP, REWARD) |
 | 5575 | Leader → displayd | session channel (SHOW, LOAD_STIMS, HB_FLASH, SYNC_TEST) |
 | 5573 | displayd → Leader | acks: stim_onset, hb_flash (flip times), display_health |
@@ -144,17 +159,33 @@ Adding a device = one file in `devices/`, subclassing `Device` from `devices/bas
 
 ## Experiment workflow
 
-Setup → Connect → **Deploy** → Go → Ended → Transfer.
+Setup → Connect → **Deploy** → Go → Ended → New session; the data is pulled later from the **Data** tab.
 Deploy uploads code (list lives in `shared/deploy_manifest.py`), generates stimuli on the
 Leader, pushes the NPZ to the Follower, and renders thumbnails. Any parameter change
 invalidates the deploy and greys out Go.
+
+Several rigs run side by side: each loaded rig is a sub-tab of Setup and Experiment, and a rig
+**group** (Network tab) loads several at once. Rigs do NOT need different ports: the controller
+opens ONE UDP socket and sorts datagrams by the sender's IP (falling back to the `rig` field every
+leader event carries). Pi identity (name / IP / role / user) is edited in the Network tab.
+
+**Data tab** (SSH only, talks to leaders): a date folder `<mouse>/<mouse>_<date>` is green when an
+rsync dry run finds nothing left to copy in either tree, red otherwise. **Sync Now** copies chosen
+folders (consolidate on the Pi first, verify with a second dry run, ledger at
+`<data root>/.vrfarm_sync_ledger.json`); **Sync & Poweroff** copies everything red, then
+`sudo poweroff`s every Pi of the selected rigs; **Purge Data** deletes green + consolidated folders
+on the Pi; **Auto purge** does that right after each verified sync. Data lands subject-first in one
+tree for all rigs: `<data root>/<mouse>/<mouse>_<date>/<session_id>/`.
 
 ---
 
 ## Packages
 
-**Controller** (`conda activate vrfarm`): `flask requests scipy matplotlib numpy h5py pyyaml`.
-**Leader** (`rig` env): `flask pyyaml numpy scipy h5py smbus2 pigpio lgpio pyserial` + `picamera2`.
+**Controller** (`conda activate vrfarm`): `flask requests scipy matplotlib numpy h5py pyyaml`, plus
+`rsync` >= 3.1 from conda-forge (`conda install -n vrfarm -c conda-forge rsync`) — Apple's
+`/usr/bin/rsync` is openrsync and the Data tab rejects it.
+**Leader** (`rig` env): `flask pyyaml numpy scipy h5py smbus2 pigpio lgpio pyserial` + `picamera2`;
+`rsync` from apt on every Pi (the Install step adds it).
 **Follower**: `rig` env for pi_api; **system python3** for displayd/renderer and calib_geo
 (`python3-pygame`, `python3-numpy`, `python3-yaml` from apt — no Flask, and calib_geo's web
 UI is stdlib `http.server` for exactly that reason).
@@ -164,8 +195,9 @@ pigpiod is built from source (`/usr/local/bin/pigpiod`, unit at
 
 ```bash
 conda activate vrfarm
-python app/app.py          # experiment UI, localhost:5000
-python setup/app.py        # rig setup UI, localhost:4999
+python controller/app.py            # the controller UI, localhost:5000 (--port 5055 if AirPlay squats 5000)
+python tools/smoke_multirig.py      # two fake rigs end to end (mock Pis)
+python tools/smoke_data.py          # the Data tab against a scratch data tree
 ```
 Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
 
@@ -180,7 +212,14 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
   Geometry calibration hands over properly instead: `cal_start.sh` POSTs `:5581/standby`,
   `cal_stop.sh` POSTs `/resume`. The setup UI refuses any X path while displayd is alive.
 - `pkill -f PATTERN` **self-matches** any wrapper whose command line mentions the literal —
-  always issue the kill separately from commands that name the file.
+  always issue the kill separately from commands that name the file. (The Data tab's
+  engine-running check therefore scans `/proc` from inside Python, `shared/leader_data.py`.)
+- **Every new package or Pi-side file goes through Install / Deploy**: apt packages in the Install
+  step (`controller/setup.py`), Pi-side files in `shared/deploy_manifest.py`, controller packages
+  in the list above. A leader installed before the multi-rig work needs a Deploy (ships
+  `shared/leader_data.py`) and a re-Install or `sudo apt install rsync`.
+- Calibration files are per rig once `display_calibration/<rig>/` exists
+  (`python tools/migrate_calibration_dir.py cheddar`); until then the shared folder is used.
 - **One serial reader.** The Teensy's `/dev/ttyACM0` gives its bytes to exactly one process;
   a second reader silently steals them. Release pi_api's devices before bench tools.
 - The Teensy sync output is **pin 16** (scope-verified), analog in is **A1**.

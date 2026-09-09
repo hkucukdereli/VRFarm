@@ -688,5 +688,11 @@ if __name__ == "__main__":
                         choices=['empirical', 'theoretical', 'none'],
                         help='luminance correction baked into the warp (default: theoretical). '
                              'empirical re-injects luminance_cal_latest.yaml.')
+    parser.add_argument('--cal-dir', default=None,
+                        help='folder holding luminance_cal_latest.yaml and receiving warp_map.npz '
+                             '(default: next to this script; the controller passes '
+                             'display_calibration/<rig>/ for a migrated rig)')
     args = parser.parse_args()
+    if args.cal_dir:
+        CAL_DIR = Path(args.cal_dir).expanduser().resolve()
     main(validate=args.validate, geo_path=args.geo, lum_mode=args.lum_mode)

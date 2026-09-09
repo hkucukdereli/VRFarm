@@ -2,14 +2,16 @@
 
 **Last updated:** 2026-08-17
 
-This is the UI you use every experiment day: pick a subject and a task, push it to the
-rig, run the session, watch the animal behave in real time, and pull the data back.
-Building or servicing the rig itself happens in the [Setup UI](SETUP_UI.md).
+This is the tab you use every experiment day: pick a subject and a task, push it to the
+rig, run the session, and watch the animal behave in real time. Pulling the data back is the
+**Data** tab's job ([MULTI_RIG.md](MULTI_RIG.md)); building or servicing the rig itself happens
+in the [Setup tab](SETUP_UI.md). Each loaded rig is a sub-tab; the **Load rig** menu also loads
+whole groups.
 
 ```bash
 conda activate vrfarm
-python app/app.py            # http://localhost:5000
-python app/app.py --port 5055 --no-browser    # if AirPlay owns 5000 (macOS)
+python controller/app.py     # http://localhost:5000 -> Experiment tab
+python controller/app.py --port 5055 --no-browser    # if AirPlay owns 5000 (macOS)
 ```
 
 For the scientific protocol — what the levels mean, what to check before an animal goes
@@ -36,7 +38,7 @@ Rig Setup ──> Connected ──> Experiment Deployed ──> Running ──> 
 |---|---|
 | Sidebar | RIG (+ per-Pi dots) · SESSION identity · EXPERIMENT selector and the full parameter form |
 | Top bar | Session #, Elapsed, Estimated remaining, Trial n/N, Trial and ITI timers |
-| Actions | Deploy · GO · STOP · Live, then Transfer with its destination and per-device save checkboxes |
+| Actions | Deploy · GO · STOP · Live, then New session and the per-device save checkboxes |
 | Middle | Camera preview · Stimulus scene · four Live plots |
 | Lower | EVENTS / SYNC / RUNNING rasters · Trials table · Log |
 
@@ -120,7 +122,7 @@ pre-generated stimulus plan, so running without a re-Deploy would use the old va
 Runs the session. The GO button label becomes the grace-period countdown until the first
 trial starts. Live mode starts automatically, so the rasters and plots begin filling.
 
-Before pressing GO, decide what gets saved: the **Save:** checkboxes next to Transfer are
+Before pressing GO, decide what gets saved: the **Save:** checkboxes next to New session are
 read once, at GO. Unchecking **Camera** still livestreams but writes no video file;
 unchecking a behavioural device skips its detailed HDF5 datasets while keeping per-trial
 outcomes.
@@ -174,12 +176,14 @@ A session ends by itself after the planned trials, or aborts on the global timeo
 animal is dry for too many consecutive trials. **STOP** ends it early. Either way the four
 live plots are saved as PNGs into the session folder and the phase becomes **Ended**.
 
-**Transfer** then asks the Leader to consolidate everything into one self-contained
-`<session_id>.h5`, downloads it (plus `video.h264`), and registers the session in the
-subject index. Files land at:
+The data stays on the Leader until the **Data** tab syncs it (Sync Now, or Sync & Poweroff at
+the end of the day — [MULTI_RIG.md](MULTI_RIG.md)); consolidation into one self-contained
+`<session_id>.h5` happens on the Leader before the copy. **New session** clears the run and
+returns the rig to Connected. The subject index is written when the session ends. Synced files
+land at:
 
 ```
-<dest>/<subject>/<subject>_<date>/<session_id>/
+<data root>/<subject>/<subject>_<date>/<session_id>/
 ├── <session_id>.h5     # trials, stimulus plan, per-device data, camera timestamps, metadata
 └── video.h264          # only if Camera was checked at GO
 ```
@@ -204,7 +208,7 @@ Almost every "why is this greyed out" answer is here.
 | **GO** | Phase is exactly **Deployed** — one GO per Deploy |
 | **STOP** | Phase is Running |
 | **Live** | A rig is loaded |
-| **Transfer** | Phase is Ended |
+| **New session** | Phase is Ended |
 | Camera exposure/gain | A rig is loaded and no session is running (locked during recording) |
 | **×** Quit | Not running |
 
@@ -229,7 +233,7 @@ drive a whole scripted session — trials, licks, rewards, plots, `session_end`.
 
 ```bash
 python tools/mock_pi.py       # fake pi_api :5080 + fake leader UDP
-python app/app.py             # rig = demo -> Load Rig -> Load Experiment -> Deploy -> GO
+python controller/app.py      # Experiment tab -> Load rig demo -> Connect -> Load Experiment -> Deploy -> GO
 ```
 
 Useful knobs: `MOCK_N` (trials), `MOCK_ITI`, `MOCK_TRIAL_S`, and `MOCK_END=timeout` to
@@ -249,7 +253,7 @@ exercise the global-timeout abort path. The camera stays blank — the mock serv
 | Rasters empty during a run | Press **Live**; if still empty, inbound UDP 5571 is blocked on the controller ([CONTROLLER_SETUP.md §1](CONTROLLER_SETUP.md#1-network--static-ip-on-the-wired-nic)) |
 | ⚠️ *CAMERA NOT RECORDING* in the log | The session runs without video. Check the SSD mount and `data.video_dir` |
 | 🐑 alerts in the log | shepherd health warnings from the Leader — temperature, disk, CPU or encode rate. See [shepherd/README.md](../shepherd/README.md) |
-| Transfer downloads nothing | Check the Leader still holds the session folder, and that Save checkboxes were set at GO |
+| The Data tab lists no folder for the session | Check the Leader still holds it (`~/data/<subject>/…`), and that the Save checkboxes were set at GO |
 
 ---
 

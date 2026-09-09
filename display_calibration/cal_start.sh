@@ -5,6 +5,10 @@
 #   bash ~/rig/calibration/cal_start.sh panel     # raw numbered panel grid (no web UI)
 #   bash ~/rig/calibration/cal_start.sh warp      # warp-grid validator (no web UI)
 #
+# CAL_MAC_URL (env, optional): the controller endpoint that archives a saved geometry —
+#   http://<controller>:<port>/api/rigs/<rig>/setup/receive_geometry. The controller's Setup
+#   tab sets it when it launches this script; by hand it can be left unset (local save only).
+#
 # KMS, no X. Two things follow from that and both are handled here rather than by the
 # caller, so running this by hand over SSH behaves the same as the setup UI's button:
 #
@@ -20,7 +24,7 @@ CAL=~/rig/calibration
 DISPLAYD=http://127.0.0.1:5581
 
 case "$TOOL" in
-  geo)    SCRIPT=calib_geo.py;   ARGS="--port 5091";                              URL="http://192.168.10.102:5091" ;;
+  geo)    SCRIPT=calib_geo.py;   ARGS="--port 5091 ${CAL_MAC_URL:+--mac-url $CAL_MAC_URL}"; URL="http://$(hostname -I 2>/dev/null | awk '{print $1}'):5091" ;;
   panel)  SCRIPT=panel_grid.py;  ARGS="--spacing 100";                            URL="(no web UI — read the grid)" ;;
   warp)   SCRIPT=validate_calibration_pygame.py; ARGS="--warp $CAL/warp_map.npz --pattern grid"; URL="(no web UI)" ;;
   *) echo "unknown tool '$TOOL' (use: geo | panel | warp)"; exit 1 ;;

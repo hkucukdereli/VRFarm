@@ -132,7 +132,7 @@ Restart=always; RestartSec=2; WatchdogSec=15; Type=notify (sd_notify via a ~10-l
 AF_UNIX datagram helper — no python3-systemd dep). Journald gets stdout/stderr.
 Shipped disabled: Install writes the unit + `systemctl daemon-reload`, no enable.
 
-## Install additions (setup/app.py, follower role)
+## Install additions (controller/setup.py, follower role)
 
 - apt: python3-pygame python3-numpy python3-yaml libdrm-tests (+ apt-mark hold
   libsdl2-2.0-0 python3-pygame)

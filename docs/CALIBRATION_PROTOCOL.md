@@ -18,7 +18,8 @@ Calibration has three independent parts that can be done separately:
 
 The geometric warp and the luminance correction are both stored in `warp_map.npz` and referenced by every experiment. The reward calibration is a small ms→µL table stored per-rig in the rig YAML.
 
-Everything is driven from the **setup UI** (`setup/app.py`, localhost:4999): the display card (RENDERING / TESTS / **CALIBRATION** / GEOMETRY sub-sections) and the reward card. The command-line tools still exist for manual runs.
+Everything is driven from the controller's **Setup tab** (`controller/setup.py`, localhost:5000; since the
+multi-rig controller each rig's calibration files live in `display_calibration/<rig>/` — see `docs/MULTI_RIG.md`): the display card (RENDERING / TESTS / **CALIBRATION** / GEOMETRY sub-sections) and the reward card. The command-line tools still exist for manual runs.
 
 > **Rear projection.** The projector sits **behind** the screen; the image is seen from the front. The warp therefore mirrors the frame — `flip_h` / `flip_v` in the geometry `calibration:` block. The projector model (`compute_warp_map.build_projector`) places the lens *behind* the screen looking back toward the eye; the flip must be **re-registered** (Part 1, Step 3) whenever the projector or its model changes.
 
@@ -47,7 +48,7 @@ The warp is **ray-traced on the controller** (Mac/Ubuntu, the miniforge `vrfarm`
 
 Geometry is no longer hand-tuned from abstract stretch factors. The **`calib_geo.py`** landmark tool registers the projected grid to physical reality and back-solves the geometry.
 
-In the setup UI, display card → **CALIBRATION → "Calibrate"**. This deploys the calibration tools to the display Pi, has displayd release the display, launches `calib_geo`, and opens its live sliders at `http://<display-pi>:5091` (`setup/app.py:api_start_calibration`; a `calibration_probe`, if configured, is latched TTL HIGH while calibrating).
+In the setup UI, display card → **CALIBRATION → "Calibrate"**. This deploys the calibration tools to the display Pi, has displayd release the display, launches `calib_geo`, and opens its live sliders at `http://<display-pi>:5091` (`controller/setup.py:api_start_calibration`; a `calibration_probe`, if configured, is latched TTL HIGH while calibrating).
 
 Register these landmarks against the physical screen (`display_calibration/calib_geo.py`):
 
@@ -65,7 +66,7 @@ Set **`flip_h` / `flip_v`** to whatever makes the whole image (including text) r
 
 ### Step 2 — Regenerate the warp map
 
-In the setup UI, display card → **GEOMETRY**: pick the geometry **File** in the dropdown, then click **"Generate Warp"** / **"Regenerate Warp"** (`setup/app.py:api_generate_warp`). This ray-traces the selected `rig_geometry.yaml` into `warp_map.npz` **on the controller**, atomically copies the NPZ *and* the geometry to every Pi, and reloads the live display. The luminance mode baked in is the rig's stored `display.luminance_correction` (Part 2). The status line shows whether `warp_map.npz` is present on the Leader.
+In the setup UI, display card → **GEOMETRY**: pick the geometry **File** in the dropdown, then click **"Generate Warp"** / **"Regenerate Warp"** (`controller/setup.py:api_generate_warp`). This ray-traces the selected `rig_geometry.yaml` into `warp_map.npz` **on the controller**, atomically copies the NPZ *and* the geometry to every Pi, and reloads the live display. The luminance mode baked in is the rig's stored `display.luminance_correction` (Part 2). The status line shows whether `warp_map.npz` is present on the Leader.
 
 Manual/CLI equivalent (on the controller, in `display_calibration/`):
 
@@ -147,11 +148,11 @@ Set in the **setup UI → display card → CALIBRATION → "Intensity" dropdown*
 | **theoretical** | `theoretical` | No measurement — apply the geometric projector-incidence model (monotone falloff). The default / fallback. |
 | **none** | `none` | No correction (flat, unity gain). |
 
-`auto` and `manual` both produce the stored mode **`empirical`** (`setup/app.py:api_lum_apply`). Choosing `theoretical`/`none` and clicking Intensity Cal applies immediately (rebuild + redeploy the warp). The active mode persists via **Save Rig**.
+`auto` and `manual` both produce the stored mode **`empirical`** (`controller/setup.py:api_lum_apply`). Choosing `theoretical`/`none` and clicking Intensity Cal applies immediately (rebuild + redeploy the warp). The active mode persists via **Save Rig**.
 
 ### Equipment (empirical modes)
 
-- **Thorlabs PM100D** power meter (or any linear-in-luminance meter / spot photometer). Absolute units don't matter — the gain is normalized to 1.0 at center, so a power reading in **W** works as well as cd/m². Plug the console into the **controller** for automated reads (`setup/app.py:_read_pm100d` uses `pyvisa` + `ThorlabsPM100`; the panel silently falls back to manual entry if the driver or meter is missing); otherwise just type the reading off the meter's display.
+- **Thorlabs PM100D** power meter (or any linear-in-luminance meter / spot photometer). Absolute units don't matter — the gain is normalized to 1.0 at center, so a power reading in **W** works as well as cd/m². Plug the console into the **controller** for automated reads (`controller/setup.py:_read_pm100d` uses `pyvisa` + `ThorlabsPM100`; the panel silently falls back to manual entry if the driver or meter is missing); otherwise just type the reading off the meter's display.
 - Projector on and warmed up (≥15 minutes), room lights off, mouse out of the setup.
 
 ### Procedure (auto / manual)

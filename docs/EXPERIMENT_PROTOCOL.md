@@ -8,8 +8,9 @@
 ## Overview
 
 ```
-Controller (app/app.py Flask, localhost:5000)
-  ↔ REST API (HTTP, port 5080) — deploy, config, start/stop, data transfer
+Controller (controller/app.py Flask, localhost:5000)
+  ↔ REST API (HTTP, port 5080) — deploy, config, start/stop, camera
+  ↔ SSH — install, calibration hand-off, and the Data tab (rsync sync, purge, power off)
   ← UDP :5571 — events from Leader (trial, lick, reward, stim, sync)
   → UDP :5572 — commands to Leader (START, STOP, REWARD)
 
@@ -91,7 +92,7 @@ a symlink into the env — the same pattern as the camera bindings. See
 Use the rig setup UI:
 ```bash
 conda activate vrfarm
-python setup/app.py    # localhost:4999
+python controller/app.py    # localhost:5000 -> Setup tab
 ```
 
 Deploy code to each Pi and install the `pi_api/vrfarm.service` systemd unit
@@ -150,15 +151,16 @@ you the same thing.
 
 ## Running an Experiment
 
-The experiment UI drives the workflow left-to-right:
-**Load Rig → Load Experiment → (session params) → Deploy → GO → STOP → Transfer.**
+The Experiment tab drives the workflow left-to-right:
+**Load rig → Connect → Load Experiment → (session params) → Deploy → GO → STOP → New session**,
+and the Data tab syncs the data off the Leader afterwards.
 
 ### Step 1 — Launch the UI
 
 ```bash
 conda activate vrfarm
 cd ~/VRFarm
-python app/app.py    # opens localhost:5000
+python controller/app.py    # opens localhost:5000 -> Experiment tab -> Load rig
 ```
 
 ### Step 2 — Load Rig
@@ -230,22 +232,26 @@ for N consecutive trials — see below).
 
 **To abort manually:** Click **STOP** — ends the trial loop cleanly.
 
-### Step 9 — Transfer data
+### Step 9 — Sync the data (Data tab)
 
-Click **Transfer**. This first POSTs `/api/consolidate/<session_id>` to the Leader, which
-merges all sidecars into a single self-contained `<session>.h5`, then downloads
-`<session>.h5` (+ `video.h264` if recorded) to the controller.
+The session stays on the Leader. In the **Data** tab, load the rig (or its group), then
+**Sync Now** and pick the mouse/date folders (unsynced ones are red and pre-selected) — or, at
+the end of the day, **Sync & Poweroff**, which copies everything unsynced and then powers off
+every Pi of the selected rigs. Consolidation into one self-contained `<session>.h5` happens on
+the Leader before the copy; the copy is verified with a second rsync pass.
 
-**Destination:** `$VRFARM_DATA_DIR` if set, else `~/VRFarm/data` — or a per-transfer
-override via the **Transfer dest** field / **Browse…** picker. Files land at:
+**Destination:** the Data root (`controller.yaml` `data_root`; else `$VRFARM_DATA_DIR`, else
+`~/VRFarm/data`), the same tree for every rig:
 ```
-<dest>/<subject>/<subject>_<date>/<session_id>/
+<data root>/<subject>/<subject>_<date>/<session_id>/
   <session_id>.h5      <- consolidated: trials, stim plan, per-device data, camera ts, metadata
-  video.h264           <- behavior video (only if camera was saved)
+  video.mp4            <- behavior video (only if camera was saved; remuxed from the .h264)
 ```
 
-The subject index is always written to the **default** data dir (not the override):
-`~/VRFarm/data/subjects/<subject_id>.json` — a running log across the subject's sessions.
+The subject index `<data root>/subjects/<subject_id>.json` is written when the session ends
+(with the rig name), not at sync. **Purge Data** deletes synced, consolidated folders from the
+Pi; the **Auto purge** switch does that right after each verified sync. Details:
+[MULTI_RIG.md](MULTI_RIG.md).
 
 ---
 

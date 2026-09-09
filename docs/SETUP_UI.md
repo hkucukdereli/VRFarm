@@ -6,15 +6,17 @@ The setup UI is where a rig is *defined and serviced*: which Pis exist, which de
 hang off them, what pins and calibrations they use, and how code gets onto the hardware.
 You use it when building a rig, after changing wiring, after editing code, and for
 projector calibration. You do **not** use it to run a session — that is the
-[Experiment UI](EXPERIMENT_UI.md).
+[Experiment tab](EXPERIMENT_UI.md). Since the multi-rig controller, Pi names / IPs / roles are
+edited in the **Network** tab, rigs are created and deleted there too, and Setup shows one sub-tab
+per loaded rig ([MULTI_RIG.md](MULTI_RIG.md)).
 
 ```bash
 conda activate vrfarm
-python setup/app.py          # http://localhost:4999 (opens a browser tab)
+python controller/app.py     # http://localhost:5000 -> Setup tab
 ```
 
-It writes `rigs/<name>.yaml` and `display_calibration/rig_geometry*.yaml`, and it is the
-only part of VRFarm that uses SSH — Install, Reboot, Shutdown, warp generation and
+It writes `rigs/<name>.yaml` and `display_calibration/<rig>/rig_geometry*.yaml`, and together
+with the Data tab it is the part of VRFarm that uses SSH — Install, Reboot, Shutdown, warp generation and
 geometry calibration all shell out over `ssh`/`scp`. See
 [CONTROLLER_SETUP.md §2](CONTROLLER_SETUP.md#2-passwordless-ssh-to-the-pis) if those
 fail with a password prompt.
@@ -286,7 +288,7 @@ Both of its Pis are `127.0.0.1`, so a mis-click cannot reach the real rig.
 
 ```bash
 python tools/mock_pi.py     # fake pi_api on :5080
-python setup/app.py         # then: Load Rig -> demo -> Initialize
+python controller/app.py    # Setup tab -> Load rig -> demo -> Initialize
 ```
 
 What does not work under the mock: Install / Reboot / Shutdown (real SSH), Generate Warp

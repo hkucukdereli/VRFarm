@@ -11,7 +11,7 @@ For the **controller** machine (the macOS/Linux box running the UIs) the authori
 is `docs/CONTROLLER_SETUP.md`; the Controller section here is a short version of it.
 
 Most of the per-Pi package/service work below is automated by the setup UI's **Install**
-button (`setup/app.py` -> `api_install_pi`). Do it by hand only when reflashing an SD card
+button (`controller/setup.py` -> `api_install_pi`). Do it by hand only when reflashing an SD card
 or debugging Install — the manual steps document what Install does under the hood.
 
 ---
@@ -59,8 +59,7 @@ and `lgpio` live on the Pis, not here.
 ├── devices/                            <- device abstraction layer (one file per device)
 ├── engine/                             <- trial loop: leader.py
 ├── displayd/                           <- KMS display daemon + renderer child (follower)
-├── app/app.py                          <- experiment UI (localhost:5000)
-├── setup/app.py                        <- rig setup UI (localhost:4999)
+├── controller/                         <- the controller UI (localhost:5000): Network / Setup / Experiment / Data
 ├── pi_api/api.py                       <- Pi REST API (deployed to each Pi)
 ├── shared/                             <- config loaders, stim generator, consolidate
 ├── display_calibration/                <- projector geometry + warp scripts (kmsdrm)
@@ -83,8 +82,8 @@ ssh vruser@192.168.10.101 echo "leader OK"
 ssh vruser@192.168.10.102 echo "follower OK"
 ```
 
-The experiment-run UI (`app/app.py`) uses no SSH — only the setup UI does (deploy,
-warp push, reboot, calibrate). Every new controller must add **its own** key to the Pis.
+The Experiment tab uses no SSH — the Setup tab (install, warp push, reboot, calibrate) and the
+Data tab (rsync sync, purge, power off) do. Every new controller must add **its own** key to the Pis.
 
 ---
 
@@ -249,7 +248,7 @@ echo "/dev/sda1 /media/vruser/ssd ext4 defaults,nofail 0 2" | sudo tee -a /etc/f
 <data.video_dir>/<subj>/<subj_date>/      <- video recordings
 ```
 
-At **Transfer** the sidecars are folded into one consolidated `<session_id>.h5`
+When the Data tab syncs a session (or at the leader's own exit) the sidecars are folded into one consolidated `<session_id>.h5`
 (see `docs/DATA_FORMAT.md`).
 
 ---
@@ -353,7 +352,7 @@ Use the rig setup UI:
 ```bash
 conda activate vrfarm
 cd ~/VRFarm
-python setup/app.py    # opens localhost:4999
+python controller/app.py    # opens localhost:5000 -> Setup tab
 ```
 
 1. **Load Rig** (`cheese`) — also checks SSH + the REST API on each Pi (`/api/status`)
@@ -391,10 +390,11 @@ Deploy) — it self-kills and systemd respawns it with the new code.
 ```bash
 conda activate vrfarm
 cd ~/VRFarm
-python app/app.py      # experiment UI, localhost:5000
+python controller/app.py    # localhost:5000 -> Experiment tab
 ```
 
-Workflow: **Load Rig -> Load Experiment -> Deploy -> GO -> (STOP) -> Transfer.**
+Workflow: **Load rig -> Connect -> Load Experiment -> Deploy -> GO -> (STOP) -> New session**,
+then the Data tab to sync ([MULTI_RIG.md](MULTI_RIG.md)).
 An optional `VRFARM_SLACK_WEBHOOK` env var enables Slack start/end/timeout notifications.
 See [EXPERIMENT_PROTOCOL.md](EXPERIMENT_PROTOCOL.md) for the scientific protocol and
 [EXPERIMENT_UI.md](EXPERIMENT_UI.md) for the interface itself.

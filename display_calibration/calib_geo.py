@@ -63,7 +63,8 @@ HERE = Path(__file__).resolve().parent
 GEO_PATH = HERE / "rig_geometry.yaml"          # OVERWRITTEN on Save (the deliverable)
 PREVIEW_PATH = HERE / ".calib_preview.json"    # landmark/orientation sidecar (fast restart)
 DEFAULTS_PATH = HERE / ".calib_defaults.json"  # Save/Load Defaults snapshot (all sliders)
-MAC_URL = "http://192.168.10.1:4999"           # setup UI — Save POSTs the YAML back here (best-effort archive)
+MAC_URL = None   # full receive_geometry URL on the controller (per rig); set by --mac-url, which
+                 # cal_start.sh passes from $CAL_MAC_URL. None = save locally only.
 
 RES_W, RES_H = 1920, 1080                       # projector panel (also read from GEO on load)
 
@@ -249,9 +250,12 @@ def _post_to_mac(yaml_text):
     """Best-effort push of the saved geometry to the Mac setup UI for timestamped
     archiving. Never raises — the local save has already happened."""
     import urllib.request
+    if not MAC_URL:
+        print("[note] no --mac-url given — geometry saved on this Pi only, not archived on the controller")
+        return None
     try:
         req = urllib.request.Request(
-            MAC_URL + "/api/receive_geometry",
+            MAC_URL,
             data=json.dumps({"yaml": yaml_text}).encode(),
             headers={"Content-Type": "application/json"})
         resp = json.loads(urllib.request.urlopen(req, timeout=4).read().decode())
@@ -773,5 +777,9 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=5091)
     ap.add_argument("--geo", default=None,
                     help="path to rig_geometry.yaml (default: next to this script)")
+    ap.add_argument("--mac-url", default=None,
+                    help="controller URL that archives a saved geometry, e.g. "
+                         "http://192.168.10.1:5000/api/rigs/<rig>/setup/receive_geometry")
     a = ap.parse_args()
+    MAC_URL = a.mac_url
     run(a.port, a.geo)

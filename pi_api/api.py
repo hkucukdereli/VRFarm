@@ -506,8 +506,15 @@ def calibrate():
         from devices.base import DEVICE_REGISTRY
         cls = DEVICE_REGISTRY["reward"]
         dev = cls()
-        # Load rig config for pin setup
-        rig_path = RIG_DIR / "rigs" / "cheese.yaml"
+        # Load rig config for pin setup: rigs/<rig>.yaml as deployed by the controller, named in
+        # the request (the controller passes the rig it is acting for); else the newest rig file.
+        rigs_dir = RIG_DIR / "rigs"
+        rig_name = data.get("rig")
+        if rig_name:
+            rig_path = rigs_dir / f"{rig_name}.yaml"
+        else:
+            cands = sorted(rigs_dir.glob("*.yaml"), key=lambda p: p.stat().st_mtime) if rigs_dir.is_dir() else []
+            rig_path = cands[-1] if cands else rigs_dir / "missing.yaml"
         if rig_path.exists():
             import yaml
             with open(rig_path) as f:

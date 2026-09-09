@@ -1,7 +1,7 @@
 # Controller Setup — new machine
 
-How to bring up the VRFarm **controller** (the Mac/Linux box running `app/app.py` and
-`setup/app.py`) on a fresh machine and get it talking to the two rig Pis. Linux/Ubuntu is
+How to bring up the VRFarm **controller** (the Mac/Linux box running `controller/app.py`)
+on a fresh machine and get it talking to the two rig Pis. Linux/Ubuntu is
 the reference here; macOS is the same minus the netplan step, Windows notes at the bottom.
 
 The controller reaches the Pis entirely over the network — HTTP (REST) + UDP for the
@@ -102,7 +102,7 @@ ssh vruser@192.168.10.102 "echo ok"
 ```
 
 Notes:
-- `_ssh`/`_scp` in `setup/app.py` run non-interactively (no TTY), so the key must log in
+- the SSH helpers in `controller/ssh.py` run non-interactively (no TTY), so the key must log in
   without a prompt **and** each Pi's host key must already be in `~/.ssh/known_hosts` — the
   interactive `ssh` in step 3 seeds it.
 - If your key has a **passphrase**: on a Linux/macOS desktop the login keyring's ssh-agent
@@ -126,14 +126,15 @@ the warp map with `sys.executable`, so it uses whatever `python` is running the 
 
 ## 3b. Data directory (machine-specific — NOT in the rig yaml)
 
-Transferred session data and the subject database live in a **controller-local** root,
-resolved by `app/app.py` at runtime:
+Synced session data and the subject database live in a **controller-local** root, the same
+tree for every rig, resolved at runtime:
 
+0. `data_root` in `controller.yaml` — the Data tab's **Data root** field / Browse… writes it, else
 1. `$VRFARM_DATA_DIR` if set (e.g. point it at a big SSD mount), else
 2. `~/VRFarm/data` — the same convention on every OS
    (`/Users/<user>` on macOS, `/home/<user>` on Linux, `C:\Users\<user>` on Windows).
 
-Nothing to configure for a default setup — the directory is created on first transfer.
+Nothing to configure for a default setup — the directory is created on first sync.
 To use a dedicated drive, export the variable before launching the UI (and persist it in
 `~/.bashrc` / `~/.zshrc`):
 
@@ -145,21 +146,27 @@ The rig yaml deliberately has **no** controller path (`data.mac_dir` was removed
 machine-specific absolute path in a shared config broke every other controller — the
 original Linux symptom was `Transfer failed: cannot create /Users/... permission denied`).
 The yaml's `data.leader_dir` / `data.video_dir` are Pi-side paths and stay.
-Per-transfer override: the destination field next to the Transfer button still wins over
-everything for that one transfer.
+The Data tab's **Data root** field is the normal way to point at a drive; it is saved in
+`controller.yaml` and wins over the environment variable.
 
 ---
 
 ## 4. Launch and validate
 
+The Data tab copies with `rsync`, which must be a real rsync (3.1 or newer) in the env — Apple's
+`/usr/bin/rsync` is openrsync and is rejected:
+
 ```bash
-conda activate vrfarm
-python setup/app.py       # setup UI      -> http://localhost:4999
-python app/app.py         # experiment UI -> http://localhost:5000
+conda install -n vrfarm -c conda-forge rsync
 ```
 
-1. Setup UI -> **Load Rig**: this also checks every Pi, so both should show a green dot
-   (there is no separate Connect button). Then **Initialize** to bring the devices up.
+```bash
+conda activate vrfarm
+python controller/app.py  # -> http://localhost:5000 (Network / Setup / Experiment / Data)
+```
+
+1. **Network** tab -> **Check all**: every Pi should show a green dot. **Setup** tab -> Load rig:
+   the page checks the Pis again; then **Initialize** to bring the devices up.
 2. **Deploy** to push current engine/device code to the Pis.
 3. Experiment UI -> **Load Rig** -> **Load Experiment** -> **Deploy** -> run a short
    **5-trial** session; live events appearing in the dashboard proves inbound UDP 5571 and

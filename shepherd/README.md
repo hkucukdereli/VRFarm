@@ -47,7 +47,7 @@ One exception: `soc_temp_c` is **muted on the Slack hop only**. A fanless Pi cro
 70 °C critical routinely under camera encode, so it paged constantly without naming an
 action. It still logs to the UI and to `alerts.log` at full level, and the `throttled`
 metric — which reports that heat actually cost you frames — still pages. The mute list is
-`_SLACK_MUTED_SHEPHERD_METRICS` in `app/app.py`, i.e. controller-side: no rig deploy needed
+`_SLACK_MUTED_SHEPHERD_METRICS` in `controller/events.py`, i.e. controller-side: no rig deploy needed
 to change it.
 
 Alerts are **edge-triggered** — fired when a metric changes level, not every
@@ -56,7 +56,8 @@ second — so the log isn't spammed. A still-critical condition re-alerts every
 
 Delivery: a `shepherd_alert` UDP packet to the controller's event port
 (`network.event_port`, default 5571). The controller already forwards every event
-to the UI over SSE; `app/app.py` adds the Slack hop for criticals and
+to the UI over SSE; `controller/events.py` adds the Slack hop for criticals (to that rig's own
+webhook) and
 `experiment.html` colours the line by level. If no session UI is live the packet is
 simply dropped (UDP is best-effort) — criticals still reach Slack.
 

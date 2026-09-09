@@ -32,6 +32,15 @@ CAL_DIR  = Path(__file__).parent
 WARP_MAP = CAL_DIR / "warp_map.npz"
 
 
+def set_cal_dir(path):
+    """Point every reader/writer here at another calibration folder. The controller calls this
+    with display_calibration/<rig>/ for a rig that has its own folder (multi-rig); the
+    functions below resolve their `cal_dir` argument against CAL_DIR at CALL time."""
+    global CAL_DIR, WARP_MAP
+    CAL_DIR = Path(path)
+    WARP_MAP = CAL_DIR / "warp_map.npz"
+
+
 def _reading(m):
     """One measurement's light value. Accepts the neutral `reading` key (PM100D power / any
     linear-in-luminance meter) or the legacy `luminance_cdm2` (photometer)."""
@@ -111,11 +120,11 @@ def fit_luminance(measurements):
     return az_full, gain_fit, correction
 
 
-def save_luminance_cal(az_full, gain_fit, correction, source_file=None, cal_dir=CAL_DIR):
+def save_luminance_cal(az_full, gain_fit, correction, source_file=None, cal_dir=None):
     """Write luminance_cal_<date>.yaml and update the luminance_cal_latest.yaml symlink.
     compute_warp_map.py `--lum-mode empirical` re-injects this into warp_map.npz on every build,
     so the measured correction survives warp regeneration. Returns the written file path."""
-    cal_dir = Path(cal_dir)
+    cal_dir = Path(cal_dir or CAL_DIR)
     # Timestamped to the MINUTE, matching the rig_geometry_YYYYmmdd_HHMM convention. Keying on the
     # date alone meant every run on a given day silently overwrote the previous one, so a session
     # of successive fits left exactly one file and nothing to compare or fall back to.
@@ -139,7 +148,7 @@ def save_luminance_cal(az_full, gain_fit, correction, source_file=None, cal_dir=
 
 
 def save_luminance_measurements(measurements, patch=None, method=None, source=None,
-                                cal_dir=CAL_DIR):
+                                cal_dir=None):
     """Write the RAW readings to luminance_measurements_<ts>.yaml before anything is fitted.
 
     The cal file holds a 211-point interpolated curve; these are the handful of numbers actually
@@ -150,7 +159,7 @@ def save_luminance_measurements(measurements, patch=None, method=None, source=No
 
     The format is the one main() already reads, so `python fit_luminance_correction.py <file>`
     re-fits a saved measurement set offline. Returns the written path."""
-    cal_dir = Path(cal_dir)
+    cal_dir = Path(cal_dir or CAL_DIR)
     out = cal_dir / f"luminance_measurements_{datetime.now().strftime('%Y%m%d_%H%M')}.yaml"
     rows = []
     for m in measurements:
@@ -174,11 +183,11 @@ def save_luminance_measurements(measurements, patch=None, method=None, source=No
     return out
 
 
-def list_luminance_cals(cal_dir=CAL_DIR):
+def list_luminance_cals(cal_dir=None):
     """Saved luminance cal files, newest first, excluding the `latest` symlink. Returns a list of
     {name, mtime, is_latest} — is_latest marks which file luminance_cal_latest.yaml resolves to,
     i.e. the one a warp rebuild with --lum-mode empirical would actually pick up."""
-    cal_dir = Path(cal_dir)
+    cal_dir = Path(cal_dir or CAL_DIR)
     latest = cal_dir / "luminance_cal_latest.yaml"
     target = latest.resolve().name if latest.exists() else None
     out = []
@@ -189,13 +198,13 @@ def list_luminance_cals(cal_dir=CAL_DIR):
     return sorted(out, key=lambda d: d["mtime"], reverse=True)
 
 
-def select_luminance_cal(name, cal_dir=CAL_DIR):
+def select_luminance_cal(name, cal_dir=None):
     """Point luminance_cal_latest.yaml at a saved cal file so the next warp rebuild uses it.
 
     This is the whole mechanism for re-applying an earlier measurement: compute_warp_map's
     `--lum-mode empirical` reads _load_empirical_cal(), which only ever opens the `latest` symlink.
     Returns the resolved Path. Raises FileNotFoundError / ValueError on a bad name."""
-    cal_dir = Path(cal_dir)
+    cal_dir = Path(cal_dir or CAL_DIR)
     safe = Path(name).name                       # no traversal: basename only, same as the geo picker
     if not safe.startswith("luminance_cal_") or not safe.endswith(".yaml"):
         raise ValueError(f"Not a luminance cal file: {name}")

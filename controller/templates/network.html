@@ -5,30 +5,31 @@
 <title>VRFarm — Network</title>
 <link rel="stylesheet" href="/static/common.css">
 <style>
-  body { padding: 14px 18px; overflow: auto; height: 100vh; }
-  .cols { display: grid; grid-template-columns: 1.6fr 1fr; gap: 14px; align-items: start; }
+  body { padding: 16px; overflow: auto; height: 100vh; }
+  .cols { display: grid; grid-template-columns: 1.6fr 1fr; gap: 16px; align-items: start; }
   .topo { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 8px 0; }
-  .node { background: #222; border: 1px solid #555; border-radius: 6px; padding: 6px 12px; font-size: 12px; text-align: center; }
-  .node.ctl { border-color: var(--green); }
-  .switch { width: 70%; height: 18px; background: #333; border: 1px solid #666; border-radius: 3px; font-size: 10px; color: #aaa;
+  .node { background: #0f3460; border-radius: 6px; padding: 6px 12px; font-size: 12px; text-align: center; }
+  .node.ctl { border: 1px solid #4caf50; }
+  .switch { width: 70%; height: 18px; background: #0f3460; border: 1px solid #333; border-radius: 3px; font-size: 10px; color: #888;
             display: flex; align-items: center; justify-content: center; }
   .rigs { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; width: 100%; }
-  .rigbox { background: #262626; border: 1px solid #555; border-radius: 6px; padding: 6px 8px; min-width: 170px; }
-  .rigbox.loaded { border-color: var(--blue); }
-  .rigbox .name { font-weight: 600; color: #fff; display: flex; justify-content: space-between; gap: 6px; }
-  .pinode { background: #1c1c1c; border: 1px solid #444; border-radius: 4px; padding: 3px 6px; margin-top: 4px; font-size: 11px; }
-  .pinode .role { color: #999; font-size: 10px; }
+  .rigbox { background: #0f3460; border-radius: 6px; padding: 8px 10px; min-width: 170px; }
+  .rigbox.loaded { box-shadow: inset 3px 0 0 #1a73e8; }
+  .rigbox .name { font-weight: 700; color: #fff; font-size: 13px; display: flex; justify-content: space-between; gap: 6px; align-items: center; }
+  .pinode { background: #16213e; border-radius: 4px; padding: 4px 8px; margin-top: 6px; font-size: 11px; }
+  .pinode .role { color: #888; font-size: 10px; }
   .pirow { display: grid; grid-template-columns: 1.1fr 1.3fr 0.9fr 0.9fr 1.6fr auto; gap: 4px; align-items: center; margin-bottom: 4px; }
   .pirow input, .pirow select { width: 100%; }
-  .vline { width: 2px; height: 14px; background: #555; }
+  .vline { width: 2px; height: 14px; background: #333; }
   #drawer { display: none; }
   #drawer.open { display: block; }
   .grp { display: flex; align-items: center; gap: 6px; margin: 3px 0; font-size: 12px; }
-  .grp .members { color: #aaa; flex: 1; }
+  .grp .members { color: #888; flex: 1; }
+  #rigs-table td div { padding: 1px 0; }
 </style>
 </head>
 <body>
-<h2 style="font-size:16px; margin-bottom:10px">Network</h2>
+<h1>Network</h1>
 <div class="cols">
   <div>
     <div class="card">

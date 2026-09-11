@@ -26,11 +26,13 @@ both user `vruser`.
 
 ## 1. Network — static IP on the wired NIC
 
-The controller IP does **not** have to be a specific value: the Leader learns it from the
-source address of the first UDP command and replies there, and the event listener binds
-`0.0.0.0:5571`. **Any `192.168.10.x` works** except `.101`/`.102`. `192.168.10.1` is the
-zero-config choice (it matches the one hardcoded reference, `MAC_URL` in
-`display_calibration/calib_geo.py`, used by the optional calibration-archive POST).
+The address is not baked into the Pis — the Leader learns it from the source of the first UDP
+command and replies there, and the event listener binds `0.0.0.0:5571` — but **`controller_ip` in
+`controller.yaml` must match it**: the Network tab derives new rig IP pairs from its /24
+(`controller/network.py`) and the Setup tab builds the geometry-callback URL from it
+(`controller/setup.py`). `192.168.10.1` is the default. Stay clear of the rest of the address
+plan: **`.101`–`.250` are rig IP pairs** (the Network tab hands them out) and **`.251`–`.254` are
+infrastructure** (the switch's web UI is `.254`).
 
 > Before claiming `.1`, make sure no other machine (an old Mac/Windows controller) is holding
 > it on the switch, or duplicate-address detection will reject it. Pick a free `.x` otherwise.
@@ -38,8 +40,17 @@ zero-config choice (it matches the one hardcoded reference, `MAC_URL` in
 ### Ubuntu (netplan + NetworkManager)
 
 If `nmcli connection show` lists your wired connection as `netplan-<iface>`, netplan owns it —
-configure it in netplan (an `nmcli` edit can be overwritten on the next apply). Add a
-**separate, additive** drop-in (does not touch WiFi):
+configure it in netplan (an `nmcli` edit can be overwritten on the next apply).
+
+First, if NetworkManager has auto-created a DHCP profile bound to the rig NIC (`Wired connection N`
+in `nmcli connection show`, `connection.interface-name` = your NIC), delete it **before the NIC gets
+a link**, or NM starts DHCP on it. NM then remembers the MAC and won't recreate it:
+
+```bash
+sudo nmcli connection delete "Wired connection 1"    # only the one bound to your rig NIC
+```
+
+Then add a **separate, additive** drop-in:
 
 ```bash
 sudo tee /etc/netplan/99-vrfarm-rig.yaml >/dev/null <<'EOF'
@@ -47,7 +58,7 @@ network:
   version: 2
   renderer: NetworkManager
   ethernets:
-    enp0s31f6:                 # <-- your wired interface (see: nmcli device status)
+    enp6s0:                    # <-- your wired rig interface (nmcli device status); enp6s0 on fystyk
       dhcp4: false
       dhcp6: false
       addresses:
@@ -56,8 +67,40 @@ network:
       # WiFi stays the internet path
 EOF
 sudo chmod 600 /etc/netplan/99-vrfarm-rig.yaml
-sudo netplan try            # 120s auto-revert safety net; press Enter to keep
 ```
+
+Apply it **without** `netplan apply` or `netplan try`. Both restart NetworkManager, disconnect WiFi
+and flush addresses — on fystyk WiFi dropped for ~4.5 s and rejoined a *different* SSID — and a
+reverted `try` still leaves the edited YAML on disk. This rewrites only the generated files and
+never touches WiFi:
+
+```bash
+sudo netplan generate
+sudo nmcli connection reload
+sudo nmcli connection up netplan-enp6s0
+```
+
+**Moving the rig link to another NIC** (what fystyk did when a 10G card replaced the onboard port):
+unplug the old NIC's cable first so the two can never both hold `.1`, back up, rename the interface
+key **in place** so every other setting survives, and review the *merged* config before applying —
+the installer's own netplan file may define the old NIC as well:
+
+```bash
+sudo cp -a /etc/netplan /root/netplan-backup
+sudo sed -i 's/<old-iface>/<new-iface>/g' /etc/netplan/99-vrfarm-rig.yaml
+sudo netplan get ethernets      # new NIC carries the address; the old one must have none
+```
+
+Keep the `ethernets` argument: a bare `netplan get` also prints the WiFi passwords. If the old NIC
+still appears with only a `match:`/`set-name:` (installer-written, no address), leave it — that
+profile stops NM auto-creating a DHCP connection for the unused port. Roll back with
+`sudo cp -a /root/netplan-backup/. /etc/netplan/` followed by the three apply commands above.
+
+**fystyk's rig NIC** is an Intel 82599ES 10G SFP+ card (Argus ST-7211), in-kernel `ixgbe` — no
+vendor driver pack — with a passive DAC into the switch's SFP+ port. Any DAC is accepted; third-party
+*optics* need `options ixgbe allow_unsupported_sfp=1`. A 10G controller link matters with several
+rigs: the Data tab's parallel syncs would otherwise saturate the one link every running rig's UDP
+also uses.
 
 ### macOS
 
@@ -84,9 +127,10 @@ The Leader pushes UDP events to the controller on **5571** — that inbound port
 
 ## 2. Passwordless SSH to the Pis
 
-Only the **setup UI** needs this (deploy code, push warp maps, reboot, calibrate). The
-experiment-run UI uses no SSH. Each new controller must add **its own** key to the Pis —
-they only trust the keys already installed.
+The **Setup** tab needs this (Install, push warp maps, reboot, calibration hand-off) and so does the
+**Data** tab, which syncs, purges and powers off over SSH only. Running an experiment uses no SSH.
+Each new controller must add **its own** key to the Pis — they only trust the keys already
+installed.
 
 ```bash
 # 1. Reuse an existing key or make one (no passphrase = simplest for the app's non-interactive ssh)
@@ -106,8 +150,8 @@ Notes:
   without a prompt **and** each Pi's host key must already be in `~/.ssh/known_hosts` — the
   interactive `ssh` in step 3 seeds it.
 - If your key has a **passphrase**: on a Linux/macOS desktop the login keyring's ssh-agent
-  auto-unlocks it per session, so the setup UI's `ssh` calls still work. If not, either use a
-  passphrase-less key for the Pis or `ssh-add` the key before launching the setup UI.
+  auto-unlocks it per session, so the controller's `ssh` calls still work. If not, either use a
+  passphrase-less key for the Pis or `ssh-add` the key before launching `controller/app.py`.
 
 ---
 
@@ -153,12 +197,22 @@ The Data tab's **Data root** field is the normal way to point at a drive; it is 
 
 ## 4. Launch and validate
 
-The Data tab copies with `rsync`, which must be a real rsync (3.1 or newer) in the env — Apple's
-`/usr/bin/rsync` is openrsync and is rejected:
+The Data tab copies with `rsync`, which must be a real rsync (3.1 or newer). With `rsync_path: null`
+in `controller.yaml` the controller looks **only in the `vrfarm` env** (`sys.prefix/bin/rsync`, no
+PATH fallback — `controller/settings.py`), and a fresh env has none. Either install it there:
 
 ```bash
 conda install -n vrfarm -c conda-forge rsync
 ```
+
+or, **on Linux**, point at the system one, which is real rsync (fystyk: 3.4.1):
+
+```yaml
+rsync_path: /usr/bin/rsync          # controller.yaml
+```
+
+On **macOS** only the first option works: `/usr/bin/rsync` there is Apple's openrsync, which the Data
+tab rejects. The Data tab shows a banner naming whichever problem it finds.
 
 ```bash
 conda activate vrfarm
@@ -186,8 +240,9 @@ Both UIs are walked through with screenshots in [SETUP_UI.md](SETUP_UI.md) and
 | 5572 | UDP | controller -> Leader | START/STOP/REWARD (first packet teaches the Leader the return address) |
 | 5571 | UDP | Leader -> controller **(inbound)** | trial/lick/reward/stim/sync events |
 | 5575 | UDP | Leader -> Follower | SHOW/QUIT (Pi-to-Pi; not the controller) |
-| 22 | TCP | controller -> both Pis | SSH/SCP, setup UI only |
-| 5000 / 4999 | TCP | localhost | experiment / setup Flask UIs |
+| 22 | TCP | controller -> both Pis | SSH/SCP: Setup tab (Install, calibration) and Data tab (rsync, purge, poweroff) |
+| 5000 | TCP | localhost | the one controller UI (Network / Setup / Experiment / Data) |
+| 80 | TCP | controller -> switch | Zyxel XGS1210-12 web UI at `192.168.10.254` |
 
 ---
 

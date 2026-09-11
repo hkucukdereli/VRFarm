@@ -23,6 +23,7 @@ or debugging Install — the manual steps document what Install does under the h
 | Controller (macOS/Ubuntu) | UI + data storage | `vrfarm` | 192.168.10.1 |
 | Leader | Leader Pi — imperative trial loop + GPIO devices | `rig` | 192.168.10.101 |
 | Follower | Follower Pi — pygame display | `rig` | 192.168.10.102 |
+| Switch (Zyxel XGS1210-12) | experiment switch; web UI on port 80 | — | 192.168.10.254 |
 
 Both Pis run **Debian 13 (trixie)**, user `vruser`, conda base at `~/miniforge3`.
 The `rig` env Python **must match the system Python** (3.13 on trixie) — see the
@@ -420,12 +421,14 @@ The Pis reach NTP over their WiFi (`wlan0`); the wired experiment switch has no 
 ## Network Layout
 
 ```
-Gigabit switch (experiment traffic)
-├── Controller        192.168.10.1   (wired NIC; any .x except .101/.102)
-├── Leader            192.168.10.101 (eth0 static)
-└── Follower          192.168.10.102 (eth0 static)
+Zyxel XGS1210-12 switch (experiment traffic)   web UI 192.168.10.254 (static; factory 192.168.1.3)
+├── port 11   10G SFP+ (DAC)  Controller  192.168.10.1    (fystyk: enp6s0, Intel 82599ES)
+├── ports 1-2 1G RJ45         Leader      192.168.10.101  (eth0 static)
+│                             Follower    192.168.10.102  (eth0 static)
+└── port 12   10G SFP+        spare, reserved for a second switch
 
 Both Pis also on institute WiFi (wlan0) for internet/NTP; WiFi stays the default route.
+Addresses: .1 controller · .101-.250 rig IP pairs (Network tab) · .251-.254 infrastructure.
 ```
 
 UDP / TCP ports:
@@ -433,6 +436,7 @@ UDP / TCP ports:
 - 5572: controller -> Leader (commands; first packet teaches the Leader the return address)
 - 5575: Leader -> Follower (display commands)
 - 5080: REST API on each Pi (HTTP)
+- 80: switch web UI at 192.168.10.254
 
 The per-Pi onboarding steps (SSH, WiFi, static IP, sudo) live in
 [New Pi first boot](#new-pi-first-boot-headless-bring-up) above.

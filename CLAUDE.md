@@ -16,9 +16,9 @@ imperative loop in `engine/leader.py`. Devices are pluggable. Named after cheese
 Follower `cheddar-dlp` (192.168.10.102, **Pi 4**, drives the projector).
 Live rig config is `rigs/cheddar.yaml` (NOT cheese.yaml, which is its tracked twin).
 
-**Controller:** `fystyk` (192.168.10.1), env `vrfarm` (Python 3.11) under the Homebrew miniforge at
-`/opt/homebrew/Caskroom/miniforge/base/envs/vrfarm` (`~/miniforge3` is a second install holding only
-`base`/`caiman`). ONE web app runs everything: `python controller/app.py` → http://localhost:5000 with
+**Controller:** `fystyk` (192.168.10.1), **Ubuntu 26.04 LTS** (Linux, not a Mac), env `vrfarm`
+(Python 3.11) at `~/miniforge3/envs/vrfarm`. Rig link is the 10G SFP+ card `enp6s0` — see Network.
+ONE web app runs everything: `python controller/app.py` → http://localhost:5000 with
 four tabs, Network / Setup / Experiment / Data. Controller-wide settings (data root, auto purge, rig
 groups) live in `controller.yaml` (gitignored; template `controller.example.yaml`). Full guide:
 `docs/MULTI_RIG.md`.
@@ -82,13 +82,34 @@ into the env, so a version mismatch breaks `import picamera2`. Create with
 ## Network
 
 ```
-Gigabit ethernet switch (experiment traffic)
-├── Controller  192.168.10.1
-├── Leader      192.168.10.101 (eth0 static)
-└── Follower    192.168.10.102 (eth0 static)
+Zyxel XGS1210-12 switch (experiment traffic) — web UI http://192.168.10.254
+├── port 11    10G SFP+ (DAC)  Controller  192.168.10.1    enp6s0
+├── ports 1-2  1G RJ45         Leader      192.168.10.101  (eth0 static)
+│                              Follower    192.168.10.102  (eth0 static)
+└── port 12    10G SFP+        spare — reserved for a 10G link to a second switch
 ```
 Both Pis are also on institute WiFi for internet/NTP. Passwordless SSH + sudo from the
 Controller to both Pis.
+
+**Address plan (192.168.10.0/24):** `.1` Controller · `.101`–`.250` rig IP pairs, handed out by
+the Network tab (`controller/network.py` `api_suggest_ips`: leaders `.101, .103 … .249`, follower =
+leader + 1) · `.251`–`.254` infrastructure, never allocated — `.254` is the switch. The allocator
+only checks rig YAMLs, so nothing else may sit in `.101`–`.250`.
+
+**Controller NIC.** The rig link is an Intel 82599ES single-port 10G SFP+ card (Argus ST-7211,
+`enp6s0`, in-kernel `ixgbe` — Intel's vendor driver pack is NOT needed; its out-of-tree ixgbe
+5.16.5 only shims kernels up to 5.11, this one is 7.0), DAC to switch port 11. Any passive/active DAC is accepted; third-party *optics* would need
+`ixgbe allow_unsupported_sfp=1`. Config: `/etc/netplan/99-vrfarm-rig.yaml` keyed `enp6s0`, static
+`192.168.10.1/24`, **no gateway** (WiFi stays the default route). The onboard `enp0s31f6` is
+unused: its link flapped at 100 Mbps after the card install and its cable is out. Why 10G: the
+Data tab syncs up to `parallel_rigs` leaders at once; on a 1G controller port that saturates the
+one link every running rig's UDP also needs (`_rig_guard` only protects the rig being synced).
+
+**Switch.** Management is static `192.168.10.254/24`, DHCP off, gateway `0.0.0.0` (factory default
+is `192.168.1.3` — after a reset, reach it with a temporary `sudo ip addr add 192.168.1.200/24 dev
+enp6s0`). All ports untagged VLAN 1. **Loop Prevention on — keep it** (it guards every rig once a
+second switch is chained); Broadcast Storm Control off. Capacity: 10 RJ45 ports = 5 rigs of two
+Pis; beyond that, chain a second switch on port 12. The password is not recorded here.
 
 | Port | Direction | Purpose |
 |------|-----------|---------|
@@ -102,6 +123,7 @@ Controller to both Pis.
 | 5581 | localhost only | displayd control REST (/status /bringup /standby /resume /render /lease) |
 | 5582 | Leader → displayd | photodiode ingest + hb_verdict (drives `optics` in /status) |
 | 5091 | browser → Follower | calib_geo sliders, only while calibrating |
+| 80 | browser → switch | Zyxel XGS1210-12 web UI at 192.168.10.254 |
 
 ---
 
@@ -182,8 +204,11 @@ tree for all rigs: `<data root>/<mouse>/<mouse>_<date>/<session_id>/`.
 ## Packages
 
 **Controller** (`conda activate vrfarm`): `flask requests scipy matplotlib numpy h5py pyyaml`, plus
-`rsync` >= 3.1 from conda-forge (`conda install -n vrfarm -c conda-forge rsync`) — Apple's
-`/usr/bin/rsync` is openrsync and the Data tab rejects it.
+a real `rsync` >= 3.1 for the Data tab. `rsync_path: null` resolves to **the env's rsync only**
+(`controller/settings.py` `rsync_path()` → `sys.prefix/bin/rsync`, no PATH fallback), and the
+`vrfarm` env on fystyk has none — so either `conda install -n vrfarm -c conda-forge rsync` or set
+`rsync_path: /usr/bin/rsync` in `controller.yaml` (Ubuntu's is real rsync, 3.4.1). Only on macOS is
+`/usr/bin/rsync` Apple's openrsync, which the Data tab rejects.
 **Leader** (`rig` env): `flask pyyaml numpy scipy h5py smbus2 pigpio lgpio pyserial` + `picamera2`;
 `rsync` from apt on every Pi (the Install step adds it).
 **Follower**: `rig` env for pi_api; **system python3** for displayd/renderer and calib_geo
@@ -195,7 +220,7 @@ pigpiod is built from source (`/usr/local/bin/pigpiod`, unit at
 
 ```bash
 conda activate vrfarm
-python controller/app.py            # the controller UI, localhost:5000 (--port 5055 if AirPlay squats 5000)
+python controller/app.py            # the controller UI, localhost:5000 (on macOS: --port 5055 if AirPlay squats 5000)
 python tools/smoke_multirig.py      # two fake rigs end to end (mock Pis)
 python tools/smoke_data.py          # the Data tab against a scratch data tree
 ```
@@ -227,6 +252,21 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
 - Pis are firewall-gated off the institute WiFi. To install packages, run a proxy on the
   Controller (`python -m proxy --hostname 192.168.10.1 --port 8899`) and set
   `HTTPS_PROXY=http://192.168.10.1:8899` on the Pi.
+- **Never `netplan apply` or `netplan try` on fystyk.** Both restart NetworkManager, disconnect
+  WiFi and flush addresses (observed: WiFi dropped ~4.5 s and rejoined a different SSID), and
+  `try`'s auto-revert leaves the edited YAML on disk. Apply rig-link changes surgically — only files
+  are rewritten, WiFi is never touched: `sudo netplan generate && sudo nmcli connection reload &&
+  sudo nmcli connection up netplan-enp6s0`.
+- **NetworkManager auto-creates a DHCP `Wired connection N`** for any ethernet port it has no
+  profile for, bound to that port with autoconnect on. Delete it (`sudo nmcli connection delete
+  "Wired connection N"`) *before* the new rig NIC gets a link, or it starts DHCP there; NM then
+  remembers the MAC and doesn't recreate it. The installer's `00-installer-config.yaml` still names
+  `enp0s31f6` (MAC match + `set-name`, no address) — leave it: that profile is what stops NM
+  auto-DHCPing the unused onboard port.
+- **Don't recable the switch during a session.** When the DAC first went in, the Follower's link
+  dropped and the switch stopped delivering to the Leader's port for several minutes with its link
+  up — no trace on either host, and not reproduced by a later DAC replug (~2 s recovery) or a switch
+  power cycle (~35 s).
 - A barrel-jack pull on the EVM has been observed to take out DLPC I2C as well as the light
   (L1 goes unreachable). Suite A documented the opposite — logic back-feeding through the Pi
   header while the room went dark — so do not assume either signature.

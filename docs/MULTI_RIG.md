@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-09-08
 
-One controller Mac runs several rigs from one web app on one port. This page explains what
+One controller (the lab's is `fystyk`, an Ubuntu box) runs several rigs from one web app on one port. This page explains what
 changed from the two old apps (`app/` experiment UI and `setup/` setup UI), how the four
 tabs work, and what the Data tab does to your files.
 
@@ -39,6 +39,27 @@ once at start-up. Every datagram is sorted by the sender's IP to the rig whose P
 as a backup every leader event also carries a `rig` field (that is how the mock Pis, all at
 127.0.0.1, are told apart in the tests). The only thing that must be unique per rig is the IP
 pair. Datagrams nobody owns are counted and shown at the bottom of the Network diagram.
+
+## Addresses and switch capacity
+
+Everything shares one flat subnet, `192.168.10.0/24`, with no VLANs:
+
+| Range | Use |
+|---|---|
+| `.1` | the controller (`controller_ip` in `controller.yaml`; new pairs are derived from its /24) |
+| `.101`–`.250` | rig IP pairs from **Add rig**: leaders `.101, .103 … .249`, follower = leader + 1 |
+| `.251`–`.254` | infrastructure, never suggested — the switch's web UI is **`.254`** |
+
+The suggester only checks the rig YAMLs, so nothing that isn't a rig may use `.101`–`.250`.
+
+The switch is a **Zyxel XGS1210-12**: 8×1G + 2×2.5G RJ45, 2×10G SFP+. The controller sits on one
+SFP+ port over a DAC; the other is reserved. That leaves **10 RJ45 ports, i.e. 5 rigs of two Pis**.
+For more, chain a second switch on the spare SFP+ port — 10G between switches, so the uplink
+doesn't become the bottleneck — and give it `.253`.
+
+Why the controller link is 10G: the Data tab syncs up to `parallel_rigs` leaders at once, each at
+its Pi's 1G. On a 1G controller port those syncs would saturate the one link that every *running*
+rig's UDP also crosses. The per-rig guard skips only the rig being synced, not its neighbours.
 
 ## The Data tab
 
@@ -84,7 +105,7 @@ One job runs at a time; inside a job the rigs run in parallel.
 
 | Piece | Where | Installed by |
 |---|---|---|
-| `rsync` >= 3.1 | controller (`vrfarm` env) | `conda install -n vrfarm -c conda-forge rsync`. Apple's `/usr/bin/rsync` is openrsync and is rejected with a banner in the Data tab. |
+| `rsync` >= 3.1 | controller | `conda install -n vrfarm -c conda-forge rsync` — `rsync_path: null` looks only in the env. On Linux, `rsync_path: /usr/bin/rsync` in `controller.yaml` works too (fystyk's env has no rsync, so it needs one of the two). On macOS `/usr/bin/rsync` is Apple's openrsync and is rejected with a banner in the Data tab. |
 | `rsync` | every Pi | the Install step's apt list |
 | `shared/leader_data.py` | leader Pis | rides Deploy and Install (`shared/deploy_manifest.py`) |
 
@@ -116,7 +137,8 @@ as `CAL_MAC_URL`.
 ## Adding a rig
 
 1. Network → **Add rig**: name it, accept the suggested IP pair, keep the default devices.
-2. Set the two Pis' static IPs to match, put them on the switch.
+2. Set the two Pis' static IPs to match, put them on two free RJ45 ports of the switch. Not while
+   another rig is mid-session: recabling the switch once stalled a live Pi port for minutes.
 3. Setup → Load rig → Pi cards → **Install** on each Pi (first time), then **Deploy**.
 4. Setup → **Initialize** and calibrate the display as usual.
 5. Network → add the rig to a group if you run it with others.

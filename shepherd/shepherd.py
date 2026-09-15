@@ -407,8 +407,71 @@ class AlertSink:
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-def evaluate_all(engine: ThresholdEngine, sink: AlertSink, m: dict, mount: str = ""):
-    """Run every configured numeric metric plus the special cases through the engine."""
+class ApiGrace:
+    """How long pi_api may be unreachable before api_health alerts.
+
+    Deploy and Restart API restart pi_api on purpose, and it answers nothing for a few seconds
+    while systemd respawns it. The controller times every such restart and writes a grace period
+    to api_grace.json next to config.yaml, through pi_api's /api/shepherd_grace: the measured
+    outage x 1.5, kept within 5-60 s (controller/pi_restart.py). The file is re-read whenever it
+    changes; until one exists, api_probe.grace_default_s applies."""
+
+    def __init__(self, path: Path, default_s: float):
+        self.path = path
+        self.grace_s = default_s
+        self.down_s = None           # the outage the grace period was measured from
+        self._mtime = None
+
+    def current(self) -> float:
+        try:
+            mtime = self.path.stat().st_mtime
+        except OSError:
+            return self.grace_s
+        if mtime != self._mtime:
+            self._mtime = mtime
+            try:
+                d = json.loads(self.path.read_text())
+                grace_s = float(d["grace_s"])
+                if not 0 < grace_s <= 600:
+                    raise ValueError(f"grace_s {grace_s} is out of range")
+                self.grace_s, self.down_s = grace_s, d.get("down_s")
+                print(f"[shepherd] api_health grace period {grace_s:g} s "
+                      f"(pi_api was down {self.down_s} s at its last timed restart)", flush=True)
+            except Exception as e:
+                print(f"[shepherd] ignoring {self.path}: {e}", flush=True)
+        return self.grace_s
+
+
+class ApiHealth:
+    """Outage bookkeeping for api_health: when the current outage began and whether a session was
+    live then. An outage during a session alerts at once (pi_api is never restarted on purpose
+    mid-session, and a crash there takes the engine with it); any other outage alerts only once it
+    has lasted the grace period."""
+
+    def __init__(self, grace: ApiGrace):
+        self.grace = grace
+        self.down_since = None       # sample time of the outage's first failed probe
+        self._live = False           # process_running on the last good probe
+        self._live_at_outage = False
+
+    def up(self, api: dict):
+        self.down_since = None
+        self._live = bool(api.get("process_running"))
+
+    def down(self, t: float) -> tuple[bool, float, float]:
+        """(alert now?, seconds down so far, grace period in force) for a failed probe at time t."""
+        if self.down_since is None:
+            self.down_since = t
+            self._live_at_outage = self._live
+        down_s = t - self.down_since
+        grace_s = 0.0 if self._live_at_outage else self.grace.current()
+        return down_s >= grace_s, down_s, grace_s
+
+
+def evaluate_all(engine: ThresholdEngine, sink: AlertSink, m: dict, mount: str = "",
+                 api_health: ApiHealth | None = None):
+    """Run every configured numeric metric plus the special cases through the engine.
+    Without api_health, an unreachable pi_api alerts on the first failed probe."""
     ctx = {"mount": mount}
     for key in ("cpu_percent", "mem_percent", "soc_temp_c",
                 "disk_used_percent", "disk_write_mbs"):
@@ -443,18 +506,24 @@ def evaluate_all(engine: ThresholdEngine, sink: AlertSink, m: dict, mount: str =
             a = engine.evaluate("throttled", thr["raw"], level_override="ok")
             if a:
                 sink.send(a)
-    # API unresponsive — the wedge shepherd exists to catch. Only critical when a
-    # session is thought to be live (process was running on the last good probe).
+    # API unresponsive — the wedge shepherd exists to catch. A Deploy or Restart API takes pi_api
+    # away for a few seconds on purpose, so outside a session an outage alerts only once it has
+    # lasted the grace period (ApiHealth); during a session it alerts on the first failed probe.
     if api.get("enabled", True):
         if api.get("ok"):
+            if api_health is not None:
+                api_health.up(api)
             a = engine.evaluate("api_health", 1, level_override="ok")
             if a:
                 sink.send(a)
         else:
-            a = engine.evaluate("api_health", 0, level_override="critical",
-                                 ctx={"error": api.get("error", "no response")})
-            if a:
-                sink.send(a)
+            due, down_s, grace_s = api_health.down(m["t"]) if api_health is not None else (True, 0.0, 0.0)
+            if due:
+                a = engine.evaluate("api_health", 0, level_override="critical",
+                                    ctx={"error": api.get("error", "no response"),
+                                         "down_s": round(down_s), "grace_s": grace_s})
+                if a:
+                    sink.send(a)
 
 
 def main():
@@ -477,9 +546,13 @@ def main():
     monitor = Monitor(cfg)
     engine = ThresholdEngine(cfg)
     sink = AlertSink(cfg, alerts_path)
+    # the grace file sits next to config.yaml: pi_api writes it as ~/rig/shepherd/api_grace.json
+    grace = ApiGrace(Path(args.config).expanduser().resolve().with_name("api_grace.json"),
+                     float(sh.get("api_probe", {}).get("grace_default_s", 10.0)))
+    api_health = ApiHealth(grace)
 
     print(f"[shepherd] host={socket.gethostname()} interval={monitor.interval}s "
-          f"metrics={metrics_path}", flush=True)
+          f"metrics={metrics_path} api_grace={grace.current():g}s", flush=True)
 
     running = {"go": True}
 
@@ -488,8 +561,11 @@ def main():
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
 
-    # prime the delta samplers so the first real sample has valid CPU/disk rates
-    monitor.sample()
+    # prime the delta samplers so the first real sample has valid CPU/disk rates, and learn
+    # whether a session is live before any outage is judged
+    first = monitor.sample()
+    if first.get("api", {}).get("ok"):
+        api_health.up(first["api"])
     time.sleep(min(monitor.interval, 1.0))
 
     with open(metrics_path, "a") as mf:
@@ -499,15 +575,18 @@ def main():
                 m = monitor.sample()
                 mf.write(json.dumps(m) + "\n")
                 mf.flush()
-                evaluate_all(engine, sink, m, mount=monitor.mount)
+                evaluate_all(engine, sink, m, mount=monitor.mount, api_health=api_health)
             except Exception as e:            # a bad sample must never kill the watchdog
                 print(f"[shepherd] sample error: {e}", flush=True)
             if args.once:
                 print(json.dumps(m, indent=1))
                 break
-            dt = time.monotonic() - t0
-            if dt < monitor.interval:
-                time.sleep(monitor.interval - dt)
+            # sleep out the interval in short steps, so a stop (Deploy restarts shepherd) is prompt
+            while running["go"]:
+                left = monitor.interval - (time.monotonic() - t0)
+                if left <= 0:
+                    break
+                time.sleep(min(0.5, left))
     print("[shepherd] stopped", flush=True)
 
 

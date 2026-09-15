@@ -158,6 +158,15 @@ sudo visudo -c                      # verify sudoers syntax
 sudo -n true && echo "passwordless sudo OK"
 ```
 
+### 6. Time zone
+
+Install sets it on every Pi, so leader and follower logs show the same local time (recorded data
+is Unix time regardless). By hand:
+```bash
+sudo timedatectl set-timezone Europe/Vienna
+timedatectl | grep "Time zone"
+```
+
 ### Pi 5 notes
 - Boots from **NVMe SSD** — no more tiny-SD-card churn; video can live on the NVMe.
 - **GPIO is lgpio, not pigpio** (Pi 5's RP1 GPIO — `pigpio`/`pigpiod` don't work). No daemon; see the

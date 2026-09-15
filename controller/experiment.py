@@ -452,25 +452,16 @@ def deploy():
                     steps.append(f"WARNING: missing local file skipped: {local_rel}")
         steps.append("Uploaded code to all Pis")
 
-        # 0b. Restart pi_api on all Pis so new code takes effect
+        # 0b. Restart pi_api on all Pis so new code takes effect. Timed: the leader's shepherd
+        #     gets the measured outage as its api_health grace period, so a Deploy doesn't page
+        #     "pi_api not responding"; shepherd is restarted too, so the shepherd.py uploaded
+        #     above is what runs (controller/pi_restart.py).
+        from controller import pi_restart
+        results, restart_steps = pi_restart.restart_timed(rs.pis, api_port, reload_shepherd=True)
+        steps.extend(restart_steps)
         for pi in rs.pis:
-            try:
-                requests.post(f"http://{pi['ip']}:{api_port}/api/restart", json={}, timeout=3)
-            except Exception:
-                pass
-        time.sleep(3)
-        for pi in rs.pis:
-            alive = False
-            for _ in range(10):
-                try:
-                    if requests.get(f"http://{pi['ip']}:{api_port}/api/status", timeout=2).status_code == 200:
-                        alive = True
-                        break
-                except Exception:
-                    pass
-                time.sleep(1)
-            if not alive:
-                raise RuntimeError(f"{pi['name']} did not come back after restart")
+            if not results[pi["name"]]["ok"]:
+                raise RuntimeError(f"{pi['name']} did not come back after restart: {results[pi['name']]['error']}")
         steps.append("Restarted pi_api on all Pis")
 
         # 0c. Restart displayd on any Pi that runs it (new displayd/renderer code takes effect).

@@ -251,6 +251,14 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
   step (`controller/setup.py`), Pi-side files in `shared/deploy_manifest.py`, controller packages
   in the list above. A leader installed before the multi-rig work needs a Deploy (ships
   `shared/leader_data.py`) and a re-Install or `sudo apt install rsync`.
+- **shepherd's "pi_api not responding" has a measured grace period.** Deploy and Restart API time
+  each pi_api restart (`controller/pi_restart.py`) and write the outage ×1.5 (5–60 s) to
+  `~/rig/shepherd/api_grace.json` on the leader through `/api/shepherd_grace`; shepherd alerts only
+  once pi_api has been away that long, but at once if a session was running. Deploy also restarts
+  shepherd, which a `shepherd.py` change otherwise never reached. The Pi's `config.yaml` is seeded
+  once (`cp -n`), so new shepherd settings need code defaults.
+- Install sets every Pi's time zone to `Europe/Vienna` (`timedatectl`); before that the leader ran on
+  Europe/London, so its log times read an hour behind the follower's. Recorded data is Unix time.
 - Calibration files are per rig once `display_calibration/<rig>/` exists
   (`python tools/migrate_calibration_dir.py cheddar`); until then the shared folder is used.
 - **One serial reader.** The Teensy's `/dev/ttyACM0` gives its bytes to exactly one process;

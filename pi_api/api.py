@@ -1206,6 +1206,47 @@ def shepherd_control():
     return jsonify({"ok": True, "enabled": enabled, "running": active.stdout.strip() == "active"})
 
 
+@app.route("/api/shepherd_grace", methods=["POST"])
+def shepherd_grace():
+    """Record shepherd's api_health grace period: how long pi_api may be unreachable before it
+    alerts. The controller times every Deploy / Restart API restart of pi_api and posts the
+    measured outage with the grace it derived (controller/pi_restart.py). Written atomically to
+    shepherd/api_grace.json next to shepherd's config.yaml; shepherd re-reads it when it changes."""
+    body = request.get_json(silent=True) or {}
+    try:
+        grace_s = float(body["grace_s"])
+        down_s = None if body.get("down_s") is None else float(body["down_s"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"ok": False, "error": "grace_s (seconds) is required"}), 400
+    if not 0 < grace_s <= 600:
+        return jsonify({"ok": False, "error": "grace_s must be more than 0 and at most 600"}), 400
+    path = RIG_DIR / "shepherd" / "api_grace.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({"grace_s": grace_s, "down_s": down_s, "t": time.time()}))
+    os.replace(tmp, path)
+    return jsonify({"ok": True, "grace_s": grace_s, "path": str(path)})
+
+
+@app.route("/api/restart_shepherd", methods=["POST"])
+def restart_shepherd():
+    """Restart shepherd so freshly deployed shepherd.py runs (Deploy calls this, as it does
+    /api/restart_displayd). Only when shepherd is running: a Pi without it, or with the Monitor
+    toggle off, is left alone. Waits for the restart, so the new shepherd is up on return."""
+    active = subprocess.run(["systemctl", "is-active", "shepherd"],
+                            capture_output=True, text=True, timeout=10)
+    if active.stdout.strip() != "active":
+        return jsonify({"ok": True, "skipped": "shepherd is not running on this Pi"})
+    try:
+        subprocess.run(["sudo", "systemctl", "restart", "shepherd"],
+                       check=True, capture_output=True, text=True, timeout=40)
+    except subprocess.CalledProcessError as e:
+        return jsonify({"ok": False, "error": (e.stderr or str(e)).strip()}), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
 def _latest_shepherd_pair():
     """(jsonl_path, alerts_path|None) for the most recent shepherd run, or (None, None).
     'Most recent' = newest shepherd_*.jsonl by mtime — that's the currently-running log."""

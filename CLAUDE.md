@@ -18,7 +18,7 @@ Live rig config is `rigs/cheddar.yaml` — gitignored (it carries the Slack webh
 config has no copy in git; `rigs/_template.yaml` is the tracked template.
 
 **Controller:** `fystyk` (192.168.10.1), **Ubuntu 26.04 LTS** (Linux, not a Mac), env `vrfarm`
-(Python 3.11) at `~/miniforge3/envs/vrfarm`. Rig link is the 10G SFP+ card `enp6s0` — see Network.
+(Python 3.11) at `~/miniforge3/envs/vrfarm`. Rig link is the 10G SFP+ card (netplan `rig0`, matched by MAC) — see Network.
 ONE web app runs everything: `python controller/app.py` → http://localhost:5000 with
 four tabs, Network / Setup / Experiment / Data. Controller-wide settings (data root, auto purge, rig
 groups) live in `controller/configs/controller.yaml` (gitignored; template `controller.example.yaml`
@@ -84,7 +84,7 @@ into the env, so a version mismatch breaks `import picamera2`. Create with
 
 ```
 Zyxel XGS1210-12 switch (experiment traffic) — web UI http://192.168.10.254
-├── port 11    10G SFP+ (DAC)  Controller  192.168.10.1    enp6s0
+├── port 11    10G SFP+ (DAC)  Controller  192.168.10.1    rig0 (MAC-matched; enp4s0 today)
 ├── ports 1-2  1G RJ45         Leader      192.168.10.101  (eth0 static)
 │                              Follower    192.168.10.102  (eth0 static)
 └── port 12    10G SFP+        spare — reserved for a 10G link to a second switch
@@ -98,17 +98,20 @@ leader + 1) · `.251`–`.254` infrastructure, never allocated — `.254` is the
 only checks rig YAMLs, so nothing else may sit in `.101`–`.250`.
 
 **Controller NIC.** The rig link is an Intel 82599ES single-port 10G SFP+ card (Argus ST-7211,
-`enp6s0`, in-kernel `ixgbe` — Intel's vendor driver pack is NOT needed; its out-of-tree ixgbe
+in-kernel `ixgbe` — Intel's vendor driver pack is NOT needed; its out-of-tree ixgbe
 5.16.5 only shims kernels up to 5.11, this one is 7.0), DAC to switch port 11. Any passive/active DAC is accepted; third-party *optics* would need
-`ixgbe allow_unsupported_sfp=1`. Config: `/etc/netplan/99-vrfarm-rig.yaml` keyed `enp6s0`, static
-`192.168.10.1/24`, **no gateway** (WiFi stays the default route). The onboard `enp0s31f6` is
+`ixgbe allow_unsupported_sfp=1`. Config: `/etc/netplan/99-vrfarm-rig.yaml`, netplan id `rig0`
+**matched by MAC** (`c4:62:37:0c:16:68`), static `192.168.10.1/24`, **no gateway** (WiFi stays the
+default route). **Never key that stanza by interface name:** `enpXsY` follows the card's PCI slot,
+so it changed on its own (`enp6s0` → `enp4s0` after a reboot on 2026-09-15), the stanza then matched
+nothing, and every rig was unreachable while the card and its 10G link were healthy. The onboard `enp0s31f6` is
 unused: its link flapped at 100 Mbps after the card install and its cable is out. Why 10G: the
 Data tab syncs up to `parallel_rigs` leaders at once; on a 1G controller port that saturates the
 one link every running rig's UDP also needs (`_rig_guard` only protects the rig being synced).
 
 **Switch.** Management is static `192.168.10.254/24`, DHCP off, gateway `0.0.0.0` (factory default
 is `192.168.1.3` — after a reset, reach it with a temporary `sudo ip addr add 192.168.1.200/24 dev
-enp6s0`). All ports untagged VLAN 1. **Loop Prevention on — keep it** (it guards every rig once a
+enp4s0`, the rig NIC's current kernel name from `ip -br addr`). All ports untagged VLAN 1. **Loop Prevention on — keep it** (it guards every rig once a
 second switch is chained); Broadcast Storm Control off. Capacity: 10 RJ45 ports = 5 rigs of two
 Pis; beyond that, chain a second switch on port 12. The password is not recorded here.
 
@@ -272,7 +275,7 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
   WiFi and flush addresses (observed: WiFi dropped ~4.5 s and rejoined a different SSID), and
   `try`'s auto-revert leaves the edited YAML on disk. Apply rig-link changes surgically — only files
   are rewritten, WiFi is never touched: `sudo netplan generate && sudo nmcli connection reload &&
-  sudo nmcli connection up netplan-enp6s0`.
+  sudo nmcli connection up netplan-rig0`.
 - **NetworkManager auto-creates a DHCP `Wired connection N`** for any ethernet port it has no
   profile for, bound to that port with autoconnect on. Delete it (`sudo nmcli connection delete
   "Wired connection N"`) *before* the new rig NIC gets a link, or it starts DHCP there; NM then

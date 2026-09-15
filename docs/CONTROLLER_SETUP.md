@@ -58,7 +58,9 @@ network:
   version: 2
   renderer: NetworkManager
   ethernets:
-    enp6s0:                    # <-- your wired rig interface (nmcli device status); enp6s0 on fystyk
+    rig0:                      # just an id — the match below is what binds the card
+      match:
+        macaddress: "c4:62:37:0c:16:68"   # <-- your rig NIC's MAC (ip -br link)
       dhcp4: false
       dhcp6: false
       addresses:
@@ -77,18 +79,26 @@ never touches WiFi:
 ```bash
 sudo netplan generate
 sudo nmcli connection reload
-sudo nmcli connection up netplan-enp6s0
+sudo nmcli connection up netplan-rig0
 ```
 
+**Match the card by MAC, never by interface name.** `enpXsY` follows the card's PCI slot, so it
+changes with no edit on your side: on fystyk the 10G card came back as `enp4s0` after a reboot (it
+had been `enp6s0`), the name-keyed stanza matched nothing, and every rig went unreachable while the
+card and its 10G link were perfectly healthy. The signature is `ip -br addr` showing the rig NIC up
+with no address. A `set-name:` is not the fix — netplan then binds the NM profile to that name and
+the rename only lands at the next boot, so the apply fails meanwhile.
+
 **Moving the rig link to another NIC** (what fystyk did when a 10G card replaced the onboard port):
-unplug the old NIC's cable first so the two can never both hold `.1`, back up, rename the interface
-key **in place** so every other setting survives, and review the *merged* config before applying —
-the installer's own netplan file may define the old NIC as well:
+unplug the old NIC's cable first so the two can never both hold `.1`, back up, point `match:` at the
+new card's MAC, and review the *merged* config before applying — the installer's own netplan file
+may define the old NIC as well:
 
 ```bash
 sudo cp -a /etc/netplan /root/netplan-backup
-sudo sed -i 's/<old-iface>/<new-iface>/g' /etc/netplan/99-vrfarm-rig.yaml
-sudo netplan get ethernets      # new NIC carries the address; the old one must have none
+ip -br link                     # the new card's MAC
+sudo sed -i 's/<old-mac>/<new-mac>/' /etc/netplan/99-vrfarm-rig.yaml
+sudo netplan get ethernets      # the rig stanza carries the address; the old NIC must have none
 ```
 
 Keep the `ethernets` argument: a bare `netplan get` also prints the WiFi passwords. If the old NIC

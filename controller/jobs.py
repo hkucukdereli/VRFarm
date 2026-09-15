@@ -28,7 +28,8 @@ class Job:
         self.cancel = threading.Event()
         self.progress = {r: {"state": "queued", "pct": 0, "bytes_done": 0, "bytes_total": 0,
                              "current": None, "rate": None, "eta_s": None} for r in self.rigs}
-        self.result = {r: {"synced": [], "failed": [], "purged": [], "poweroff": None} for r in self.rigs}
+        self.result = {r: {"synced": [], "failed": [], "purged": [], "refused": [], "poweroff": None}
+                       for r in self.rigs}
         self.log = collections.deque(maxlen=2000)
         self.procs = {}                 # rig -> running subprocess (for cancel)
         self._lock = threading.Lock()

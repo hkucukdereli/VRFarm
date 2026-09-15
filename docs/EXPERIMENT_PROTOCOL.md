@@ -114,7 +114,8 @@ echo "/dev/sda1 /media/vruser/ssd ext4 defaults,nofail 0 2" | sudo tee -a /etc/f
 ```
 
 Then set `data.video_dir` in the rig YAML (`rigs/<rig>.yaml`, e.g. `rigs/cheddar.yaml`) to the
-video directory on the SSD.
+video directory on the SSD, and `data.video_mount` to the mountpoint (`/media/vruser/ssd`): while
+it is not mounted, the Data tab won't treat the rig's folders as synced and won't purge them.
 
 ### 6. Screen calibration
 

@@ -821,7 +821,11 @@ def _go(rs: RigState):
         print(f"[go:{rs.name}] Camera: {'recording' if cam_recording else ('livestream (not saved)' if not save_camera else 'FAILED — no video')}")
 
     time.sleep(1.5)
-    send_command(leader["ip"], cmd_port, {"cmd": "START", "session_id": rs.session_id})
+    # Whether this session should have video, for the leader's metadata and later the Data tab:
+    # camera unchecked, or a recording that never started, means none is expected — not lost.
+    camera_requested = bool(cam_cfg.get("enabled", False)) and save_camera
+    send_command(leader["ip"], cmd_port, {"cmd": "START", "session_id": rs.session_id,
+                                          "camera_requested": camera_requested, "camera_saved": cam_recording})
     steps.append("START command sent")
 
     rs.phase = "running"

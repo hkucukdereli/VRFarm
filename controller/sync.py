@@ -3,18 +3,25 @@ controller/sync.py
 
 The Data tab's engine. Talks to leader Pis over SSH only:
 
-  inventory   — run shared/leader_data.py on the leader (what is there, consolidated or not,
-                is the engine running, disk), then an rsync DRY RUN per tree to decide which
-                date folders are green (nothing left to copy) or red (something pending).
+  inventory   — run shared/leader_data.py on the leader (which date folders sit in which tree,
+                consolidated or not, recorded video that is missing, is the engine running, disk),
+                then an rsync DRY RUN per tree to give each folder a status: green (nothing left
+                to copy), red (something pending), missing (a session's recorded video is not on
+                the Pi) or grey (the check itself can't be trusted).
   sync        — per date folder: consolidate what needs it, refuse cross-rig session-id
-                collisions, rsync data tree + video tree into the one data root with live
-                progress, verify with a second dry run, write the ledger, and (auto-purge)
-                delete the folder on the Pi.
-  purge       — delete green + consolidated date folders on the Pi (re-verified right before).
+                collisions, rsync the trees that hold the folder into the one data root with live
+                progress, verify against a fresh inventory and a second dry run, write the ledger,
+                and (auto-purge) purge it.
+  purge       — delete a folder on the Pi tree by tree, each copy re-verified clean moments
+                before; the Pi refuses any tree the controller did not name as verified.
   poweroff    — `sudo poweroff` on every follower, then the leader, and wait for port 22 to close.
 
 Copying uses -rlt (files, links, times), NOT -a: owner/group can never match between the Pi
 user and the controller user, so an -a dry run would never come back clean.
+
+No nonzero rsync exit counts as clean: exit 23 is also what an unreadable subdirectory gives, and
+its files would otherwise look copied. Which trees a folder is in (a session recorded with the
+camera unchecked has no video folder) comes from the inventory, never from rsync's error text.
 """
 from __future__ import annotations
 import json
@@ -26,6 +33,7 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from controller import settings
@@ -35,9 +43,14 @@ from controller.jobs import Job
 
 ROOT = settings.ROOT
 FOLDER_RE = re.compile(r"^([A-Za-z0-9-]+)/\1_(\d{8})(?:/|$)")
+FOLDER_KEY_RE = re.compile(r"^([A-Za-z0-9-]+)/\1_(\d{8})$")      # a whole folder key, nothing after it
 LEDGER_NAME = ".vrfarm_sync_ledger.json"
+LEADER_DATA_PROTO = 2       # the shared/leader_data.py protocol this controller needs on a leader
+DEPLOY_NEEDED = "leader_data.py on the leader is out of date — Deploy this rig"
 SSH_E = "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new"
 _PROGRESS_RE = re.compile(r"^\s*([\d,]+)\s+(\d{1,3})%\s+(\S+/s)\s+(\d+:\d+:\d+)")
+FILE_LEVEL_RC = (23, 24)    # rsync: some files failed / vanished — per file, not the whole link
+SEVERITY = {"green": 0, "red": 1, "missing": 2, "grey": 3}
 
 
 # ── leader access ──
@@ -80,6 +93,30 @@ def data_dirs(rs: RigState) -> tuple[str, str | None]:
     leader_dir = d.get("leader_dir") or "/home/vruser/data"
     video_dir = d.get("video_dir") or None
     return leader_dir, video_dir
+
+
+def leader_data_args(rs: RigState) -> list[str]:
+    """The tree arguments every inventory / consolidate / purge call carries. The rig YAML's
+    optional `data.video_mount` names the mountpoint an external video drive must be mounted on;
+    without it video_dir is a plain directory."""
+    leader_dir, video_dir = data_dirs(rs)
+    mount = (rs.config.get("data") or {}).get("video_mount") or None
+    return (["--leader-dir", leader_dir] + (["--video-dir", video_dir] if video_dir else [])
+            + (["--video-mount", mount] if mount else []))
+
+
+def proto_outdated(inv: dict) -> bool:
+    """Replies from a leader_data.py older than protocol 2 carry no `proto`."""
+    try:
+        return int(inv.get("proto") or 1) < LEADER_DATA_PROTO
+    except (TypeError, ValueError):
+        return True
+
+
+def scoped_inventory(rs: RigState, folders) -> dict:
+    """A fresh inventory of just these date folders."""
+    return run_leader_data(rs, "inventory", *leader_data_args(rs),
+                           *[a for f in folders for a in ("--folder", f)])
 
 
 def remote_path(rs: RigState, path: str) -> str:
@@ -144,23 +181,31 @@ def _bucket(rel: str):
     return f"{m.group(1)}/{m.group(1)}_{m.group(2)}" if m else None
 
 
-def pending_folders(rs: RigState, tree: str, only: str | None = None) -> tuple[set, str | None]:
-    """Date folders under `tree` (a path on the leader) with anything left to copy into the
-    data root, from an rsync dry run. Returns (set of folder keys, error or None)."""
+def _dry_run(rs: RigState, tree: str, only: str | None = None,
+             checksum: bool = False) -> tuple[int | None, set, str | None]:
+    """rsync dry run of a tree on the leader (or of one date folder in it) against the data root.
+    Returns (exit code, or None when rsync could not run; pending folder keys; error or None).
+
+    One folder is picked with filter rules on the tree root instead of pointing rsync at the
+    folder: nothing has to be created under the data root first, and an unreadable sibling folder
+    can't fail the run."""
+    if only is not None and not FOLDER_KEY_RE.match(only):
+        return None, set(), f"not a date folder: {only!r}"
     root = settings.data_root()
     root.mkdir(parents=True, exist_ok=True)
-    src = remote_path(rs, tree if only is None else f"{tree.rstrip('/')}/{only}")
-    dst = str(root) + ("/" if only is None else f"/{only}/")
-    if only is not None:
-        Path(dst).mkdir(parents=True, exist_ok=True)
-    args = rsync_base() + ["-rltn", "--itemize-changes", "--out-format=%i|%n", "--modify-window=1",
-                           "--exclude=.rsync-partial/", "--exclude=.DS_Store", src, dst]
+    args = rsync_base() + ["-rltnc" if checksum else "-rltn", "--itemize-changes", "--out-format=%i|%n",
+                           "--modify-window=1", "--exclude=.rsync-partial/", "--exclude=.DS_Store"]
+    if only is None:
+        args.append("--exclude=/lost+found/")
+    else:
+        args += [f"--include=/{only.split('/')[0]}/", f"--include=/{only}/***", "--exclude=*"]
+    args += [remote_path(rs, tree), str(root) + "/"]
     try:
-        r = subprocess.run(args, capture_output=True, text=True, timeout=600)
+        r = subprocess.run(args, capture_output=True, text=True, timeout=7200 if checksum else 600)
     except Exception as e:
-        return set(), str(e)
-    if r.returncode not in (0, 23, 24):
-        return set(), (r.stderr.strip() or f"rsync exit {r.returncode}")[-400:]
+        return None, set(), str(e)
+    if r.returncode != 0:
+        return r.returncode, set(), (r.stderr.strip() or f"rsync exit {r.returncode}")[-400:]
     pending = set()
     for line in r.stdout.splitlines():
         if "|" not in line:
@@ -168,40 +213,95 @@ def pending_folders(rs: RigState, tree: str, only: str | None = None) -> tuple[s
         code, rel = line.split("|", 1)
         if not (code.startswith(">f") or code.startswith("cd") or code.startswith("<f")):
             continue
-        rel = rel.strip().rstrip("/")
-        key = _bucket(rel if only is None else f"{only}/{rel}")
+        key = _bucket(rel.strip().rstrip("/"))
         if key and (only is None or key == only):
-            # a bare `cd` of the subject or date dir itself counts too (folder missing locally)
+            # a bare `cd` of the date dir itself counts too (folder missing locally)
             pending.add(key)
-    return pending, None
+    return 0, pending, None
+
+
+def pending_folders(rs: RigState, tree: str, only: str | None = None) -> tuple[set, str | None]:
+    """Date folders under `tree` (a path on the leader) with anything left to copy into the
+    data root, from a strict rsync dry run. Returns (set of folder keys, error or None)."""
+    _rc, pending, err = _dry_run(rs, tree, only)
+    return pending, err
+
+
+def tree_status(rs: RigState, tree: str, keys: list) -> tuple[dict, str | None]:
+    """{key: None (clean) | "pending" | "error: <why>"} for date folders of one tree, plus the
+    tree's error when its bulk dry run failed. A per-file failure (exit 23/24 — say, one unreadable
+    subdirectory) is localised: each folder then gets its own strict dry run, so only the folders
+    that really fail go grey. Any other failure (SSH, rsync itself) greys the whole tree."""
+    rc, pend, err = _dry_run(rs, tree)
+    if err is None:
+        return {k: ("pending" if k in pend else None) for k in keys}, None
+    if rc not in FILE_LEVEL_RC:
+        return {k: f"error: {err}" for k in keys}, err
+
+    def one(k):
+        _rc, p, e = _dry_run(rs, tree, only=k)
+        return k, (f"error: {e}" if e else ("pending" if k in p else None))
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        return dict(ex.map(one, keys)), err
 
 
 def folder_status(rs: RigState, inv: dict) -> dict:
-    """{folder_key: green|red|grey} for every folder in the inventory."""
+    """Status of every folder in the inventory, the worst finding winning (grey > missing > red >
+    green): {status: {key: ...}, reasons: {key: why or None}, errors: [...], proto_outdated}.
+
+      green    every tree that holds the folder has nothing left to copy, and no session that
+               recorded camera_saved: true lacks its video. A folder with no video copy is green
+               when its sessions were not saving video (or predate the flag).
+      red      something is still pending
+      missing  a session's recorded video is not on the Pi
+      grey     can't be trusted: leader_data.py predates protocol 2, a tree is unavailable, or the
+               folder's dry run failed
+    """
+    folders = inv.get("folders", [])
+    status = {f["key"]: "green" for f in folders}
+    reasons = {k: None for k in status}
+    errors = []
+
+    def mark(keys, st, why):
+        for k in keys:
+            if k in status and SEVERITY[st] > SEVERITY[status[k]]:
+                status[k], reasons[k] = st, why
+
+    def result(outdated=False):
+        return {"status": status, "reasons": reasons, "errors": errors, "proto_outdated": outdated}
+
+    if proto_outdated(inv):
+        errors.append(DEPLOY_NEEDED)
+        mark(list(status), "grey", DEPLOY_NEEDED)
+        return result(outdated=True)
+    droot, vroot = inv.get("data_root") or {}, inv.get("video_root") or {}
+    if not droot.get("available"):
+        errors.append(f"data tree unavailable: {droot.get('reason')}")
+    if vroot.get("separate") and not vroot.get("available"):
+        errors.append(f"video tree unavailable: {vroot.get('reason')}")
+    if errors:
+        mark(list(status), "grey", "; ".join(errors))
+        return result()
     leader_dir, video_dir = data_dirs(rs)
-    status = {f["key"]: "green" for f in inv.get("folders", [])}
-    errs = []
-    pend, err = pending_folders(rs, leader_dir)
-    if err:
-        errs.append(f"data tree: {err}")
-        for k in status:
-            status[k] = "grey"
-    else:
-        for k in pend:
-            if k in status:
-                status[k] = "red"
-    if inv.get("video_tree") and video_dir:
-        pend, err = pending_folders(rs, video_dir)
+    trees = [("data", leader_dir, [f["key"] for f in folders if f.get("in_data")])]
+    if vroot.get("separate") and video_dir:
+        trees.append(("video", video_dir, [f["key"] for f in folders if f.get("in_video")]))
+    for name, tree, keys in trees:
+        if not keys:
+            continue
+        res, err = tree_status(rs, tree, keys)
         if err:
-            errs.append(f"video tree: {err}")
-            for k in status:
-                if status[k] == "green":
-                    status[k] = "grey"
-        else:
-            for k in pend:
-                if k in status and status[k] != "grey":
-                    status[k] = "red"
-    return {"status": status, "errors": errs}
+            errors.append(f"{name} tree: {err}")
+        for k, v in res.items():
+            if v == "pending":
+                mark([k], "red", f"not fully copied yet ({name} tree)")
+            elif v:
+                mark([k], "grey", f"{name} tree: {v[len('error: '):]}")
+    for f in folders:
+        if f.get("missing_video"):
+            mark([f["key"]], "missing", "video recorded but not on the Pi: " + ", ".join(f["missing_video"]))
+    return result()
 
 
 def inventory(rs: RigState) -> dict:
@@ -217,9 +317,7 @@ def inventory(rs: RigState) -> dict:
         rs.data.update({"inventory": None, "status": {}, "engine_running": None})
         return card
     card["ssh_ok"] = True
-    leader_dir, video_dir = data_dirs(rs)
-    inv = run_leader_data(rs, "inventory", "--leader-dir", leader_dir,
-                          *(["--video-dir", video_dir] if video_dir else []))
+    inv = run_leader_data(rs, "inventory", *leader_data_args(rs))
     if not inv.get("ok"):
         card["error"] = inv.get("error", "inventory failed")
         rs.data.update({"inventory": None, "status": {}})
@@ -231,15 +329,18 @@ def inventory(rs: RigState) -> dict:
         entry = dict(f)
         entry["bytes"] = (f.get("bytes_data") or 0) + (f.get("bytes_video") or 0)
         entry["status"] = st["status"].get(f["key"], "grey")
+        entry["reason"] = st["reasons"].get(f["key"])
         lk = ledger.get(ledger_key(rs.name, f["key"]))
         entry["last_synced"] = lk.get("last_synced") if lk else None
         entry["purged_at"] = lk.get("purged_at") if lk else None
         folders.append(entry)
     card.update({"hostname": inv.get("hostname"), "engine_running": inv.get("engine_running"),
                  "disk_data": inv.get("disk_data"), "disk_video": inv.get("disk_video"),
-                 "folders": folders, "status_errors": st["errors"], "video_tree": inv.get("video_tree")})
+                 "folders": folders, "status_errors": st["errors"], "video_tree": inv.get("video_tree"),
+                 "trees": {"data": inv.get("data_root"), "video": inv.get("video_root")},
+                 "proto_outdated": st["proto_outdated"]})
     rs.data.update({"inventory": inv, "inventory_t": time.time(), "status": st["status"],
-                    "engine_running": inv.get("engine_running"),
+                    "engine_running": inv.get("engine_running"), "proto_outdated": st["proto_outdated"],
                     "disk_free_gb": (inv.get("disk_data") or {}).get("free_gb"), "card": card})
     return card
 
@@ -253,10 +354,13 @@ def cached_card(rs: RigState, max_age_s: float = 600) -> dict:
 
 # ── collision guard ──
 
-def collision(rs: RigState, folder: str) -> str | None:
-    """A session id in this folder that already exists under the data root from ANOTHER rig."""
-    inv = rs.data.get("inventory") or {}
-    f = next((x for x in inv.get("folders", []) if x["key"] == folder), None)
+def collision(rs: RigState, folder: str, finfo: dict | None = None) -> str | None:
+    """A session id in this folder that already exists under the data root from ANOTHER rig.
+    `finfo` is the folder's inventory entry; without it the rig's cached inventory is used."""
+    f = finfo
+    if f is None:
+        inv = rs.data.get("inventory") or {}
+        f = next((x for x in inv.get("folders", []) if x["key"] == folder), None)
     if not f:
         return None
     ledger = ledger_load().get("folders", {})
@@ -315,148 +419,220 @@ def _rsync_folder(job: Job, rs: RigState, tree: str, folder: str, bytes_total: i
 
 
 def sync_folder(job: Job, rs: RigState, folder: str, bytes_before: int, rig_total: int) -> bool:
-    """Consolidate, guard, copy both trees, verify, ledger, (auto-)purge. True on success."""
+    """Consolidate, guard, copy the trees that hold the folder, verify, ledger, (auto-)purge.
+    Decisions come from fresh inventories of this one folder, not from the card. True on success."""
     leader_dir, video_dir = data_dirs(rs)
-    inv = rs.data.get("inventory") or {}
-    finfo = next((x for x in inv.get("folders", []) if x["key"] == folder), {})
     res = job.result[rs.name]
-    bd, bv = int(finfo.get("bytes_data") or 0), int(finfo.get("bytes_video") or 0)
 
-    # 1. consolidate anything not yet at format v2 (idempotent)
-    unconsolidated = finfo.get("n_unconsolidated", 0)
-    if unconsolidated:
-        job.say(rs.name, f"{folder}: consolidating {unconsolidated} session(s)")
-        c = run_leader_data(rs, "consolidate", "--leader-dir", leader_dir,
-                            *(["--video-dir", video_dir] if video_dir else []), "--folder", folder, timeout=1800)
-        bad = [f"{k}: {v.get('error')}" for k, v in (c.get("results") or {}).items() if not v.get("ok")]
+    def fail(msg):
+        job.say(rs.name, f"{folder}: {msg}", "error")
+        res["failed"].append({"folder": folder, "error": msg})
+        return False
+
+    def look():
+        """(inventory, this folder's entry, why the sync can't go on — or None)"""
+        inv = scoped_inventory(rs, [folder])
+        droot = inv.get("data_root") or {}
+        if not inv.get("ok"):
+            return inv, None, f"inventory failed: {inv.get('error')}"
+        if proto_outdated(inv):
+            return inv, None, DEPLOY_NEEDED
+        if not droot.get("available"):
+            return inv, None, f"data tree unavailable: {droot.get('reason')}"
+        f = next((x for x in inv.get("folders", []) if x["key"] == folder), None)
+        return inv, f, (None if f else "no longer on the Pi")
+
+    # 1. what is on the Pi right now
+    pre, finfo, why = look()
+    if why:
+        return fail(why)
+    vroot = pre.get("video_root") or {}
+
+    # 2. consolidate anything not yet at format v2 (idempotent) — but not while the video tree
+    #    can't be trusted: the .h5 would be written without /camera and never folded again
+    n = finfo.get("n_unconsolidated", 0)
+    if n and vroot.get("separate") and not vroot.get("available"):
+        job.say(rs.name, f"{folder}: {n} session(s) left unconsolidated — the video tree is unavailable "
+                         f"({vroot.get('reason')})", "warning")
+    elif n:
+        job.say(rs.name, f"{folder}: consolidating {n} session(s)")
+        c = run_leader_data(rs, "consolidate", *leader_data_args(rs), "--folder", folder, timeout=1800)
         if not c.get("ok"):
+            bad = [f"{k}: {v.get('error')}" for k, v in (c.get("results") or {}).items() if not v.get("ok")]
             job.say(rs.name, f"{folder}: consolidate had errors: {c.get('error') or '; '.join(bad)} — "
                              f"copying anyway; the folder will NOT be purged", "warning")
-            finfo["unconsolidated_after"] = True
-        else:
-            finfo["n_unconsolidated"] = 0
-            # re-read sizes: sidecars are gone, video is remuxed
-            inv2 = run_leader_data(rs, "inventory", "--leader-dir", leader_dir,
-                                   *(["--video-dir", video_dir] if video_dir else []))
-            if inv2.get("ok"):
-                rs.data["inventory"] = inv2
-                f2 = next((x for x in inv2.get("folders", []) if x["key"] == folder), None)
-                if f2:
-                    finfo.update(f2)
-                    bd, bv = int(f2.get("bytes_data") or 0), int(f2.get("bytes_video") or 0)
+        pre, finfo, why = look()            # sidecars are gone, video is remuxed: re-read
+        if why:
+            return fail(why)
     if job.cancel.is_set():
         return False
 
-    # 2. cross-rig collision guard
-    why = collision(rs, folder)
+    # 3. cross-rig collision guard
+    why = collision(rs, folder, finfo)
     if why:
         job.say(rs.name, f"{folder}: REFUSED — {why}", "error")
         res["failed"].append({"folder": folder, "error": why})
         return False
 
-    # 3. copy: data tree, then video tree
-    trees = [(leader_dir, bd)]
-    if inv.get("video_tree") and video_dir:
-        trees.append((video_dir, bv))
+    # 4. copy the trees that hold this folder — a session recorded without video has no video folder
+    trees = []
+    if finfo.get("in_data"):
+        trees.append(("data", leader_dir, int(finfo.get("bytes_data") or 0)))
+    if finfo.get("in_video") and video_dir:
+        trees.append(("video", video_dir, int(finfo.get("bytes_video") or 0)))
     offset = bytes_before
-    for tree, nbytes in trees:
+    for _name, tree, nbytes in trees:
         if job.cancel.is_set():
             return False
         job.say(rs.name, f"{folder}: copying from {tree}")
         rc, err = _rsync_folder(job, rs, tree, folder, nbytes, offset, rig_total)
         offset += nbytes
         if rc != 0:
-            msg = f"{folder}: rsync exit {rc} on {tree}: {err.strip().splitlines()[-1] if err.strip() else ''}"
-            job.say(rs.name, msg, "error")
-            res["failed"].append({"folder": folder, "rc": rc, "error": err[-300:]})
-            return False
-    job.set_progress(rs.name, bytes_done=bytes_before + bd + bv,
-                     pct=round(100.0 * (bytes_before + bd + bv) / max(1, rig_total), 1))
+            return fail(f"rsync exit {rc} on {tree}: {err.strip().splitlines()[-1] if err.strip() else ''}")
+    copied = sum(nbytes for _name, _tree, nbytes in trees)
+    job.set_progress(rs.name, bytes_done=bytes_before + copied,
+                     pct=round(100.0 * (bytes_before + copied) / max(1, rig_total), 1))
 
-    # 4. verify: a clean dry run of the folder in both trees
-    for tree, _n in trees:
+    # 5. verify against a fresh inventory: same trees, every copy clean, no recorded video missing
+    post, pinfo, why = look()
+    if why:
+        return fail(f"after the copy: {why}")
+    pv = post.get("video_root") or {}
+    if pv.get("separate") and not pv.get("available"):
+        return fail(f"video tree unavailable ({pv.get('reason')}) — data copied, but whether video "
+                    f"belongs with it can't be checked")
+    if (bool(pinfo.get("in_data")), bool(pinfo.get("in_video"))) != (bool(finfo.get("in_data")), bool(finfo.get("in_video"))):
+        return fail("its trees changed during the copy — sync it again")
+    for name, tree, _n in trees:
         pend, err = pending_folders(rs, tree, only=folder)
         if err or pend:
-            job.say(rs.name, f"{folder}: verification failed on {tree}: {err or 'still pending'}", "error")
-            res["failed"].append({"folder": folder, "error": f"verify: {err or 'pending after copy'}"})
-            return False
+            return fail(f"verification failed on the {name} tree: {err or 'still pending after the copy'}")
+    if pinfo.get("missing_video"):
+        return fail(f"video expected for {', '.join(pinfo['missing_video'])} but not on the Pi; data copied")
 
-    # 5. ledger
-    sessions = [s["id"] for s in finfo.get("sessions", [])]
+    # 6. ledger
+    sessions = [s["id"] for s in pinfo.get("sessions", [])]
+    nbytes = int(pinfo.get("bytes_data") or 0) + int(pinfo.get("bytes_video") or 0)
     now = time.time()
 
     def _upd(d):
         e = d["folders"].setdefault(ledger_key(rs.name, folder), {
             "rig": rs.name, "subject": folder.split("/")[0], "date": folder.split("_")[-1],
             "first_synced": now, "purged_at": None})
-        e.update({"sessions": sorted(set((e.get("sessions") or []) + sessions)), "bytes": bd + bv,
+        e.update({"sessions": sorted(set((e.get("sessions") or []) + sessions)), "bytes": nbytes,
                   "last_synced": now, "last_verified": now,
-                  "trees": {"data": leader_dir, "video": video_dir}})
+                  "trees": {"data": leader_dir, "video": video_dir},
+                  "present": {"data": bool(pinfo.get("in_data")), "video": bool(pinfo.get("in_video"))}})
     ledger_update(_upd)
-    rs.data["status"][folder] = "green"
+    rs.data.setdefault("status", {})[folder] = "green"
     rs.data["last_sync_t"] = now
     res["synced"].append(folder)
-    job.say(rs.name, f"{folder}: synced and verified ({(bd + bv) / 1e6:.1f} MB)")
+    job.say(rs.name, f"{folder}: synced and verified ({' + '.join(t[0] for t in trees)}, {nbytes / 1e6:.1f} MB)")
+    unstarted = [s["id"] for s in pinfo.get("sessions", [])
+                 if s.get("camera_requested") is True and s.get("camera_saved") is False]
+    if unstarted:
+        job.say(rs.name, f"{folder}: note — the camera was checked but never started recording for "
+                         f"{', '.join(unstarted)}; no video was expected", "warning")
 
-    # 6. auto-purge
+    # 7. auto-purge: the full purge path, re-verified from scratch
     if job.params.get("auto_purge"):
-        if finfo.get("unconsolidated_after") or finfo.get("n_unconsolidated"):
-            job.say(rs.name, f"{folder}: auto-purge skipped (unconsolidated session)", "warning")
-        else:
-            purge_folders(job, rs, [folder], recheck=False)
+        purge_folders(job, rs, [folder])
     return True
 
 
-def purge_folders(job: Job, rs: RigState, folders: list, recheck: bool = True) -> list:
-    """Delete date folders on the Pi (both trees). With recheck, every folder is dry-run
-    verified clean right before deletion; a checksum pass when the setting asks for it."""
-    leader_dir, video_dir = data_dirs(rs)
-    inv = rs.data.get("inventory") or {}
+def purge_folders(job: Job, rs: RigState, folders: list) -> list:
+    """Delete date folders on the Pi, tree by tree, and only copies that re-verified moments ago.
+    Everything is decided from a fresh inventory, never from the card the page showed: each tree
+    holding the folder must pass a strict dry run (and the checksum pass, when the setting asks),
+    and the Pi is told exactly which trees were verified — it refuses the rest. Returns the purged
+    folder keys; refusals are logged and collected in the job result's `refused`."""
     res = job.result[rs.name]
-    cfg = settings.load().get("sync") or {}
-    todo = []
+    refused = res.setdefault("refused", [])
+
+    def refuse(keys, why, level="warning"):
+        for k in keys:
+            job.say(rs.name, f"{k}: NOT purged — {why}", level)
+            refused.append({"folder": k, "reason": why})
+
+    folders = list(dict.fromkeys(folders))
+    bad = [f for f in folders if not (isinstance(f, str) and FOLDER_KEY_RE.match(f))]
+    refuse(bad, "not a <subject>/<subject>_<date> folder name", "error")
+    folders = [f for f in folders if f not in bad]
+    if not folders:
+        return []
+    inv = scoped_inventory(rs, folders)
+    droot, vroot = inv.get("data_root") or {}, inv.get("video_root") or {}
+    if not inv.get("ok"):
+        why = f"inventory failed: {inv.get('error')}"
+    elif proto_outdated(inv):
+        why = DEPLOY_NEEDED
+    elif inv.get("engine_running"):
+        why = "the experiment engine is running on the leader"
+    elif not droot.get("available"):
+        why = f"data tree unavailable: {droot.get('reason')}"
+    elif vroot.get("separate") and not vroot.get("available"):
+        why = f"video tree unavailable: {vroot.get('reason')}"
+    else:
+        why = None
+    if why:
+        refuse(folders, why, "error")
+        return []
+    leader_dir, video_dir = data_dirs(rs)
+    checksum = bool((settings.load().get("sync") or {}).get("verify_checksum_before_purge"))
+    on_pi = {f["key"]: f for f in inv.get("folders", [])}
+    verified = {}
     for folder in folders:
         if job.cancel.is_set():
             break
-        if recheck:
-            ok = True
-            for tree in [leader_dir] + ([video_dir] if (inv.get("video_tree") and video_dir) else []):
-                pend, err = pending_folders(rs, tree, only=folder)
+        f = on_pi.get(folder)
+        if f is None:
+            job.say(rs.name, f"{folder}: not on the Pi — nothing to purge")
+            continue
+        if f.get("n_unconsolidated"):
+            refuse([folder], f"{f['n_unconsolidated']} unconsolidated session(s) — sync it first")
+            continue
+        if f.get("missing_video"):
+            refuse([folder], "video recorded but not on the Pi: " + ", ".join(f["missing_video"]))
+            continue
+        trees = ([("data", leader_dir)] if f.get("in_data") else []) + \
+                ([("video", video_dir)] if (f.get("in_video") and video_dir) else [])
+        why = None
+        for name, tree in trees:
+            _rc, pend, err = _dry_run(rs, tree, only=folder)
+            if err or pend:
+                why = f"{name} tree: {err or 'not fully copied to the data root'}"
+                break
+            if checksum:
+                _rc, pend, err = _dry_run(rs, tree, only=folder, checksum=True)
                 if err or pend:
-                    job.say(rs.name, f"{folder}: NOT purged — {err or 'unsynced changes on the Pi'}", "warning")
-                    ok = False
+                    why = f"{name} tree: checksum pass " + (f"failed: {err}" if err else "found content that differs from the data root")
                     break
-                if cfg.get("verify_checksum_before_purge"):
-                    src = remote_path(rs, f"{tree.rstrip('/')}/{folder}")
-                    dst = str(settings.data_root() / folder) + "/"
-                    r = subprocess.run(rsync_base() + ["-rltnc", "--itemize-changes", "--out-format=%i|%n",
-                                                       "--exclude=.rsync-partial/", src, dst],
-                                       capture_output=True, text=True, timeout=7200)
-                    if any(l.split("|")[0].startswith(">f") for l in r.stdout.splitlines() if "|" in l):
-                        job.say(rs.name, f"{folder}: NOT purged — checksum mismatch", "error")
-                        ok = False
-                        break
-            if not ok:
-                continue
-        todo.append(folder)
-    if not todo:
+        if why:
+            refuse([folder], why)
+        elif trees:
+            verified[folder] = [name for name, _tree in trees]
+    if not verified:
         return []
-    out = run_leader_data(rs, "purge", "--leader-dir", leader_dir,
-                          *(["--video-dir", video_dir] if video_dir else []),
-                          *[a for f in todo for a in ("--folder", f)], timeout=900)
-    if not out.get("ok") and not out.get("results"):
-        job.say(rs.name, f"purge failed: {out.get('error')}", "error")
+    args = [a for k in verified for a in ("--folder", k)]
+    args += [a for k, ts in verified.items() for t in ts for a in ("--verified", f"{t}:{k}")]
+    out = run_leader_data(rs, "purge", *leader_data_args(rs), *args, timeout=900)
+    if not out.get("results"):
+        refuse(list(verified), f"the Pi refused: {out.get('error')}", "error")
         return []
     purged = []
     now = time.time()
-    for folder, r in (out.get("results") or {}).items():
-        if r.get("ok"):
-            purged.append(folder)
-            job.say(rs.name, f"{folder}: purged on the Pi ({r.get('bytes_freed', 0) / 1e6:.1f} MB freed)")
-            ledger_update(lambda d, k=ledger_key(rs.name, folder): d["folders"].setdefault(k, {"rig": rs.name}).update({"purged_at": now}))
-            rs.data.get("status", {}).pop(folder, None)
-        else:
-            job.say(rs.name, f"{folder}: purge error: {r.get('errors')}", "error")
+    for folder, r in out["results"].items():
+        if not r.get("ok"):
+            refuse([folder], "the Pi refused: " + ("; ".join(r.get("errors") or []) or "unknown error"), "error")
+            continue
+        purged.append(folder)
+        removed = r.get("trees_removed") or []
+        job.say(rs.name, f"{folder}: purged on the Pi — {' + '.join(removed)} ({r.get('bytes_freed', 0) / 1e6:.1f} MB freed)")
+
+        def _mark(d, k=ledger_key(rs.name, folder), t=removed):
+            d["folders"].setdefault(k, {"rig": rs.name}).update({"purged_at": now, "purged_trees": t})
+        ledger_update(_mark)
+        rs.data.get("status", {}).pop(folder, None)
     res["purged"].extend(purged)
     rs.data["inventory_t"] = 0        # force a fresh inventory next time
     return purged
@@ -562,6 +738,13 @@ def job_sync(job: Job):
                 job.say(rs.name, f"skipped: {card.get('error')}", "error")
                 job.set_progress(rs.name, state="failed")
                 return
+            if card.get("proto_outdated"):
+                job.say(rs.name, f"NOT synced: {DEPLOY_NEEDED}", "error")
+                job.set_progress(rs.name, state="failed")
+                if job.params.get("poweroff"):
+                    job.result[rs.name]["poweroff"] = "skipped"
+                    job.say(rs.name, "NOT powered off: nothing could be synced", "warning")
+                return
             if job.params.get("all_unsynced"):
                 folders = [f["key"] for f in card["folders"] if f["status"] != "green"]
             sizes = {f["key"]: f.get("bytes", 0) for f in card["folders"]}
@@ -606,9 +789,10 @@ def job_purge(job: Job):
             return
         try:
             job.set_progress(rs.name, state="running")
-            purged = purge_folders(job, rs, list(items.get(rs.name) or []), recheck=True)
+            purged = purge_folders(job, rs, list(items.get(rs.name) or []))
             job.set_progress(rs.name, state="done", pct=100)
-            job.say(rs.name, f"purged {len(purged)} folder(s)")
+            n_refused = len(job.result[rs.name].get("refused") or [])
+            job.say(rs.name, f"purged {len(purged)} folder(s)" + (f", refused {n_refused}" if n_refused else ""))
         finally:
             rs.release_busy()
 

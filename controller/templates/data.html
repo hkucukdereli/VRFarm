@@ -147,7 +147,22 @@ async function refreshRigs(names) {
   }
   renderCards();
 }
-function statusClass(st) { return st === 'green' ? 'g' : st === 'red' ? 'r' : 'x'; }
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+// green: nothing left to copy · red: pending · missing: recorded video not on the Pi · grey: check failed
+function statusClass(st) { return st === 'green' ? 'g' : (st === 'red' || st === 'missing') ? 'r' : 'x'; }
+function statusMark(st) { return st === 'green' || st === 'red' ? '●' : st === 'missing' ? '◐' : '○'; }
+function folderNotes(f) {
+  const n = [];
+  if (f.n_unconsolidated) n.push(`<span class="y">${f.n_unconsolidated} unconsolidated</span>`);
+  if (f.status === 'missing') n.push('<span class="r">video missing</span>');
+  else if (f.video_only) n.push('video only');
+  else if (f.sessions.length && f.sessions.every(s => s.has_video === false)) n.push('no video');
+  return n.map(x => ' · ' + x).join('');
+}
+function cardBanners(c) {
+  if (c.proto_outdated) return '<div class="r" style="font-size:11px">Deploy needed: leader_data.py on this leader is out of date. Sync and purge are refused until the rig is deployed.</div>';
+  return (c.status_errors || []).map(e => `<div class="y" style="font-size:11px" title="${esc(e)}">${esc(e.length > 160 ? e.slice(0, 160) + '…' : e)}</div>`).join('');
+}
 function renderCards() {
   const host = document.getElementById('cards');
   const cards = Object.values(S.cards);
@@ -164,7 +179,7 @@ function renderCards() {
         <span style="flex:1"></span><button class="btn btn-sm" onclick="refreshRigs(['${c.name}'])">↻</button></h3>
       <div class="kv">leader <b>${c.leader ? c.leader.name + ' · ' + c.leader.ip : '?'}</b>${c.hostname ? ' (' + c.hostname + ')' : ''}
         ${c.loading ? ' · <span class="y">checking…</span>' : c.ssh_ok ? ' · SSH ok' : ' · <span class="r">no SSH</span>'}</div>
-      ${c.error ? `<div class="r" style="font-size:11px">${c.error}</div>` : ''}
+      ${c.error ? `<div class="r" style="font-size:11px">${esc(c.error)}</div>` : cardBanners(c)}
       <div class="kv">engine <b class="${c.engine_running ? 'r' : ''}">${c.engine_running == null ? '?' : c.engine_running ? 'RUNNING' : 'stopped'}</b>
         · data disk <b>${dd ? dd.free_gb + ' GB free' : '?'}</b>${dv ? ` · video SSD <b>${dv.free_gb} GB free</b>` : ''}</div>
       <div class="kv">last sync <b>${fmtT(c.last_sync_t)}</b> · <span class="g">${nGreen} synced</span> · <span class="r">${nRed} unsynced</span></div>
@@ -198,11 +213,13 @@ function openSyncNow() {
   const opts = [];
   rigs.forEach(n => (S.cards[n].folders || []).forEach(f => {
     const cls = statusClass(f.status);
-    opts.push(`<option class="${cls}" value="${n}|${f.key}" ${f.status !== 'green' ? 'selected' : ''}>${f.status === 'green' ? '✓' : f.status === 'red' ? '✗' : '?'} ${n} · ${f.key.split('/')[1]} · ${f.sessions.length} sess · ${MB(f.bytes)}</option>`);
+    const mark = {green: '✓', red: '✗', missing: '!'}[f.status] || '?';
+    const note = f.status === 'missing' ? ' · video missing' : f.status === 'grey' ? ' · check failed' : '';
+    opts.push(`<option class="${cls}" value="${n}|${f.key}" ${f.status !== 'green' ? 'selected' : ''} title="${esc(f.reason || '')}">${mark} ${n} · ${f.key.split('/')[1]} · ${f.sessions.length} sess · ${MB(f.bytes)}${note}</option>`);
   }));
   const auto = S.settings && S.settings.auto_purge;
   modal(`<h3>Sync Now</h3>
-    <div class="muted">Pick the mouse/date folders to copy into <code>${S.settings.data_root}</code>. Green = already synced, red = unsynced. All unsynced are pre-selected.</div>
+    <div class="muted">Pick the mouse/date folders to copy into <code>${S.settings.data_root}</code>. ✓ synced · ✗ not yet copied · ! recorded video is not on the Pi · ? could not be checked (hover for why). Everything not synced is pre-selected.</div>
     <div style="margin:8px 0"><select id="sync-sel" multiple size="12">${opts.join('') || '<option disabled>no folders</option>'}</select></div>
     <div style="display:flex; gap:8px"><button class="btn btn-sm" onclick="selAll(true)">select all unsynced</button><button class="btn btn-sm" onclick="selAll(false)">select all</button></div>
     ${auto ? '<div class="warn">Auto purge is ON: each folder is deleted on the Pi right after its verified copy.</div>' : ''}
@@ -229,7 +246,9 @@ async function openSyncPoweroff() {
   for (const [n, e] of Object.entries(d.rigs || {})) {
     if (e.skipped_reason) { skipped.push(`${n}: ${e.skipped_reason}`); continue; }
     const fol = e.followers.map(f => `${f.name} ${f.ssh_ok ? '✓' : '<span class="r">no SSH — cannot power off</span>'}`).join(', ');
-    rows.push(`<tr><td><b>${n}</b><div class="muted">followers: ${fol || 'none'}</div></td><td>${e.folders.map(f => `${f.key.split('/')[1]} (${f.sessions.length} sess, ${MB(f.bytes)})`).join('<br>') || '<span class="muted">nothing unsynced — will just power off</span>'}</td><td>${MB(e.bytes)}</td></tr>`);
+    const warn = (e.warnings || []).map(w => `<div class="r" style="font-size:11px">${esc(w)}</div>`).join('');
+    const flag = f => f.status === 'missing' ? ', <span class="r">video missing</span>' : f.status === 'grey' ? ', <span class="x">check failed</span>' : '';
+    rows.push(`<tr><td><b>${n}</b><div class="muted">followers: ${fol || 'none'}</div>${warn}</td><td>${e.folders.map(f => `${f.key.split('/')[1]} (${f.sessions.length} sess, ${MB(f.bytes)}${flag(f)})`).join('<br>') || '<span class="muted">nothing unsynced — will just power off</span>'}</td><td>${MB(e.bytes)}</td></tr>`);
     total += e.bytes;
   }
   const go = rows.length;
@@ -262,7 +281,7 @@ async function openPurge() {
       rows.push(`<tr><td>${rig}</td><td>${f.key}</td><td>${f.sessions.length}</td><td>${MB(f.bytes)}</td></tr>`); });
   }
   modal(`<h3>Purge Data</h3>
-    <div class="muted">Date folders that are fully synced (verified identical under <code>${d.data_root}</code>) and consolidated. Unsynced or unconsolidated folders are not listed and will not be touched.</div>
+    <div class="muted">Date folders that are fully synced (verified identical under <code>${d.data_root}</code>) and consolidated. Unsynced, unconsolidated or unverifiable folders, and folders whose recorded video is missing, are not listed and will not be touched.</div>
     <table style="margin-top:6px"><thead><tr><th>Rig</th><th>Folder</th><th>Sessions</th><th>Size</th></tr></thead><tbody>${rows.join('') || '<tr><td colspan="4" class="muted">nothing to purge</td></tr>'}</tbody></table>
     <div style="text-align:right; margin-top:4px">total ${GB(total)}</div>
     ${skipped.length ? `<div class="note">Skipped: ${skipped.join('; ')}</div>` : ''}

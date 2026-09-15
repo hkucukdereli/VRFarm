@@ -56,7 +56,8 @@ It's **idempotent** (a file already at `format_version 2`, or that already has a
 | `session_id`, `subject_id`, `date`, `session_num`, `notes` | session identity |
 | `level`, `rig_name`, `timestamp` | paradigm level, rig, Unix time of finalize |
 | `n_trials_completed`, `n_trials_planned` | trial counts |
-| `saved_devices`, `skipped_devices` | which devices' detailed data was recorded |
+| `saved_devices`, `skipped_devices` | which devices' detailed data was recorded. `camera` moves to `skipped_devices` when `camera_saved` is false; sessions recorded before that flag existed list `camera` as saved even when no video was taken |
+| `camera_requested`, `camera_saved` | bools sent by the controller at START: Camera was checked at GO / the camera Pi confirmed recording started. **Absent = unknown** (sessions before these existed). A session with `camera_saved: true` and no video on the leader shows as **missing** in the Data tab and is never purged |
 | `task_config` | **the entire task YAML as a JSON string** — full paradigm reconstruction |
 | `format_version` | `2` |
 

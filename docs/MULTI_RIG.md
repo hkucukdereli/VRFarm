@@ -67,39 +67,83 @@ Load a rig or a group. Each rig gets a card with a checkbox (which rigs the butt
 the leader's SSH status, hostname, whether the experiment engine is running, free disk on the
 data drive and the video SSD, and the list of **date folders** (`<mouse>/<mouse>_<date>`):
 
-- **green** — an rsync dry run finds nothing left to copy in either tree (data dir and video dir)
+- **green** — every tree that holds the folder (data dir, video dir) has nothing left to copy in a
+  strict rsync dry run, and no session that recorded video is missing it
 - **red** — something is still pending
-- grey — the check itself failed (no SSH, rsync missing on the Pi, …)
+- **missing** (red, "video missing") — a session recorded `camera_saved: true` but its video is not
+  on the Pi. Never purged, and Sync & Poweroff leaves the rig on
+- **grey** — the check can't be trusted: no SSH, a dry run failed (hover the folder for why), the
+  video drive is not mounted (`data.video_mount`), or the leader needs a Deploy
+
+No nonzero rsync exit counts as clean — exit 23 is also what an unreadable subdirectory gives. A
+folder labelled **no video** is normal: the camera was unchecked for those sessions (see
+[Sessions without video](#sessions-without-video)).
 
 One **Data root** for all rigs (the field, or Browse…). Sessions land subject-first, exactly as
 before: `<data root>/<mouse>/<mouse>_<date>/<session_id>/`. The rig that ran a session is in
 its metadata and in the subject index (`<data root>/subjects/<mouse>.json`, written when the
 session ends). If two rigs ever hold the same session id, the sync refuses that folder.
 
-**Sync Now** — pick folders from the list (red ones are pre-selected). For each folder the
-controller: consolidates any session not yet folded into one `.h5` (on the Pi, idempotent),
-copies the data folder and the video folder with `rsync -rlt` over SSH (partial files are
-kept in `.rsync-partial` so a cancelled copy resumes), runs the dry run again and only then
-marks the folder green and records it in `<data root>/.vrfarm_sync_ledger.json`. Shepherd
-logs are mirrored to `<data root>/shepherd_logs/<rig>/`.
+**Sync Now** — pick folders from the list (everything not green is pre-selected). For each folder
+the controller takes a fresh inventory of it on the Pi, consolidates any session not yet folded
+into one `.h5` (on the Pi, idempotent), and copies **whichever trees hold the folder** with
+`rsync -rlt` over SSH (partial files are kept in `.rsync-partial` so a cancelled copy resumes).
+It then re-inventories and runs the dry run again. Only if the folder's trees are unchanged, every
+copy is clean and no recorded video is missing does it mark the folder green and record it in
+`<data root>/.vrfarm_sync_ledger.json` (with `present: {data, video}`). Shepherd logs are mirrored
+to `<data root>/shepherd_logs/<rig>/`.
 
-**Sync & Poweroff** — first a dialog listing, per rig, what will be copied and which rigs are
-skipped (running, unreachable). On Yes: every red folder of every checked rig is synced, then
-for each rig where everything succeeded the controller runs `sudo poweroff` on every follower
-and then on the leader and waits for port 22 to close. A rig with a failed folder stays on.
-Do not cut power until a rig shows **OFF**.
+**Sync & Poweroff** — first a dialog listing, per rig, what will be copied, which rigs are skipped
+(running, unreachable, Deploy needed) and which folders can't be verified. On Yes: every folder
+that is not green on every checked rig is synced, then for each rig where everything verified the
+controller runs `sudo poweroff` on every follower and then on the leader and waits for port 22 to
+close. A rig with a failed, missing or grey folder stays on. Do not cut power until a rig shows
+**OFF**.
 
-**Purge Data** — a dialog lists the folders that are green in both trees and fully
-consolidated; on confirm each is re-checked right before deletion and removed from both trees
-on the Pi. Unsynced or unconsolidated folders are never listed. The Pi-side script only
-accepts `<mouse>/<mouse>_YYYYMMDD` names inside the two configured data dirs and refuses to run
-while the engine is alive.
+**Purge Data** — a dialog lists the folders that are green and fully consolidated, video-only
+folders included. On confirm the controller takes a fresh inventory and re-runs the strict dry run
+for every tree that holds each folder (plus a checksum pass if `verify_checksum_before_purge` is
+on), then names exactly the copies that passed to the Pi (`--verified data:<folder>`,
+`--verified video:<folder>`). The Pi-side script deletes only those. It refuses a whole folder if a
+copy sits in a tree that was not verified or a verified copy has vanished, and refuses the whole
+call if the engine is alive, a tree is unavailable, or no `--verified` was sent (an older
+controller). It only accepts `<mouse>/<mouse>_YYYYMMDD` names inside the configured dirs.
 
-**Auto purge** (toggle) — Sync Now and Sync & Poweroff delete each folder on the Pi right after
-its verified copy. Stored in `controller.yaml`.
+**Auto purge** (toggle) — Sync Now and Sync & Poweroff purge each folder on the Pi right after its
+verified copy, through the same re-verification as Purge Data. Stored in `controller.yaml`.
 
 A job's progress (overall and per rig), its log and a Cancel button appear under the buttons.
 One job runs at a time; inside a job the rigs run in parallel.
+
+### Sessions without video
+
+Leaving **Camera** unchecked at GO means no video folder is created for that session, so a date
+folder may exist only in the data tree. The Data tab copies and purges tree by tree, so such a
+folder syncs green and purges normally; a video folder whose data copy is already gone works the
+same way.
+
+To tell "not recorded" from "lost", GO sends the leader `camera_requested` (Camera checked) and
+`camera_saved` (the camera Pi confirmed recording started) in the START message. The engine writes
+them to `metadata.yaml`, and consolidation carries them into the `.h5` root attrs. A session with
+`camera_saved: true` and no video on the leader is **missing**. Sessions recorded before this carry
+neither flag and count as unknown, never as missing. A camera that was checked but never started
+recording counts as not saved (GO already warned), and the sync log notes it.
+
+If `video_dir` is on its own drive, name its mountpoint in the rig YAML:
+
+```yaml
+data:
+  video_dir: /media/vruser/ssd/video
+  video_mount: /media/vruser/ssd
+```
+
+While that path is not a mountpoint the video tree is **unavailable**: every folder of the rig is
+grey, syncs fail after copying the data, consolidation waits, and nothing is purged. Without
+`video_mount`, an unmounted drive would look like an empty video folder. cheddar keeps its video on
+the boot NVMe (`/home/vruser/video`) and needs no `video_mount`.
+
+The leader side is `shared/leader_data.py` protocol 2, which ships with **Deploy**. Until a rig is
+deployed, its card says **Deploy needed** and sync and purge are refused.
 
 ## What runs where
 

@@ -84,6 +84,9 @@ class Leader:
         # Device names whose per-trial HDF5 datasets to SKIP (user unchecked them at GO). Core
         # trial outcomes (first_lick_t, trial_outcome, timings) are written directly and unaffected.
         self._skip_save = set(skip_save or ())
+        # The controller's START message. Newer controllers put camera_requested / camera_saved in
+        # it (was video being recorded?); written to metadata.yaml when present. Empty until START.
+        self.start_info = {}
         self.session_id = (f"{session['subject_id']}_{session['date']}"
                            f"_{session['session_num']:03d}")
         self.devices = {}
@@ -909,7 +912,11 @@ class Leader:
         else:
             print(f"Session complete ({n_completed}/{n_planned} trials). Data: {data_dir}")
 
-        # Save metadata
+        # Save metadata. The camera records through pi_api, not the engine, so only the
+        # controller's START message says whether this session saved video: camera_requested
+        # (Camera checked at GO) and camera_saved (the camera Pi confirmed recording started).
+        # Both are written only when present — absent means unknown (an older controller).
+        camera_not_saved = "camera" in self.devices and self.start_info.get("camera_saved") is False
         meta = {
             "session_id": self.session_id,
             "subject_id": self.session["subject_id"],
@@ -923,10 +930,14 @@ class Leader:
             "rig_name": self.rig.get("name", ""),
             "timestamp": float(time.time()),
             # Data provenance: which devices' detailed data was recorded this session.
-            "saved_devices": sorted(n for n in self.devices if n not in self._skip_save),
-            "skipped_devices": sorted(self._skip_save),
+            "saved_devices": sorted(n for n in self.devices
+                                    if n not in self._skip_save and not (n == "camera" and camera_not_saved)),
+            "skipped_devices": sorted(set(self._skip_save) | ({"camera"} if camera_not_saved else set())),
             "end_reason": end_reason,
         }
+        for k in ("camera_requested", "camera_saved"):
+            if isinstance(self.start_info.get(k), bool):
+                meta[k] = self.start_info[k]
         if self._abort_reason:
             meta["abort"] = self._abort_reason
         meta_path = data_dir / "metadata.yaml"
@@ -1479,6 +1490,7 @@ def main():
             leader._mac_addr = (addr[0], rig_config["network"]["event_port"])
             msg = json.loads(data)
             if msg.get("cmd") == "START":
+                leader.start_info = msg
                 break
         except BlockingIOError:
             time.sleep(0.01)

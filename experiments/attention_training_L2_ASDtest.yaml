@@ -1,53 +1,51 @@
-last_saved: '2026-09-08'
+last_saved: '2026-09-11'
 stimulus:
-  background_gray: 0.075
+  background_gray: 0.1
   size_deg: 4
   shape: square
   duration_s: 2
-  altitude_deg: 10
+  altitude_deg: 20
   go_rule: all
   contrast:
     values:
-    - 0.852
+    - 0.4902
     proportions:
     - 1
   photodiode_sync_enabled: true
   photodiode_sync_every_n: 5
 reward:
   amount_ul: 4
-  amount_mode: volume
+  amount_mode: count
   amount_count: 1
-  pulse_gap_ms: 150
+  pulse_gap_ms: 500
   level: 2
-  resp_delay_s: 0
+  reward_delay_s: 0.6
   response_window: 2
   pav_delay_s: 0.5
   timeout_rule: count
   max_lick_rate: 1
   timeout_phases:
   - iti
+  resp_delay_s: 0.2
 session:
-  grace_period_s: 5
-  n_blocks: 30
-  block_size: 2
+  n_blocks: 1
+  block_size: 100
   block_sequence:
   - 80
-  - -40
-  - 40
-  - -80
   iti:
+  - 1
   - 2
-  - 4
   prestim_duration: 0
-  poststim_duration: 0
+  poststim_duration: 2
   global_delay: 0
   block_delay: 0
   block_delay_skip_first: false
   randomize_blocks: false
   global_timeout_trials: 0
   global_timeout_phases: []
+  grace_period_s: 5
 adaptive:
   enabled: false
   initial_state: 0
-  step_up: 0.2
-  step_down: 0.2
+  step_up: 0
+  step_down: 0

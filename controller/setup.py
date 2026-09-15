@@ -152,6 +152,11 @@ def api_install_pi():
         ssh(ssh_prefix, "mkdir -p ~/rig ~/data")
         steps.append("Created ~/rig ~/data")
 
+        # 1a. One time zone on every Pi, so leader and follower logs line up (recorded data is
+        #     Unix time either way).
+        ssh(ssh_prefix, "sudo timedatectl set-timezone Europe/Vienna", timeout=20)
+        steps.append("Time zone set to Europe/Vienna")
+
         # 1b. conda 'rig' env pinned to the SYSTEM python version (the apt-built camera
         #     bindings only load in an env of the same minor version).
         ssh(ssh_prefix,
@@ -361,37 +366,27 @@ def api_shutdown_pi():
     return jsonify({"ok": True})
 
 
-def _wait_pi_api(ip, port, tries=12):
-    time.sleep(2.0)
-    for _ in range(tries):
-        try:
-            if requests.get(f"http://{ip}:{port}/api/logs?n=1", timeout=2).ok:
-                return True
-        except Exception:
-            pass
-        time.sleep(1.0)
-    return False
+def _pi_entry(rs: RigState, ip: str, role: str | None = None) -> dict:
+    """{name, ip, role} of this rig's Pi at ip, the shape controller/pi_restart.py takes."""
+    pi = next((p for p in rs.pis if p.get("ip") == ip), {})
+    return {"name": pi.get("name", ip), "ip": ip, "role": role or pi.get("role", "follower")}
 
 
 @bp.route("/restart_pi", methods=["POST"])
 def api_restart_pi():
-    """Restart pi_api on one Pi (reloads deployed code) and wait for it to respawn."""
+    """Restart pi_api on one Pi (reloads deployed code) and wait for it to respawn. The restart
+    is timed, and on a leader shepherd's grace period follows it (controller/pi_restart.py)."""
     rs: RigState = g.rs
     data = request.json or {}
     ip = data.get("ip")
     if not ip:
         return jsonify({"ok": False, "error": "no ip"}), 400
     port = data.get("api_port", rs.api_port)
-    steps = []
-    try:
-        requests.post(f"http://{ip}:{port}/api/restart", timeout=5)
-        steps.append("Restart requested (pi_api self-kills; systemd respawns)")
-        back = _wait_pi_api(ip, port)
-        steps.append("pi_api back online" if back else
-                     "WARN pi_api did not respond after restart — re-check the Pi")
-        return jsonify({"ok": back, "steps": steps})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e), "steps": steps})
+    from controller import pi_restart
+    pi = _pi_entry(rs, ip)
+    results, steps = pi_restart.restart_timed([pi], port)
+    res = results[pi["name"]]
+    return jsonify({"ok": res["ok"], "steps": steps, **({"error": res["error"]} if not res["ok"] else {})})
 
 
 @bp.route("/deploy_pi", methods=["POST"])
@@ -422,14 +417,14 @@ def api_deploy_pi():
         steps.append(f"Uploaded rigs/{rs.path.name}")
 
         if data.get("restart", True):
-            try:
-                requests.post(f"http://{ip}:{port}/api/restart", timeout=5)
-                steps.append("Restarted pi_api to load new code")
-                back = _wait_pi_api(ip, port)
-                steps.append("pi_api back online — re-initialize devices" if back else
-                             "WARN pi_api did not respond after restart — re-check the Pi")
-            except Exception as e:
-                steps.append(f"(pi_api restart skipped: {e})")
+            # Timed: on a leader shepherd is restarted first (so the shepherd.py just uploaded
+            # runs) and its grace period follows the measured outage (controller/pi_restart.py).
+            from controller import pi_restart
+            pi = _pi_entry(rs, ip, role)
+            results, restart_steps = pi_restart.restart_timed([pi], port, reload_shepherd=True)
+            steps.extend(restart_steps)
+            steps.append("pi_api back online — re-initialize devices" if results[pi["name"]]["ok"] else
+                         "WARN pi_api did not respond after restart — re-check the Pi")
             try:
                 r = requests.post(f"http://{ip}:{port}/api/restart_displayd", json={}, timeout=120)
                 d = r.json() if r.ok else {}

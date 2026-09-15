@@ -3,9 +3,10 @@ controller/settings.py
 
 Controller-wide settings that are NOT per rig: the UI port, the controller's own IP, the
 event port every rig must agree on, where synced data lands, auto-purge, the rsync binary,
-sync tuning and the rig groups ("super rigs"). They live in controller.yaml at the repo
-root, which is gitignored (machine-specific, like the data root); controller.example.yaml
-is the tracked template it is created from on first run.
+sync tuning and the rig groups ("super rigs"). They live in controller/configs/controller.yaml,
+which is gitignored (machine-specific, like the data root); controller.example.yaml beside it
+is the tracked template it is created from on first run. A controller.yaml still at the repo
+root, where it lived before, is moved into controller/configs/ on the first load.
 """
 from __future__ import annotations
 import copy
@@ -21,10 +22,12 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
+CONFIG_DIR = Path(__file__).resolve().parent / "configs"
 # VRFARM_SETTINGS points the app at another settings file (the smoke tests use a scratch one
 # so they never touch the real data root or groups).
-SETTINGS_PATH = Path(os.environ["VRFARM_SETTINGS"]).expanduser() if os.environ.get("VRFARM_SETTINGS") else ROOT / "controller.yaml"
-EXAMPLE_PATH = ROOT / "controller.example.yaml"
+SETTINGS_PATH = Path(os.environ["VRFARM_SETTINGS"]).expanduser() if os.environ.get("VRFARM_SETTINGS") else CONFIG_DIR / "controller.yaml"
+EXAMPLE_PATH = CONFIG_DIR / "controller.example.yaml"
+LEGACY_PATH = ROOT / "controller.yaml"      # the location before controller/configs/
 
 DEFAULTS = {
     "ui_port": 5000,
@@ -57,22 +60,43 @@ def _merge(base: dict, over: dict) -> dict:
     return out
 
 
+def _migrate_legacy() -> None:
+    """Move a controller.yaml left at the repo root (where it lived before controller/configs/)
+    into place, so a checkout that pulls the move keeps its data root, groups and rsync path
+    instead of quietly starting over from the example. Not when VRFARM_SETTINGS picks the file."""
+    if os.environ.get("VRFARM_SETTINGS") or not LEGACY_PATH.exists():
+        return
+    if SETTINGS_PATH.exists():
+        print(f"[settings] ignoring {LEGACY_PATH}: {SETTINGS_PATH} exists — delete the old file", flush=True)
+        return
+    try:
+        shutil.move(str(LEGACY_PATH), str(SETTINGS_PATH))
+        print(f"[settings] moved {LEGACY_PATH} -> {SETTINGS_PATH}", flush=True)
+    except OSError as e:
+        print(f"[settings] could not move {LEGACY_PATH} -> {SETTINGS_PATH}: {e}", flush=True)
+
+
 def load(force: bool = False) -> dict:
     """Settings merged over DEFAULTS. Creates controller.yaml from the example on first run."""
     global _cache
     with _lock:
         if _cache is None or force:
             data = {}
-            if not SETTINGS_PATH.exists() and EXAMPLE_PATH.exists():
+            if _cache is None:
+                _migrate_legacy()
+            path = SETTINGS_PATH
+            if not path.exists() and not os.environ.get("VRFARM_SETTINGS") and LEGACY_PATH.exists():
+                path = LEGACY_PATH          # the move failed: read the old file rather than start over
+            elif not path.exists() and EXAMPLE_PATH.exists():
                 try:
                     shutil.copy(EXAMPLE_PATH, SETTINGS_PATH)
                 except OSError:
                     pass
-            if SETTINGS_PATH.exists():
+            if path.exists():
                 try:
-                    data = yaml.safe_load(SETTINGS_PATH.read_text()) or {}
+                    data = yaml.safe_load(path.read_text()) or {}
                 except Exception as e:
-                    print(f"[settings] could not parse {SETTINGS_PATH}: {e}", flush=True)
+                    print(f"[settings] could not parse {path}: {e}", flush=True)
             _cache = _merge(copy.deepcopy(DEFAULTS), data)
         return copy.deepcopy(_cache)
 
@@ -82,7 +106,8 @@ def save(new: dict) -> dict:
     global _cache
     with _lock:
         merged = _merge(copy.deepcopy(DEFAULTS), new)
-        fd, tmp = tempfile.mkstemp(prefix=".controller.", suffix=".yaml", dir=str(ROOT))
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".controller.", suffix=".yaml", dir=str(SETTINGS_PATH.parent))
         with os.fdopen(fd, "w") as f:
             yaml.dump(merged, f, default_flow_style=False, sort_keys=False)
         os.replace(tmp, SETTINGS_PATH)

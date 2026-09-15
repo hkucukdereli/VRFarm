@@ -241,7 +241,7 @@ the end of the day, **Sync & Poweroff**, which copies everything unsynced and th
 every Pi of the selected rigs. Consolidation into one self-contained `<session>.h5` happens on
 the Leader before the copy; the copy is verified with a second rsync pass.
 
-**Destination:** the Data root (`controller.yaml` `data_root`; else `$VRFARM_DATA_DIR`, else
+**Destination:** the Data root (`data_root` in `controller/configs/controller.yaml`; else `$VRFARM_DATA_DIR`, else
 `~/VRFarm/data`), the same tree for every rig:
 ```
 <data root>/<subject>/<subject>_<date>/<session_id>/

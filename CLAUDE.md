@@ -21,8 +21,8 @@ config has no copy in git; `rigs/_template.yaml` is the tracked template.
 (Python 3.11) at `~/miniforge3/envs/vrfarm`. Rig link is the 10G SFP+ card `enp6s0` — see Network.
 ONE web app runs everything: `python controller/app.py` → http://localhost:5000 with
 four tabs, Network / Setup / Experiment / Data. Controller-wide settings (data root, auto purge, rig
-groups) live in `controller.yaml` (gitignored; template `controller.example.yaml`). Full guide:
-`docs/MULTI_RIG.md`.
+groups) live in `controller/configs/controller.yaml` (gitignored; template `controller.example.yaml`
+in the same folder). Full guide: `docs/MULTI_RIG.md`.
 **Both Pis:** Debian 13 (trixie), conda env `rig`, user `vruser`. The `rig` env Python
 **must match the system Python** (3.13 on trixie) — the camera bindings
 (`python3-libcamera`/`python3-picamera2`) are apt-built for the system Python and symlinked
@@ -61,8 +61,8 @@ into the env, so a version mismatch breaks `import picamera2`. Create with
 │   ├── experiment.py  setup.py        <- /api/rigs/<rig>/...  and  /api/rigs/<rig>/setup/...
 │   ├── network.py  data.py            <- rigs/Pis/groups CRUD; Data tab (SSH/rsync sync, purge, poweroff)
 │   ├── sync.py  jobs.py  ssh.py       <- Data-tab engine, background jobs, ssh/scp helpers
+│   ├── configs/                       <- controller.yaml (controller-wide settings, gitignored) + controller.example.yaml
 │   └── templates/ static/             <- shell.html + one page per tab (per-rig pages run in iframes)
-├── controller.yaml                    <- controller-wide settings (gitignored; see controller.example.yaml)
 ├── pi_api/api.py                      <- Flask REST API on each Pi, port 5080
 ├── shared/
 │   ├── config.py  stim_generator.py  notify.py
@@ -208,8 +208,8 @@ tree for all rigs: `<data root>/<mouse>/<mouse>_<date>/<session_id>/`.
 a real `rsync` >= 3.1 for the Data tab. `rsync_path: null` resolves to **the env's rsync only**
 (`controller/settings.py` `rsync_path()` → `sys.prefix/bin/rsync`, no PATH fallback), and the
 `vrfarm` env on fystyk has none — so either `conda install -n vrfarm -c conda-forge rsync` or set
-`rsync_path: /usr/bin/rsync` in `controller.yaml` (Ubuntu's is real rsync, 3.4.1). Only on macOS is
-`/usr/bin/rsync` Apple's openrsync, which the Data tab rejects.
+`rsync_path: /usr/bin/rsync` in `controller/configs/controller.yaml` (Ubuntu's is real rsync,
+3.4.1). Only on macOS is `/usr/bin/rsync` Apple's openrsync, which the Data tab rejects.
 **Leader** (`rig` env): `flask pyyaml numpy scipy h5py smbus2 pigpio lgpio pyserial` + `picamera2`;
 `rsync` from apt on every Pi (the Install step adds it).
 **Follower**: `rig` env for pi_api; **system python3** for displayd/renderer and calib_geo

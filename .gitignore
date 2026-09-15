@@ -257,8 +257,12 @@ display_calibration/luminance_measurements_*.yaml
 display_calibration/*/luminance_cal_*.yaml
 display_calibration/*/luminance_measurements_*.yaml
 
-# Controller-wide settings (machine-specific: data root, groups, ports)
-controller.yaml
+# Controller-wide settings (machine-specific: data root, groups, ports), created from the tracked
+# controller/configs/controller.example.yaml. /controller.yaml is where the file lived before
+# controller/configs/ — the controller moves it on startup; until then it must stay ignored.
+controller/configs/controller.yaml
+controller/configs/.controller.*.yaml
+/controller.yaml
 
 # soft-deleted rig configs (Network tab -> Delete)
 rigs/.trash/

@@ -28,8 +28,8 @@ both user `vruser`.
 
 The address is not baked into the Pis — the Leader learns it from the source of the first UDP
 command and replies there, and the event listener binds `0.0.0.0:5571` — but **`controller_ip` in
-`controller.yaml` must match it**: the Network tab derives new rig IP pairs from its /24
-(`controller/network.py`) and the Setup tab builds the geometry-callback URL from it
+`controller/configs/controller.yaml` must match it**: the Network tab derives new rig IP pairs from
+its /24 (`controller/network.py`) and the Setup tab builds the geometry-callback URL from it
 (`controller/setup.py`). `192.168.10.1` is the default. Stay clear of the rest of the address
 plan: **`.101`–`.250` are rig IP pairs** (the Network tab hands them out) and **`.251`–`.254` are
 infrastructure** (the switch's web UI is `.254`).
@@ -208,7 +208,7 @@ conda install -n vrfarm -c conda-forge rsync
 or, **on Linux**, point at the system one, which is real rsync (fystyk: 3.4.1):
 
 ```yaml
-rsync_path: /usr/bin/rsync          # controller.yaml
+rsync_path: /usr/bin/rsync          # controller/configs/controller.yaml
 ```
 
 On **macOS** only the first option works: `/usr/bin/rsync` there is Apple's openrsync, which the Data

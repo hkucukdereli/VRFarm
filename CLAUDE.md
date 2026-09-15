@@ -192,13 +192,20 @@ Several rigs run side by side: each loaded rig is a sub-tab of Setup and Experim
 opens ONE UDP socket and sorts datagrams by the sender's IP (falling back to the `rig` field every
 leader event carries). Pi identity (name / IP / role / user) is edited in the Network tab.
 
-**Data tab** (SSH only, talks to leaders): a date folder `<mouse>/<mouse>_<date>` is green when an
-rsync dry run finds nothing left to copy in either tree, red otherwise. **Sync Now** copies chosen
-folders (consolidate on the Pi first, verify with a second dry run, ledger at
-`<data root>/.vrfarm_sync_ledger.json`); **Sync & Poweroff** copies everything red, then
-`sudo poweroff`s every Pi of the selected rigs; **Purge Data** deletes green + consolidated folders
-on the Pi; **Auto purge** does that right after each verified sync. Data lands subject-first in one
-tree for all rigs: `<data root>/<mouse>/<mouse>_<date>/<session_id>/`.
+**Data tab** (SSH only, talks to leaders through `shared/leader_data.py` protocol 2, which ships with
+Deploy): a date folder `<mouse>/<mouse>_<date>` is **green** when every tree that holds it (data dir,
+video dir) has nothing left to copy in a strict rsync dry run, **red** when something is pending,
+**missing** when a session recorded `camera_saved: true` but its video is not on the Pi, **grey**
+when the check can't be trusted (a failed dry run, an unmounted `data.video_mount`, a leader that
+needs a Deploy). No nonzero rsync exit counts as clean. A folder with no video folder is normal —
+the camera was unchecked (GO sends `camera_requested`/`camera_saved` in START; the engine records
+them). **Sync Now** copies chosen folders (consolidate on the Pi first, copy only the trees that
+hold the folder, verify against a fresh inventory plus a second dry run, ledger at
+`<data root>/.vrfarm_sync_ledger.json`); **Sync & Poweroff** copies everything not green, then
+`sudo poweroff`s every Pi of each rig whose folders all verified; **Purge Data** deletes green +
+consolidated folders on the Pi, each tree's copy re-verified right before and named to the Pi with
+`--verified`, which refuses anything else; **Auto purge** runs that same purge after each verified
+sync. Data lands subject-first in one tree for all rigs: `<data root>/<mouse>/<mouse>_<date>/<session_id>/`.
 
 ---
 

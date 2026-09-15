@@ -3,6 +3,8 @@
 data:
   leader_dir: /home/vruser/data
   video_dir: /media/vruser/ssd/video
+  # video_mount: /media/vruser/ssd   # only if video_dir is on its own drive: the Data tab then
+  #                                  # trusts (and purges) the video tree only while it is mounted
 devices:
   camera:
     auto_exposure: false

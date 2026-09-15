@@ -34,7 +34,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PY = sys.executable
-EVENT_PORT = 5571
+EVENT_PORT = 5592   # the scratch controller's event port — not 5571, where a real controller may listen
 
 RIGS = [  # name, api port, command port  (must match rigs/demo.yaml and rigs/demo2.yaml)
     ("demo", 5080, 5572),
@@ -104,7 +104,12 @@ def main():
     args = ap.parse_args()
 
     scratch = Path(tempfile.mkdtemp(prefix="vrfarm_smoke_"))
-    env = dict(os.environ, VRFARM_DATA_DIR=str(scratch / "data"), PYTHONUNBUFFERED="1")
+    # Scratch settings: never read, rewrite or migrate the real controller/configs/controller.yaml,
+    # and listen on EVENT_PORT so a controller already running on 5571 doesn't collide.
+    settings_file = scratch / "controller.yaml"
+    settings_file.write_text(f"ui_port: {args.port}\nevent_port: {EVENT_PORT}\n")
+    env = dict(os.environ, VRFARM_SETTINGS=str(settings_file), VRFARM_DATA_DIR=str(scratch / "data"),
+               PYTHONUNBUFFERED="1")
     logs = {}
     procs = []
 

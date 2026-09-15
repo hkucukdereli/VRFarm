@@ -242,6 +242,18 @@ sudo chown vruser:vruser /media/vruser/ssd
 echo "/dev/sda1 /media/vruser/ssd ext4 defaults,nofail 0 2" | sudo tee -a /etc/fstab
 ```
 
+Then name the mountpoint next to `video_dir` in the rig YAML, so the Data tab trusts (and purges)
+the video tree only while the drive is mounted:
+
+```yaml
+data:
+  video_dir: /media/vruser/ssd/video
+  video_mount: /media/vruser/ssd
+```
+
+Leave `video_mount` out when video lives on the boot disk, as on cheddar. See
+`docs/MULTI_RIG.md` → Sessions without video.
+
 ### Folder structure on Pi
 
 ```

@@ -142,7 +142,7 @@ def _preview(names, want):
     for n in names:
         rs = registry.rigs[n]
         card = sync.cached_card(rs)
-        entry = {"folders": [], "bytes": 0, "skipped_reason": None, "followers": [],
+        entry = {"folders": [], "bytes": 0, "skipped_reason": None, "followers": [], "warnings": [],
                  "engine_running": card.get("engine_running"), "phase": rs.phase}
         if rs.phase == "running":
             entry["skipped_reason"] = "a session is running"
@@ -150,13 +150,20 @@ def _preview(names, want):
             entry["skipped_reason"] = card.get("error") or "leader unreachable"
         elif card.get("engine_running"):
             entry["skipped_reason"] = "the experiment engine is running on the leader"
+        elif card.get("proto_outdated"):
+            entry["skipped_reason"] = sync.DEPLOY_NEEDED
         else:
             for f in card["folders"]:
                 if want == "red" and f["status"] != "green":
                     entry["folders"].append(f)
-                elif want == "green" and f["status"] == "green" and not f.get("n_unconsolidated") and not f.get("video_only"):
+                # verified video-only folders count too: the purge checks and deletes tree by tree
+                elif want == "green" and f["status"] == "green" and not f.get("n_unconsolidated"):
                     entry["folders"].append(f)
             entry["bytes"] = sum(f.get("bytes", 0) for f in entry["folders"])
+            stuck = [f for f in entry["folders"] if want == "red" and f["status"] in ("missing", "grey")]
+            if stuck:
+                entry["warnings"].append("this rig will stay ON — these can't be verified: " + "; ".join(
+                    f"{f['key'].split('/')[1]} ({f.get('reason') or f['status']})" for f in stuck))
         if want == "red":
             for pi in rs.followers():
                 entry["followers"].append({"name": pi["name"], "ip": pi["ip"], "ssh_ok": ssh_ok(ssh_target(pi))})
@@ -199,7 +206,10 @@ def api_purge():
     data = request.json or {}
     if not data.get("confirm"):
         return jsonify({"ok": False, "error": "confirm required"}), 400
-    items = {r: list(f) for r, f in (data.get("items") or {}).items() if r in registry.rigs}
+    # early filter only: purge_folders re-verifies every folder against a fresh inventory
+    items = {r: [f for f in (fs or []) if isinstance(f, str) and sync.FOLDER_KEY_RE.match(f)]
+             for r, fs in (data.get("items") or {}).items() if r in registry.rigs}
+    items = {r: fs for r, fs in items.items() if fs}
     if not items:
         return jsonify({"ok": False, "error": "nothing selected"}), 400
     job = Job("purge", list(items.keys()), {"items": items})

@@ -1,4 +1,4 @@
-last_saved: '2026-09-14'
+last_saved: '2026-09-15'
 stimulus:
   background_gray: 0.1
   size_deg: 16
@@ -16,7 +16,7 @@ stimulus:
 reward:
   amount_ul: 4
   amount_mode: count
-  amount_count: 2
+  amount_count: 1
   pulse_gap_ms: 500
   level: 1
   reward_delay_s: 0.6
@@ -29,12 +29,12 @@ reward:
   resp_delay_s: 0.1
 session:
   n_blocks: 1
-  block_size: 60
+  block_size: 120
   block_sequence:
-  - 30
-  iti:
-  - 45
   - 60
+  iti:
+  - 15
+  - 45
   prestim_duration: 0
   poststim_duration: 6.5
   global_delay: 0

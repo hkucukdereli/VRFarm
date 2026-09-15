@@ -3,7 +3,7 @@
 Standalone tools for calibrating the parabolic projection screen, plus the warp-map
 generator the experiment uses. The single source of truth is **`rig_geometry.yaml`**
 (see [geometry_params.md](geometry_params.md) for every field). The Rig Setup UI loads
-the same file into editable boxes; `cheese.yaml` points a rig at its file via
+the same file into editable boxes; `rigs/<rig>.yaml` points a rig at its file via
 `display.geometry_file`.
 
 ```
@@ -30,7 +30,7 @@ rig_geometry.yaml ──► compute_warp_map.py ──► warp_map.npz  (used by
 **1. Type the numbers (Rig Setup UI).** Load the rig → the Display device card shows
 editable boxes for screen / projector / mouse params (incl. `horizontal_stretch` /
 `vertical_stretch`). Change any value and hit **Save Rig** — that writes both the rig
-config (`cheese.yaml`) and the geometry (`rig_geometry.yaml`) in one click. Then
+config (`rigs/<rig>.yaml`) and the geometry (`rig_geometry.yaml`) in one click. Then
 **Generate Warp** rebuilds `warp_map.npz` and pushes it (and `rig_geometry.yaml`) to the
 Pis. Toggle **Apply warp** to switch the experiment between warped / unwarped rendering.
 

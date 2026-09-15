@@ -14,7 +14,8 @@ imperative loop in `engine/leader.py`. Devices are pluggable. Named after cheese
 
 **Current rig:** `cheddar` — Leader `cheddar` (192.168.10.101, **Pi 5**),
 Follower `cheddar-dlp` (192.168.10.102, **Pi 4**, drives the projector).
-Live rig config is `rigs/cheddar.yaml` (NOT cheese.yaml, which is its tracked twin).
+Live rig config is `rigs/cheddar.yaml` — gitignored (it carries the Slack webhook), so the live
+config has no copy in git; `rigs/_template.yaml` is the tracked template.
 
 **Controller:** `fystyk` (192.168.10.1), **Ubuntu 26.04 LTS** (Linux, not a Mac), env `vrfarm`
 (Python 3.11) at `~/miniforge3/envs/vrfarm`. Rig link is the 10G SFP+ card `enp6s0` — see Network.

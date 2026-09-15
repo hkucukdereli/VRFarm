@@ -113,7 +113,8 @@ sudo mount /dev/sda1 /media/vruser/ssd
 echo "/dev/sda1 /media/vruser/ssd ext4 defaults,nofail 0 2" | sudo tee -a /etc/fstab
 ```
 
-Then set `data.video_dir` in `rigs/cheese.yaml` to the video directory on the SSD.
+Then set `data.video_dir` in the rig YAML (`rigs/<rig>.yaml`, e.g. `rigs/cheddar.yaml`) to the
+video directory on the SSD.
 
 ### 6. Screen calibration
 
@@ -165,7 +166,7 @@ python controller/app.py    # opens localhost:5000 -> Experiment tab -> Load rig
 
 ### Step 2 — Load Rig
 
-Select the rig (`cheese`) from the dropdown and click **Load Rig**. This connects to
+Select the rig (`cheddar`) from the dropdown and click **Load Rig**. This connects to
 both Pis over the REST API **and initializes every enabled device** (display/projector,
 lick sensor, reward valve, camera, photodiode) in one step — there is no separate
 "Connect" button. Pis show green when they respond; any device that fails to init reports
@@ -425,5 +426,5 @@ adaptive:
   enabled: false
 ```
 
-**Rig config** (`rigs/cheese.yaml`): hardware-fixed values (pins, calibrations, Pi
+**Rig config** (`rigs/<rig>.yaml`, e.g. `rigs/cheddar.yaml`): hardware-fixed values (pins, calibrations, Pi
 IPs/roles, network ports, `data.video_dir`). Edited in the setup UI, not per-session.

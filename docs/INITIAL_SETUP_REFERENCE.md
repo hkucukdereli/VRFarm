@@ -444,7 +444,7 @@ The Pis reach NTP over their WiFi (`wlan0`); the wired experiment switch has no 
 
 ```
 Zyxel XGS1210-12 switch (experiment traffic)   web UI 192.168.10.254 (static; factory 192.168.1.3)
-├── port 11   10G SFP+ (DAC)  Controller  192.168.10.1    (fystyk: enp6s0, Intel 82599ES)
+├── port 11   10G SFP+ (DAC)  Controller  192.168.10.1    (fystyk: Intel 82599ES, netplan rig0)
 ├── ports 1-2 1G RJ45         Leader      192.168.10.101  (eth0 static)
 │                             Follower    192.168.10.102  (eth0 static)
 └── port 12   10G SFP+        spare, reserved for a second switch

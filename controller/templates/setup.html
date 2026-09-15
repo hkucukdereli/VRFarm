@@ -382,7 +382,7 @@ async function loadRig() {
 
 async function saveRig() {
   if (!rig) return;
-  // Save rig hardware config (cheese.yaml) ...
+  // Save rig hardware config (the rig YAML) ...
   await fetch(SAPI + '/save', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(rig)
@@ -781,7 +781,7 @@ async function checkWarp() {
     warpExists = data.exists;
   } catch (e) { warpExists = false; }
   await loadGeoList();
-  // Load the geometry file this rig points to (cheese.yaml -> display.geometry_file).
+  // Load the geometry file this rig points to (the rig YAML -> display.geometry_file).
   const want = (rig && rig.devices && rig.devices.display
                 && rig.devices.display.geometry_file) || 'rig_geometry.yaml';
   const name = geoFiles.includes(want) ? want : (geoFiles[0] || 'rig_geometry.yaml');

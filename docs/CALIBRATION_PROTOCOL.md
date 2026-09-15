@@ -1,6 +1,6 @@
 # Rig Calibration Protocol
 
-**Rig:** `rigs/cheese.yaml` (listed as `cheese` in the UI dropdowns) — display on the Follower (RPi4 + DLP **rear-projector**) + parabolic screen; reward valve on the Leader
+**Rig:** `rigs/cheddar.yaml` (listed as `cheddar` in the UI dropdowns) — display on the Follower (RPi4 + DLP **rear-projector**) + parabolic screen; reward valve on the Leader
 **Last updated:** 2026-08-03
 **Files:** `display_calibration/` in the repo (on the controller); `~/rig/calibration/` on the follower
 

@@ -2,8 +2,8 @@
 
 **Project:** VRFarm
 **Last updated:** 2026-08-11
-**Current rig:** `rigs/cheese.yaml` — rig `cheese`, hosts `cheddar` (Leader) and
-`mozzarella` (Follower). The UI dropdowns list the filename, so it appears as `cheese`.
+**Current rig:** `rigs/cheddar.yaml` — rig `cheddar`, hosts `cheddar` (Leader) and
+`cheddar-dlp` (Follower). The UI lists rigs by filename, so it appears as `cheddar`.
 
 This is the first-time **rig bring-up** reference: hardware, network/IPs, OS, conda
 Pi bring-up, envs, package installs, GPIO (lgpio), projector startup, systemd service, SSH keys, gotchas.
@@ -162,7 +162,7 @@ sudo -n true && echo "passwordless sudo OK"
 - Boots from **NVMe SSD** — no more tiny-SD-card churn; video can live on the NVMe.
 - **GPIO is lgpio, not pigpio** (Pi 5's RP1 GPIO — `pigpio`/`pigpiod` don't work). No daemon; see the
   GPIO section below. Header controller is `gpiochip0` on current OS (`gpiodetect` to confirm; set
-  `gpiochip: 4` on the device in `rigs/cheese.yaml` only on very early Pi 5 images).
+  `gpiochip: 4` on the device in the rig YAML (`rigs/<rig>.yaml`) only on very early Pi 5 images).
 - The setup UI **Install** needs **miniforge already present** (`~/miniforge3`); it creates the `rig`
   env but doesn't install conda itself.
 
@@ -225,14 +225,15 @@ gpiodetect        # the 40-pin header controller should be 'pinctrl-rp1' (Pi 5) 
 
 The device code opens `gpiochip0` by default (correct for Pi 5 on current OS and for Pi 4). Only very
 early Pi 5 images exposed the header as `gpiochip4` — if a GPIO claim fails, set `gpiochip: 4` on the
-device in `rigs/cheese.yaml`.
+device in the rig YAML (`rigs/<rig>.yaml`).
 
 ### SSD mount for video
 
 Camera video (H.264) writes to the rig yaml's `data.video_dir`. The default is
 `/media/vruser/ssd/video` (an external SSD, because the leader's SD card is too full to
-hold video); the current `rigs/cheese.yaml` points it at `/home/vruser/data` instead.
-If you use the SSD:
+hold video). `rigs/cheddar.yaml` instead uses `/home/vruser/video`, a plain folder on the
+leader's boot NVMe — the Pi 5 boots from NVMe, so it needs no separate video drive.
+If you use an external SSD:
 
 ```bash
 sudo mkdir -p /media/vruser/ssd
@@ -356,7 +357,7 @@ cd ~/VRFarm
 python controller/app.py    # opens localhost:5000 -> Setup tab
 ```
 
-1. **Load Rig** (`cheese`) — also checks SSH + the REST API on each Pi (`/api/status`)
+1. **Load Rig** (`cheddar`) — also checks SSH + the REST API on each Pi (`/api/status`)
    automatically. There is no separate Connect button; the per-Pi **Check** button re-runs it.
 2. **Install** (first time, via SSH): ensures the `rig` conda env matched to system
    Python, installs the device-specific apt/pip packages, symlinks the camera and lgpio

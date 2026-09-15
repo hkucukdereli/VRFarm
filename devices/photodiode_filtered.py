@@ -10,7 +10,8 @@ it does nothing until re-enabled. To go back to on-Pi filtering:
   1. Restore this file's logic into devices/photodiode.py (or `git checkout <rev> -- devices/photodiode.py`).
   2. Un-stash the "Steady filter" / "Hold-off" controls in setup/templates/setup.html
      (search for "DEPRECATED photodiode filter controls").
-  3. cheese.yaml already carries glitch_*/debounce_* keys, so no config change is needed.
+  3. Make sure the rig YAML's photodiode device carries the glitch_*/debounce_* keys (add them
+     back to any rig that was cleaned of them).
 
 GPIO input via pigpio hardware callbacks (microsecond resolution).
 """

@@ -8,7 +8,7 @@
 #   python app/app.py                # experiment UI  -> rig = demo
 #   python setup/app.py              # setup UI       -> rig = demo
 #
-# Device values below mirror rigs/cheese.yaml so every card in the setup UI and
+# Device values below mirror the live rig (cheddar) so every card in the setup UI and
 # every panel in the experiment UI renders with realistic content.
 data:
   leader_dir: /home/vruser/data

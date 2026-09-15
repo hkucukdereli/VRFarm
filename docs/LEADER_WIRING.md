@@ -1,10 +1,10 @@
 # Leader — Hardware Wiring Reference
 
-Pin assignments for **the Leader Pi** on rig **cheese** (192.168.10.101).
-Source of truth for the live pins is [`rigs/cheese.yaml`](../rigs/cheese.yaml) — if you
-change a pin there, update this table. The **Future expansion** section below reserves
-pins on paper for hardware not yet wired (no device class yet, so nothing is in
-`cheese.yaml` for those rows).
+Pin assignments for **the Leader Pi** on rig **cheddar** (192.168.10.101).
+Source of truth for the live pins is `rigs/cheddar.yaml` on the controller — untracked (it
+carries the rig's Slack webhook), so it has no copy in git — if you change a pin there,
+update this table. The **Future expansion** section below reserves pins on paper for
+hardware not yet wired (no device class yet, so nothing is in the rig YAML for those rows).
 
 **GPIO numbering is BCM**, not physical pin position. The 40-pin header pinout is
 **identical on Pi 4B and Pi 5**, so this map holds for either board — only the GPIO
@@ -54,7 +54,7 @@ follow the diode's drifting idle level. Set `ADAPTIVE = false` for the fixed pai
 (`THRESHOLD_HI_V = 1.8` / `THRESHOLD_LO_V = 0.6`). Flash with `DEBUG = 0` for production.
 
 This **replaces the old on-Pi debounce/glitch model**: the
-`debounce_*` / `glitch_*` keys still present in `cheese.yaml` are now **inert**, and
+`debounce_*` / `glitch_*` keys still present in the rig YAML are now **inert**, and
 `photodiode.py` explicitly clears the Pi glitch filter so the Teensy edges pass untouched.
 
 ### I²C bus (both sensors — daisy-chained)
@@ -79,7 +79,7 @@ four nets on to the second. This works only because the addresses differ:
 ## Future expansion (reserved on paper)
 
 Planned headroom: **+3 general-purpose TTL inputs** and **+3 TTL outputs**. Pins are chosen
-below by the [selection rules](#gpio-selection-rules); they are **not** in `cheese.yaml`
+below by the [selection rules](#gpio-selection-rules); they are **not** in the rig YAML
 yet (no `ttl_in` / `ttl_out` device class exists — add one modeled on `photodiode.py` for
 inputs and a latched-output helper for outputs, then register the pins).
 
@@ -189,7 +189,7 @@ Why the pins landed where they did — reuse these when adding hardware:
   - **Pi 4B (`main` branch — the leader today)** — `pigpio` with the `pigpiod` daemon running
     (`sudo pigpiod` / the `pigpiod` service).
   - **Pi 5 (`dev-pi5` branch)** — `lgpio`, opening **`gpiochip0`** (the 40-pin
-    header). No daemon; works on the Pi 4 too. Override the chip in `cheese.yaml` with
+    header). No daemon; works on the Pi 4 too. Override the chip in the rig YAML with
     `gpiochip:` if an early Pi 5 image enumerates the header as `gpiochip4`; confirm with
     `gpiodetect`. The pin map is identical. (Background: `PI5_LEADER_FEASIBILITY.md` in the
     local-only `docs/assets/` stash.)

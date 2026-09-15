@@ -105,20 +105,24 @@ One job runs at a time; inside a job the rigs run in parallel.
 
 | Piece | Where | Installed by |
 |---|---|---|
-| `rsync` >= 3.1 | controller | `conda install -n vrfarm -c conda-forge rsync` — `rsync_path: null` looks only in the env. On Linux, `rsync_path: /usr/bin/rsync` in `controller.yaml` works too (fystyk's env has no rsync, so it needs one of the two). On macOS `/usr/bin/rsync` is Apple's openrsync and is rejected with a banner in the Data tab. |
+| `rsync` >= 3.1 | controller | `conda install -n vrfarm -c conda-forge rsync` — `rsync_path: null` looks only in the env. On Linux, `rsync_path: /usr/bin/rsync` in `controller/configs/controller.yaml` works too (fystyk's env has no rsync, so it needs one of the two). On macOS `/usr/bin/rsync` is Apple's openrsync and is rejected with a banner in the Data tab. |
 | `rsync` | every Pi | the Install step's apt list |
 | `shared/leader_data.py` | leader Pis | rides Deploy and Install (`shared/deploy_manifest.py`) |
 
 A rig installed before this change needs a **Deploy** (ships `leader_data.py`) and either a
 re-**Install** or `sudo apt install rsync` on the leader. The Data tab says which is missing.
 
-## Settings: `controller.yaml`
+## Settings: `controller/configs/controller.yaml`
 
-Machine-specific, gitignored, created from `controller.example.yaml` on first run: UI port,
-the controller's IP (for the diagram), the event port, data root, auto purge, the rsync path,
-sync tuning (`parallel_rigs`, `bwlimit_mbps`, `verify_checksum_before_purge`,
+Machine-specific, gitignored, created on first run from `controller.example.yaml` in the same
+folder: UI port, the controller's IP (for the diagram), the event port, data root, auto purge, the
+rsync path, sync tuning (`parallel_rigs`, `bwlimit_mbps`, `verify_checksum_before_purge`,
 `shepherd_logs_keep_days`) and the rig groups. Per-rig settings stay in `rigs/<rig>.yaml`.
 `VRFARM_SETTINGS=<path>` points the app at another file (the tests use a scratch one).
+
+The file used to sit at the repo root. A `controller.yaml` still there is moved into
+`controller/configs/` the next time the controller starts; if one already exists there, that one
+wins and the old file is ignored (the log says so).
 
 ## Calibration files per rig
 

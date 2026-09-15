@@ -1,4 +1,5 @@
-# VRFarm controller settings — copy to controller.yaml (gitignored, machine-specific).
+# VRFarm controller settings. On first run the controller copies this to controller.yaml in the
+# same folder (controller/configs/, gitignored, machine-specific) — edit that copy, not this file.
 # Everything here is controller-wide; per-rig settings stay in rigs/<rig>.yaml.
 
 ui_port: 5000                 # the one web UI port (use 5055 if macOS AirPlay squats 5000)

@@ -1,4 +1,4 @@
-last_saved: '2026-07-20'
+last_saved: '2026-08-24'
 stimulus:
   background_gray: 0.75
   size_deg: 12
@@ -11,7 +11,7 @@ stimulus:
     - 1
     proportions:
     - 1
-  photodiode_sync_enabled: false
+  photodiode_sync_enabled: true
   photodiode_sync_every_n: 5
 reward:
   amount_ul: 4
@@ -24,9 +24,10 @@ reward:
   pav_delay_s: 0.5
   timeout_rule: count
   max_lick_rate: 0.45
-  timeout_phases: [iti]
+  timeout_phases:
+  - iti
 session:
-  grace_period_s: 10           # seconds to wait after GO before trials start
+  grace_period_s: 10
   n_blocks: 4
   block_size: 2
   block_sequence:
@@ -43,6 +44,8 @@ session:
   block_delay: 0
   block_delay_skip_first: false
   randomize_blocks: false
+  global_timeout_trials: 0
+  global_timeout_phases: []
 adaptive:
   enabled: false
   initial_state: 0

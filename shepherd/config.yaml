@@ -28,6 +28,11 @@ shepherd:
     enabled: true
     url: http://127.0.0.1:5080/api/status
     timeout_s: 2.0
+    # How long pi_api may be unreachable before api_health alerts. Deploy and Restart API restart
+    # pi_api on purpose; the controller times each restart and writes the measured outage x 1.5
+    # (5-60 s) to api_grace.json next to this file, which then replaces this default. No grace
+    # while a session is running: pi_api is never restarted on purpose mid-session.
+    grace_default_s: 10.0
 
   # Where warnings/criticals are sent so they appear in the experiment-UI log.
   # host = the controller; port = its UDP event port (network.event_port in the rig yaml).
@@ -127,8 +132,10 @@ metrics:
     recover_msg: "SoC throttle cleared"
 
   # ── API health ── critical when the local pi_api stops answering. This is the
-  # wedge an in-process monitor could never report.
+  # wedge an in-process monitor could never report. Outside a session it waits out the
+  # grace period first (api_probe.grace_default_s / api_grace.json); during a session it
+  # alerts on the first failed probe. Placeholders: {error}, {down_s}, {grace_s}.
   api_health:
     enabled: true
-    critical_msg: "pi_api not responding ({error}) — session control/telemetry is down"
+    critical_msg: "pi_api not responding for {down_s} s ({error}) — session control/telemetry is down"
     recover_msg: "pi_api responding again"

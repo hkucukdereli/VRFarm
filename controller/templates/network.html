@@ -59,7 +59,7 @@
         <button class="btn btn-sm" onclick="closeDrawer()">Cancel</button>
         <button class="btn btn-sm btn-green" onclick="saveDrawer()">Save</button>
       </div>
-      <div class="muted" style="margin-top:6px">Devices: comma-separated names from the rig's device list (e.g. lick_sensor, reward, photodiode, camera, encoder / display). Device settings themselves live in Setup.</div>
+      <div class="muted" style="margin-top:6px">Devices: comma-separated names of the devices this Pi runs. Each needs a devices/&lt;type&gt;.py and a block under the rig's <code>devices:</code>; their settings live in Setup. This branch ships none.</div>
       <div id="d-error" style="color:#f88; font-size:12px; margin-top:4px"></div>
     </div>
 
@@ -181,8 +181,7 @@ async function startCreate() {
   document.getElementById('d-error').textContent = '';
   const s = await api('GET', '/api/network/suggest_ips');
   document.getElementById('d-pis').innerHTML =
-    piRowHtml({name: '', ip: s.leader, role: 'leader', user: 'vruser', devices: ['lick_sensor', 'reward', 'photodiode', 'camera', 'encoder']}) +
-    piRowHtml({name: '', ip: s.follower, role: 'follower', user: 'vruser', devices: ['display']});
+    piRowHtml({name: '', ip: s.leader, role: 'leader', user: 'vruser', devices: []});
   document.getElementById('drawer').classList.add('open');
   document.getElementById('d-name').oninput = () => {
     const n = document.getElementById('d-name').value.trim();

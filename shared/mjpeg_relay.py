@@ -1,7 +1,7 @@
 """
 shared/mjpeg_relay.py
 
-Reconnecting MJPEG relay for the controller UIs. Both Flask apps (app/app.py, setup/app.py) proxy the
+Reconnecting MJPEG relay for the controller. The Experiment and Setup tabs (controller/) proxy the
 Pi's /api/camera_stream so the browser <img> stays same-origin. A one-shot proxy turned every transient
 Pi hiccup — pi_api restart at Deploy, the preview->record swap at Go, a brief reconfigure, or the <img>
 connecting before the preview is up (Pi returns 400 "Camera not streaming") — into a silent HTTP-200

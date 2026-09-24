@@ -6,7 +6,7 @@ UI end-to-end WITHOUT real hardware.
 Run it alongside the controller, using the `demo` rig:
 
     python tools/mock_pi.py            # this fake Pi:  HTTP :5080  + UDP :5572
-    python app/app.py --no-browser     # the real controller
+    python controller/app.py --no-browser   # the real controller (Experiment tab, rig demo)
 
 Then in the browser: rig = demo → Load Rig → Deploy → Go. The mock answers every pi_api
 call as OK so Deploy/Go succeed (its /api/logs contains the literal "Waiting for START

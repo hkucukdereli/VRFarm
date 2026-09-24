@@ -30,6 +30,8 @@ _LEADER = [
     ("engine/__init__.py", "engine/__init__.py"),
     ("engine/leader.py", "engine/leader.py"),
     ("shepherd/shepherd.py", "shepherd/shepherd.py"),
+    # the controller's Data tab runs this over SSH: inventory / consolidate / purge / prune-logs
+    ("shared/leader_data.py", "shared/leader_data.py"),
 ]
 
 

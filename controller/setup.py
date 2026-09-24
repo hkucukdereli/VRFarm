@@ -11,6 +11,7 @@ branch ships none, and a project's devices/*.py self-register on the Pi.
 from __future__ import annotations
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -136,11 +137,15 @@ def api_install_pi():
     conda_activate = ("source ~/miniforge3/etc/profile.d/conda.sh && "
                       "conda activate rig && ")
     needs_i2c = any(t in I2C_DEVICE_TYPES for t in dev_types.values())
+    # camera-like devices (rig config `video: true`) capture through ffmpeg / v4l2
+    needs_video = any((dev_cfgs.get(d) or {}).get("video") for d in devices)
 
     try:
-        # 1. Directories
-        ssh(ssh_prefix, "mkdir -p ~/rig ~/data")
-        steps.append("Created ~/rig ~/data")
+        # 1. Directories (~/video is where video devices record by default), and the
+        #    hardware-access groups the Pi user needs (idempotent; usually already set).
+        ssh(ssh_prefix, "mkdir -p ~/rig ~/data ~/video")
+        steps.append("Created ~/rig ~/data ~/video")
+        ssh(ssh_prefix, f"sudo usermod -aG dialout,i2c,video,gpio {user} || true", timeout=15)
 
         # 1a. One time zone on every Pi, so their logs line up (recorded data is Unix time).
         ssh(ssh_prefix, "sudo timedatectl set-timezone Europe/Vienna", timeout=20)
@@ -159,6 +164,9 @@ def api_install_pi():
         # 2. System packages. rsync on every Pi: the Data tab syncs sessions off the leaders with
         #    rsync over SSH. Then whatever this Pi's device types declare.
         apt_packages = ["rsync"]
+        if needs_video:
+            # ffmpeg captures and does the consolidation remux; v4l-utils probes formats
+            apt_packages += ["ffmpeg", "v4l-utils"]
         for t in dev_types.values():
             apt_packages += [p for p in DEVICE_APT_PACKAGES.get(t, []) if p not in apt_packages]
         apt_str = " ".join(apt_packages)
@@ -191,8 +199,12 @@ def api_install_pi():
             scp(str(ROOT / local), f"{ssh_prefix}:~/rig/{remote}")
         steps.append(f"Deployed {len(files_to_deploy)} files")
 
-        # 5. vrfarm.service (pi_api)
-        scp(str(ROOT / "pi_api" / "vrfarm.service"), f"{ssh_prefix}:/tmp/vrfarm.service")
+        # 5. vrfarm.service (pi_api), rendered for this Pi's user
+        unit = _render_unit(ROOT / "pi_api" / "vrfarm.service", user)
+        try:
+            scp(unit, f"{ssh_prefix}:/tmp/vrfarm.service")
+        finally:
+            os.unlink(unit)
         ssh(ssh_prefix,
             "sudo cp /tmp/vrfarm.service /etc/systemd/system/ && "
             "sudo systemctl daemon-reload && sudo systemctl enable vrfarm && "
@@ -205,7 +217,11 @@ def api_install_pi():
         #     Pi-side edits survive a re-Install; the Monitor toggle decides up or down.
         if role == "leader":
             shepherd_on = data.get("shepherd_enabled", True)
-            scp(str(ROOT / "shepherd" / "shepherd.service"), f"{ssh_prefix}:/tmp/shepherd.service")
+            unit = _render_unit(ROOT / "shepherd" / "shepherd.service", user)
+            try:
+                scp(unit, f"{ssh_prefix}:/tmp/shepherd.service")
+            finally:
+                os.unlink(unit)
             scp(str(ROOT / "shepherd" / "config.yaml"), f"{ssh_prefix}:/tmp/shepherd.config.yaml")
             svc_cmd = ("sudo systemctl enable shepherd && sudo systemctl restart shepherd"
                        if shepherd_on else
@@ -252,6 +268,17 @@ def api_shutdown_pi():
     except Exception:
         pass
     return jsonify({"ok": True})
+
+
+def _render_unit(local_path, user: str) -> str:
+    """A systemd unit rendered for one Pi: {{USER}} and {{HOME}} in the template become the
+    rig YAML's pis[].user and /home/<user>, so a Pi whose user is not vruser gets a working
+    unit. Returns the temp file to scp; the caller removes it."""
+    text = Path(local_path).read_text().replace("{{USER}}", user).replace("{{HOME}}", f"/home/{user}")
+    fd, tmp = tempfile.mkstemp(suffix=".service")
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    return tmp
 
 
 def _pi_entry(rs: RigState, ip: str, role: str | None = None) -> dict:

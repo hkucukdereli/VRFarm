@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>VRFarm Experiment</title>
+<title>VRFarm Experiment — {{ rig }}</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -111,12 +111,9 @@
   <!-- Sidebar -->
   <div class="sidebar">
     <div class="card">
-      <h3>Rig</h3>
-      <select id="rig-select">
-        {% for r in rigs %}<option value="{{ r }}">{{ r }}</option>{% endfor %}
-      </select>
+      <h3>Rig <span id="rig-name" style="font-weight:normal; color:#7ac142;">{{ rig }}</span></h3>
       <div class="btn-row">
-        <button class="btn btn-blue" id="btn-load-rig" onclick="loadRig()">Load Rig</button>
+        <button class="btn btn-blue" id="btn-load-rig" onclick="loadRig()">Connect</button>
       </div>
       <div id="pi-status"></div>
     </div>
@@ -205,11 +202,6 @@
         <button class="btn btn-sm btn-blue" id="btn-live" onclick="toggleLive()" disabled>Live</button>
       </div>
       <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:8px;">
-        <button class="btn btn-teal" id="btn-transfer" onclick="transferData()" disabled>Transfer</button>
-        <input type="text" id="transfer-dest" placeholder="transfer destination (controller default)"
-               title="Destination folder for transferred data. Blank = controller default ($VRFARM_DATA_DIR or ~/VRFarm/data)."
-               style="flex:1; min-width:160px; padding:4px 6px; background:#2a2a2a; color:#ddd; border:1px solid #444; border-radius:3px;">
-        <button class="btn btn-sm btn-blue" id="btn-browse-dest" onclick="browseDest()">Browse…</button>
         <span style="display:inline-flex; align-items:center; gap:8px; font-size:11px; color:#888; white-space:nowrap;">
           <span title="Which device data to record this session. Unchecked = not saved (video devices still livestream).">Save:</span>
           <span id="save-devices" style="display:inline-flex; gap:8px;"></span>
@@ -248,6 +240,10 @@
 </div>
 
 <script>
+// This page is scoped to ONE rig (the controller hosts one copy per rig, in an iframe).
+const RIG = {{ rig|tojson }};
+const API = '/api/rigs/' + encodeURIComponent(RIG);
+function api(p) { return API + p; }
 // ── State ──
 let config = null;
 let phase = 'setup';
@@ -285,23 +281,16 @@ async function loadRig() {
   _lockUI();
   const btn = document.getElementById('btn-load-rig');
   btn.textContent = 'Loading...';
-  const rig = document.getElementById('rig-select').value;
-  log('Loading rig ' + rig + '...');
+  log('Connecting to ' + RIG + '...');
   try {
-    const r = await fetch('/api/load_rig', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({rig})
+    const r = await fetch(api('/load_rig'), {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
     });
     const data = await r.json();
     if (data.error) { log('Error: ' + data.error); return; }
 
     // Keep any experiment that is already loaded (the server leaves task_config alone too).
     config = {rig: data.rig, task: (config && config.task) || null};
-    // Pre-fill the transfer destination with the rig default (only if the user hasn't set one)
-    const _destField = document.getElementById('transfer-dest');
-    if (_destField && !_destField.value && data.data_dir) {
-      _destField.value = data.data_dir;
-    }
     renderVideoPanels();
     renderSaveDevices();
     buildPiStatus();
@@ -348,7 +337,7 @@ async function loadTask() {
   const task = document.getElementById('task-select').value;
   log('Loading experiment ' + task + '...');
   try {
-    const r = await fetch('/api/load_task', {
+    const r = await fetch(api('/load_task'), {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({task})
     });
@@ -426,11 +415,11 @@ function updateSessionHint() {
 
 async function saveTask() {
   const fields = collectTaskFields();
-  await fetch('/api/update_task', {
+  await fetch(api('/update_task'), {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(fields)
   });
-  const r = await fetch('/api/save_task', {method: 'POST'});
+  const r = await fetch(api('/save_task'), {method: 'POST'});
   const data = await r.json();
   if (data.ok) {
     document.getElementById('task-last-saved').textContent = 'Last saved: ' + (data.last_saved || '--');
@@ -446,11 +435,11 @@ async function saveTaskAs() {
   const name = prompt('Save experiment as:', current + '_copy');
   if (!name) return;
   const fields = collectTaskFields();
-  await fetch('/api/update_task', {
+  await fetch(api('/update_task'), {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(fields)
   });
-  const r = await fetch('/api/save_task_as', {
+  const r = await fetch(api('/save_task_as'), {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({name})
   });
@@ -481,7 +470,7 @@ function getSession() {
 }
 
 async function updateSession() {
-  const r = await fetch('/api/update_session', {
+  const r = await fetch(api('/update_session'), {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(getSession())
   });
@@ -563,18 +552,18 @@ async function deployExperiment() {
   try {
     // Save task params to YAML before deploy
     const fields = collectTaskFields();
-    await fetch('/api/update_task', {
+    await fetch(api('/update_task'), {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(fields)
     });
-    const saveR = await fetch('/api/save_task', {method: 'POST'});
+    const saveR = await fetch(api('/save_task'), {method: 'POST'});
     const saveData = await saveR.json();
     if (saveData.ok) {
       document.getElementById('task-last-saved').textContent = 'Last saved: ' + (saveData.last_saved || '--');
     }
     await updateSession();
     log('Deploying...');
-    const r = await fetch('/api/deploy', {method: 'POST'});
+    const r = await fetch(api('/deploy'), {method: 'POST'});
     const data = await r.json();
     (data.steps || []).forEach(s => log('  ' + s));
     if (data.ok) {
@@ -622,9 +611,9 @@ async function startSession() {
   document.querySelectorAll('.save-dev').forEach(cb => { save[cb.dataset.dev] = cb.checked; });
 
   try {
-    const r = await fetch('/api/go', {
+    const r = await fetch(api('/go'), {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({save, dest_dir: (document.getElementById('transfer-dest').value || '').trim(), estimate_ms: sessionEstimateMs})
+      body: JSON.stringify({save, estimate_ms: sessionEstimateMs})
     });
     const data = await r.json();
     (data.steps || []).forEach(s => log('  ' + s));
@@ -656,7 +645,7 @@ async function stopSession() {
   const btn = document.getElementById('btn-stop');
   btn.textContent = 'Stopping...';
   log('Stopping session...');
-  try { await fetch('/api/stop', {method: 'POST'}); } catch(e) {}
+  try { await fetch(api('/stop'), {method: 'POST'}); } catch(e) {}
   setPhase('ended');
   stopClock();
   stopLiveAll();
@@ -667,56 +656,11 @@ async function stopSession() {
   log('Session stopped.');
 }
 
-let transferring = false;
-
-async function transferData() {
-  transferring = true;
-  _lockUI();
-  const btn = document.getElementById('btn-transfer');
-  btn.textContent = 'Transferring...';
-  const dest = document.getElementById('transfer-dest').value.trim();
-  log('Transferring data...' + (dest ? ' -> ' + dest : ''));
-  try {
-    const r = await fetch('/api/transfer', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({dest_dir: dest})
-    });
-    const data = await r.json();
-    if (data.ok) {
-      log(`Transferred ${data.files.length} files.`);
-      data.files.forEach(f => log('  ' + f));
-    } else {
-      log('Transfer failed: ' + (data.error || ''));
-    }
-  } catch (e) {
-    log('Transfer error: ' + e.message);
-  }
-  transferring = false;
-  btn.textContent = 'Transfer';
-  _unlockUI();
-}
-
-async function browseDest() {
-  log('Opening folder picker...');
-  try {
-    const r = await fetch('/api/browse_folder', {method: 'POST'});
-    const data = await r.json();
-    if (data.ok) {
-      document.getElementById('transfer-dest').value = data.path;
-      log('Destination: ' + data.path);
-    } else if (data.error && data.error !== 'cancelled') {
-      log('Browse failed: ' + data.error);
-    }
-  } catch (e) {
-    log('Browse error: ' + e.message);
-  }
-}
-
 // ── SSE events ──
 
 function startSSE() {
   if (eventSource) eventSource.close();
-  eventSource = new EventSource('/api/events');
+  eventSource = new EventSource(api('/events'));
   eventSource.onmessage = function(e) {
     handleEvent(JSON.parse(e.data));
   };
@@ -794,7 +738,7 @@ function handleEvent(evt) {
 
 // ── Video feed helpers ──
 
-function _videoSrc(name) { return '/api/camera_feed?device=' + encodeURIComponent(name) + '&ts=' + Date.now(); }
+function _videoSrc(name) { return api('/camera_feed?device=') + encodeURIComponent(name) + '&ts=' + Date.now(); }
 
 // (Re)mount the MJPEG <img> for one device. The stream ends on any Pi-side teardown
 // (Deploy/GO swap); on a *clean* end the browser freezes on the last frame without firing
@@ -832,7 +776,7 @@ function _refreshVideoFeeds(delayMs) {
 async function _startVideos() {
   for (const name of _videoDeviceNames()) {
     try {
-      const r = await fetch('/api/camera_start', {
+      const r = await fetch(api('/camera_start'), {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({device: name})
       });
@@ -846,7 +790,7 @@ async function _startVideos() {
 async function _stopVideos() {
   for (const name of _videoDeviceNames()) {
     clearTimeout(videoRetries[name]);
-    try { await fetch('/api/camera_stop', {
+    try { await fetch(api('/camera_stop'), {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({device: name})
     }); } catch (e) {}
@@ -1037,6 +981,8 @@ const PHASE_ORDER = ['setup', 'connected', 'deployed', 'running', 'ended'];
 
 function setPhase(p) {
   phase = p;
+  // tell the shell, which colours this rig's tab
+  try { if (window.parent !== window) window.parent.postMessage({type: 'vrfarm:phase', rig: RIG, phase: p}, '*'); } catch (e) {}
   const steps = document.querySelectorAll('.phase-step');
   const idx = PHASE_ORDER.indexOf(p);
   steps.forEach((el, i) => {
@@ -1062,7 +1008,7 @@ function updateButtons() {
   const deployed = phase === 'deployed';
   const running = phase === 'running';
   const ended = phase === 'ended';
-  const busy = running || transferring || uiBusy;
+  const busy = running || uiBusy;
 
   document.getElementById('btn-load-rig').disabled = busy;
   // Experiments are loadable/editable WITHOUT a rig (deploy/GO still require rig+connect)
@@ -1072,12 +1018,10 @@ function updateButtons() {
   document.getElementById('btn-deploy').disabled = !(rigLoaded && taskLoaded && connected && !busy);
   document.getElementById('btn-go').disabled = !deployed || busy;
   document.getElementById('btn-stop').disabled = !running;
-  document.getElementById('btn-transfer').disabled = !ended || busy;
-  document.getElementById('btn-browse-dest').disabled = busy;
   document.getElementById('btn-live').disabled = !rigLoaded || busy;
   // Lock Quit only during a *running* session — Stop first (Stop stays enabled), then Quit.
-  // Deliberately NOT during transfer/transient ops: those have no Cancel, so Quit must stay
-  // available as the escape hatch (a stalled transfer would otherwise freeze the whole UI).
+  // Deliberately NOT during transient ops: those have no Cancel, so Quit must stay available
+  // as the escape hatch (a stalled operation would otherwise freeze the whole UI).
   document.getElementById('btn-quit').disabled = running;
 }
 
@@ -1100,7 +1044,7 @@ function log(msg, level) {
 async function quitApp() {
   if (!confirm('Quit VRFarm?')) return;
   if (phase === 'running') {
-    await fetch('/api/stop', {method: 'POST'}).catch(() => {});
+    await fetch(api('/stop'), {method: 'POST'}).catch(() => {});
     stopLiveAll();
   }
   await fetch('/api/quit', {method: 'POST'}).catch(() => {});
@@ -1126,6 +1070,26 @@ document.getElementById('experiment-subsections')
   });
 
 updateButtons();
+
+// ── shell integration ──
+// A hidden frame must not stream video: the shell says when this rig's tab is shown or hidden.
+// Setup announces a saved rig YAML; reconnect if nothing is running. The shell owns Quit.
+window.addEventListener('message', ev => {
+  const m = ev.data || {};
+  if (m.type === 'vrfarm:visible') {
+    document.querySelectorAll('img').forEach(img => {
+      if (m.visible) {
+        if (img.dataset.pausedSrc) { img.src = img.dataset.pausedSrc.replace(/ts=\d+/, 'ts=' + Date.now()); delete img.dataset.pausedSrc; }
+      } else if ((img.getAttribute('src') || '').includes('camera_feed')) {
+        img.dataset.pausedSrc = img.getAttribute('src'); img.removeAttribute('src');
+      }
+    });
+  } else if (m.type === 'vrfarm:reload-config') {
+    if (phase === 'setup' || phase === 'connected') { log('Rig config changed in Setup — reconnecting.'); loadRig(); }
+    else log('Rig config changed in Setup; it applies after this session (press Connect).');
+  }
+});
+if (window.parent !== window) { const q = document.getElementById('btn-quit'); if (q) q.style.display = 'none'; }
 </script>
 </body>
 </html>

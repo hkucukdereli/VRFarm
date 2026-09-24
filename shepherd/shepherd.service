@@ -1,6 +1,6 @@
 # shepherd — VRFarm rig health monitor (separate process from pi_api by design).
-# Rendered at Install time by setup/app.py ({{USER}}/{{HOME}} substituted).
-# Install on a rig Pi (after substituting by hand):
+# Rendered at Install time by controller/setup.py: {{USER}} and {{HOME}} become the Pi's
+# user and /home/<user>. To install by hand, substitute them first, then:
 #   sudo cp shepherd/shepherd.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now shepherd
 # It runs continuously and tags samples with session state via the pi_api probe;
@@ -12,7 +12,7 @@ After=network.target
 [Service]
 Type=simple
 User={{USER}}
-# Adjust the conda env path if different. shepherd needs only python + PyYAML.
+# shepherd needs only python + PyYAML; it runs from the rig conda env.
 ExecStart={{HOME}}/miniforge3/envs/rig/bin/python {{HOME}}/rig/shepherd/shepherd.py --config {{HOME}}/rig/shepherd/config.yaml
 Restart=always
 RestartSec=5

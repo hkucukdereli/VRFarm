@@ -1,0 +1,23 @@
+name: demo2
+# Second loopback mock rig, for the multi-rig smoke test (tools/smoke_multirig.py). A second
+# tools/mock_pi.py on API_PORT=5081 CMD_PORT=5582 plays it, so two rigs share 127.0.0.1 and the
+# controller has to tell their events apart by the `rig` field each event carries.
+data:
+  leader_dir: ''
+  video_dir: ''
+devices: {}
+network:
+  api_port: 5081
+  command_port: 5582
+  event_port: 5571
+pis:
+- devices: []
+  ip: 127.0.0.1
+  name: mock2-pi
+  role: leader
+  user: vruser
+shepherd:
+  enabled: false
+slack:
+  enabled: false
+  webhook_url: ''

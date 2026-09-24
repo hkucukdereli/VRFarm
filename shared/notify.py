@@ -2,7 +2,7 @@
 Slack notifications via incoming webhook.
 
 The webhook can be set two ways (configure() wins):
-  - configure(url): runtime override, e.g. app/app.py pushes it from the rig
+  - configure(url): runtime override, e.g. the controller pushes it from the rig
     config's `slack:` block at Load Rig. Read at call time, so it works even
     though this module is imported before the rig is loaded.
   - VRFARM_SLACK_WEBHOOK env var: legacy `export ...` before launch (fallback).
@@ -31,9 +31,13 @@ def _webhook() -> str:
     return _override if _override is not None else os.environ.get("VRFARM_SLACK_WEBHOOK", "").strip()
 
 
-def notify(text: str):
-    """Post text to Slack. Never raises, never blocks the caller. No-op if no webhook is set."""
-    url = _webhook()
+def notify(text: str, webhook=None):
+    """Post text to Slack. Never raises, never blocks the caller. No-op if no webhook is set.
+
+    webhook: None -> the configured override / VRFARM_SLACK_WEBHOOK (single-rig behaviour);
+             ''   -> explicitly off for this call;
+             str  -> post to that URL (the controller passes each rig's own webhook)."""
+    url = _webhook() if webhook is None else str(webhook).strip()
     if not url:
         return
 

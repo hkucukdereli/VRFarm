@@ -1,0 +1,19 @@
+# Template for a new rig (Network tab -> Add rig): the Pi rows come from the form, everything
+# else from here. Not a rig itself: files starting with '_' are skipped by the rig list.
+# This branch ships no devices; add them under devices: in Setup after creating the rig, each
+# as {type: <devices/<type>.py>, enabled: true, ...hardware config} (+ video: true for a camera).
+data:
+  leader_dir: /home/vruser/data
+  video_dir: /home/vruser/video
+devices: {}
+name: _template
+network:
+  api_port: 5080
+  command_port: 5572
+  event_port: 5571
+pis: []
+shepherd:
+  enabled: true
+slack:
+  enabled: false
+  webhook_url: ''

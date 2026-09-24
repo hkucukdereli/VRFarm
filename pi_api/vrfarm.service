@@ -1,6 +1,6 @@
-# Rendered at Install time by setup/app.py: {{USER}} / {{HOME}} are replaced with the
-# Pi's actual user (rig yaml pis[].user) before the unit is copied over. To install by
-# hand, substitute them yourself first.
+# Rendered at Install time by controller/setup.py: {{USER}} and {{HOME}} become the Pi's
+# actual user (rig yaml pis[].user) and /home/<user> before the unit is copied over. To
+# install by hand, substitute them yourself first.
 [Unit]
 Description=VRFarm Pi API
 After=network.target

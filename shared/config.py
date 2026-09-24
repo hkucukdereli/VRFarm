@@ -63,6 +63,26 @@ def save_rig(config: dict, path: Union[str, Path]):
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
 
+def save_rig_atomic(config: dict, path: Union[str, Path]):
+    """Save a rig YAML by writing a temp file next to it and renaming it into place, so a
+    crash mid-write can never leave a half-written (unparseable) rig config behind."""
+    import os
+    import tempfile
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".yaml", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as f:
+            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 # ── Helpers ──
 
 def get_leader_pi(rig: dict) -> dict:
@@ -71,6 +91,12 @@ def get_leader_pi(rig: dict) -> dict:
         if pi["role"] == "leader":
             return pi
     raise ValueError("No leader Pi in rig config")
+
+
+def get_follower_pis(rig: dict) -> list:
+    """Pi dicts with role='follower'. Empty on a leader-only rig, which is the
+    barebones default — the controller lists followers per rig and copes with none."""
+    return [pi for pi in rig["pis"] if pi.get("role") == "follower"]
 
 
 def make_session_id(subject_id: str, date_str: str, session_num: int) -> str:
@@ -94,8 +120,8 @@ def next_session_num(subject_id: str, today: str, db_dir: Union[str, Path]) -> i
 def register_session(subject_id: str, session_id: str, session_num: int,
                      date_str: str, task_config: dict,
                      db_dir: Union[str, Path],
-                     n_trials_completed: int = 0, notes: str = ""):
-    """Record a completed session in the subject database."""
+                     n_trials_completed: int = 0, notes: str = "", rig: str = ""):
+    """Record a completed session in the subject database (rig = which rig ran it)."""
     db_dir = Path(db_dir)
     db_dir.mkdir(parents=True, exist_ok=True)
     db_file = db_dir / f"{subject_id}.json"
@@ -117,6 +143,7 @@ def register_session(subject_id: str, session_id: str, session_num: int,
         "n_trials_planned": sess.get("n_trials", 0),
         "n_trials_completed": n_trials_completed,
         "notes": notes,
+        "rig": rig,
         "timestamp": datetime.now().isoformat(),
         # Full task config, so the paradigm details are queryable without schema assumptions.
         "task_config": task_config,
@@ -133,3 +160,27 @@ def get_subject_history(subject_id: str, db_dir: Union[str, Path]) -> list:
         return []
     with open(db_file) as f:
         return json.load(f).get("sessions", [])
+
+
+def photodiode_init_payload(cfg: dict) -> dict:
+    """The /api/init_photodiode payload both UIs send — one builder so the two can't
+    drift (the experiment UI once sent only gpio + long-dead glitch/debounce keys).
+    The optical-verify target (follower_ip/follower_api_port) is NOT included: the
+    setup UI adds it (its init order guarantees the follower display is up first);
+    the experiment UI must not (it shuts the setup display worker down at Load Rig
+    and runs its own verify later, at leader-engine init, over UDP)."""
+    return {
+        "gpio": cfg.get("gpio", 24),
+        "gpiochip": cfg.get("gpiochip", 0),
+        "pulse_every_n_frames": cfg.get("pulse_every_n_frames", 5),
+        "serial_port": cfg.get("serial_port"),          # Teensy USB for the amplitude stream
+        "v_high": cfg.get("v_high", 3.0),
+        "v_low": cfg.get("v_low", 0.3),
+        "v_window_s": cfg.get("v_window_s", 10.0),
+        "v_realert_s": cfg.get("v_realert_s", 30.0),
+        "verify_duration_s": cfg.get("verify_duration_s", 1.0),
+        "verify_enabled": cfg.get("verify_enabled", True),
+        "sync_corner": cfg.get("sync_corner"),
+        "sync_size_px": cfg.get("sync_size_px"),
+        "sync_brightness": cfg.get("sync_brightness"),
+    }

@@ -33,7 +33,7 @@ stream telemetry**, does not touch the HDF5, and writes only two plain files.
 | Memory used % | `/proc/meminfo` | 85% / 95% |
 | Disk write rate | `/proc/diskstats` | off by default |
 | Camera encode fps (while recording) | `pi_api /api/status` | 45 / 30 fps |
-| `pi_api` responsive | HTTP probe | critical if down |
+| `pi_api` responsive | HTTP probe | critical once down past the [grace period](#pi_api-grace-period); at once during a session |
 
 Every threshold, direction, and **message** is editable in [`config.yaml`](config.yaml).
 
@@ -43,13 +43,21 @@ Every threshold, direction, and **message** is editable in [`config.yaml`](confi
 - **critical** → red in the UI log, **and** a Slack message (so it reaches you with
   the browser closed)
 
+One exception: `soc_temp_c` is **muted on the Slack hop only**. A fanless Pi crosses the
+70 °C critical routinely under camera encode, so it paged constantly without naming an
+action. It still logs to the UI and to `alerts.log` at full level, and the `throttled`
+metric — which reports that heat actually cost you frames — still pages. The mute list is
+`_SLACK_MUTED_SHEPHERD_METRICS` in `controller/events.py`, i.e. controller-side: no rig deploy needed
+to change it.
+
 Alerts are **edge-triggered** — fired when a metric changes level, not every
 second — so the log isn't spammed. A still-critical condition re-alerts every
 `realert_critical_s` (default 30 s). A return to normal logs a recovery line.
 
 Delivery: a `shepherd_alert` UDP packet to the controller's event port
 (`network.event_port`, default 5571). The controller already forwards every event
-to the UI over SSE; `app/app.py` adds the Slack hop for criticals and
+to the UI over SSE; `controller/events.py` adds the Slack hop for criticals (to that rig's own
+webhook) and
 `experiment.html` colours the line by level. If no session UI is live the packet is
 simply dropped (UDP is best-effort) — criticals still reach Slack.
 
@@ -77,16 +85,31 @@ re-Install or Deploy. To change them:
 nano ~/rig/shepherd/config.yaml         # on the leader
 sudo systemctl restart shepherd         # shepherd reads the file once at startup
 ```
-(The repo copy is the default/template. A `shepherd.py` *code* change rides Deploy
-but needs a `systemctl restart shepherd`, or a re-Install, to take effect.)
-
-**Manually (for a quick look or a test), on any machine:**
+(The repo copy is the default/template. A `shepherd.py` *code* change rides Deploy, and
+Deploy restarts shepherd so the change takes effect.)
 
 **Manually (for a quick look or a test):**
 ```bash
 python3 shepherd/shepherd.py --config shepherd/config.yaml
 python3 shepherd/shepherd.py --config shepherd/config.yaml --once   # one sample, then exit
 ```
+
+## pi_api grace period
+
+Deploy and **Restart API** restart `pi_api` on purpose, and it answers nothing for a few seconds
+while systemd respawns it. So `api_health` does not alert on the first failed probe:
+
+- **Outside a session** it waits out a grace period. The controller times every Deploy / Restart
+  API restart (`controller/pi_restart.py`) and writes the measured outage ×1.5, kept within
+  5–60 s, to `api_grace.json` next to `config.yaml` (through pi_api's `/api/shepherd_grace`).
+  shepherd re-reads the file whenever it changes. Until the first timed restart,
+  `api_probe.grace_default_s` (10 s) applies.
+- **During a session** (the last good probe said the engine was running) it alerts on the first
+  failed probe: nothing restarts pi_api on purpose mid-session, and a crash there takes the engine
+  with it.
+
+The Deploy log shows both numbers, e.g. `pi_api on cheddar was down 4.1 s` and
+`shepherd on cheddar now gives pi_api 6.2 s to come back before alerting`.
 
 ## Configuring
 

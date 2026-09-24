@@ -60,14 +60,10 @@ class RigState:
         self.session: dict = {}
         self.session_id: str | None = None
         self.session_dir: str | None = None
-        self.camera_override: dict = {}
-        self.trial_table: list = []
 
         # live-session bookkeeping (was module globals)
         self.trials: list = []
         self.session_end_seen = False
-        self.rt_hits_path: str | None = None
-        self.display_notify_t: dict[str, float] = {}
         self.last_event_t: float | None = None
 
         # concurrency
@@ -185,16 +181,13 @@ class RigState:
     # ── views ──
 
     def snapshot(self) -> dict:
-        hr, med = session_metrics(self, self.trials)
         return {
             "name": self.name,
             "phase": self.phase,
             "deployed": self.deployed,
             "session_id": self.session_id,
             "n_trials": len(self.trials),
-            "n_planned": len(self.trial_table) if self.trial_table else None,
-            "hit_rate": hr,
-            "median_rt_ms": med,
+            "n_planned": ((self.task_config or {}).get("session") or {}).get("n_trials"),
             "task": Path(self.task_path).stem if self.task_path else None,
             "subject": (self.session or {}).get("subject_id"),
             "busy": self.busy_kind,
@@ -206,41 +199,6 @@ class RigState:
 
 
 # ── session metrics (shared by the demux, Slack text and the fleet badges) ──
-
-def event_is_go(rs: RigState, event: dict) -> bool:
-    """Whether a trial event is a GO trial (should lick), per the task go_rule + stim azimuth.
-    Mirrors the engine (_classify_go) and the UI (_isGo): all->go, right->az>0, else az<0."""
-    rule = ((rs.task_config or {}).get("stimulus") or {}).get("go_rule", "left")
-    if rule == "all":
-        return True
-    az = event.get("stim_az", 0) or 0
-    return az > 0 if rule == "right" else az < 0
-
-
-def session_metrics(rs: RigState, trials: list):
-    """(hit_rate, median_rt_ms) matching the live plots: Cumulative HR = go hits / go trials;
-    median RT = median of go-hit RTs (ms). Either is None when undefined."""
-    go = [t for t in trials if event_is_go(rs, t)]
-    hits = [t for t in go if t.get("outcome") == "hit"]
-    hit_rate = (len(hits) / len(go)) if go else None
-    rts = sorted(t["rt_ms"] for t in hits
-                 if isinstance(t.get("rt_ms"), (int, float)) and not isinstance(t.get("rt_ms"), bool)
-                 and t["rt_ms"] == t["rt_ms"])
-    if rts:
-        n = len(rts)
-        med = rts[n // 2] if n % 2 else (rts[n // 2 - 1] + rts[n // 2]) / 2
-    else:
-        med = None
-    return hit_rate, med
-
-
-def metrics_suffix(rs: RigState, trials: list) -> str:
-    """', median RT=N ms and hit rate=0.xx' — appended to the end / global-timeout messages."""
-    hr, med = session_metrics(rs, trials)
-    med_str = f"{round(med)} ms" if med is not None else "n/a"
-    hr_str = f"{hr:.2f}" if hr is not None else "n/a"
-    return f", median RT={med_str} and hit rate={hr_str}"
-
 
 # ── registry ──
 

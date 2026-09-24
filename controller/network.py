@@ -36,10 +36,10 @@ def _template() -> dict:
     tpl = settings.rigs_dir() / "_template.yaml"
     if tpl.exists():
         return load_rig(tpl)
+    # the shape rigs/_template.yaml has on this branch, should the file be missing
     return {"pis": [], "devices": {}, "data": {"leader_dir": "/home/vruser/data",
-                                                "video_dir": "/media/vruser/ssd/video"},
-            "network": {"api_port": 5080, "event_port": 5571, "command_port": 5572, "ack_port": 5573,
-                        "display_port": 5575, "displayd_pd_port": 5582, "camera_port": 5001},
+                                                "video_dir": "/home/vruser/video"},
+            "network": {"api_port": 5080, "event_port": 5571, "command_port": 5572},
             "slack": {"enabled": False, "webhook_url": ""}, "shepherd": {"enabled": True}}
 
 
@@ -190,10 +190,6 @@ def api_rename_rig(name):
     for gname, members in groups.items():
         groups[gname] = [new if m == name else m for m in members]
     settings.update(groups=groups)
-    # per-rig calibration folder follows the rig
-    old_cal = settings.ROOT / "display_calibration" / name
-    if old_cal.is_dir():
-        old_cal.rename(settings.ROOT / "display_calibration" / new)
     return jsonify({"ok": True, "rig": _rig_row(new)})
 
 

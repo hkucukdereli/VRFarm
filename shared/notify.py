@@ -2,7 +2,7 @@
 Slack notifications via incoming webhook.
 
 The webhook can be set two ways (configure() wins):
-  - configure(url): runtime override, e.g. app/app.py pushes it from the rig
+  - configure(url): runtime override, e.g. the controller pushes it from the rig
     config's `slack:` block at Load Rig. Read at call time, so it works even
     though this module is imported before the rig is loaded.
   - VRFARM_SLACK_WEBHOOK env var: legacy `export ...` before launch (fallback).

@@ -214,7 +214,11 @@ def api_delete_rig(name):
     if changed:
         settings.update(groups=groups)
     _check_cache.pop(name, None)
-    return jsonify({"ok": True, "trashed": str(dst.relative_to(settings.ROOT))})
+    try:
+        shown = str(dst.relative_to(settings.ROOT))
+    except ValueError:                 # a rigs dir outside the checkout (--rigs-dir)
+        shown = str(dst)
+    return jsonify({"ok": True, "trashed": shown})
 
 
 @bp.route("/suggest_ips")

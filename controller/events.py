@@ -21,12 +21,7 @@ import time
 
 from flask import Response
 
-from controller.registry import registry, RigState, event_is_go, metrics_suffix
-
-# Per-kind Slack throttle for display_health. Upstream is already edge-triggered, but the
-# notifier is the boundary where a chatty producer becomes a pager storm. Recoveries are
-# never throttled — a "fixed" message that arrives late is worse than one that arrives twice.
-_DISPLAY_NOTIFY_THROTTLE_S = 60.0
+from controller.registry import registry, RigState
 
 # Shepherd metrics whose criticals stay OUT of Slack. They still reach the UI log over SSE
 # and shepherd's own alerts file. soc_temp_c trips at 70 °C, which a fanless Pi reaches
@@ -73,29 +68,11 @@ def send_command(ip: str, port: int, msg: dict) -> None:
 
 # ── per-event handling (was the body of app/app.py's listener loop) ──
 
-def _display_notify_due(rs: RigState, kind: str) -> bool:
-    now = time.time()
-    if now - rs.display_notify_t.get(kind, 0.0) < _DISPLAY_NOTIFY_THROTTLE_S:
-        return False
-    rs.display_notify_t[kind] = now
-    return True
-
-
 def handle_event(rs: RigState, event: dict) -> None:
     rs.last_event_t = time.time()
     typ = event.get("type")
     if typ == "trial":
         rs.trials.append(event)
-        # Append GO-trial hit RTs (ms) to the live-RT temp file (matches the histogram;
-        # a nogo-trial lick is a false alarm, not a hit).
-        if rs.rt_hits_path and event.get("outcome") == "hit" and event_is_go(rs, event):
-            rt = event.get("rt_ms")
-            if isinstance(rt, (int, float)) and not isinstance(rt, bool) and rt == rt:
-                try:
-                    with open(rs.rt_hits_path, "a") as f:
-                        f.write(f"{rt:.1f}\n")
-                except Exception:
-                    pass
     elif typ == "shepherd_alert":
         # Health alert from the shepherd monitor on a rig Pi. Flows to the SSE stream for the
         # UI log like any event; a CRITICAL also goes to Slack so it reaches you when the
@@ -103,37 +80,14 @@ def handle_event(rs: RigState, event: dict) -> None:
         if (event.get("level") == "critical"
                 and event.get("metric") not in _SLACK_MUTED_SHEPHERD_METRICS):
             rs.notify(f"🔴 {event.get('host', rs.name)} — {event.get('message', 'critical alert')}")
-    elif typ == "display_abort":
-        # The leader ended the session at a trial boundary because the display loop was broken.
-        rs.notify(f"🛑 {rs.name} — EXPERIMENT ABORTED at trial "
-                  f"{event.get('trial', '?')}: {event.get('reason', 'display fault')} "
-                  f"({rs.session_id}){metrics_suffix(rs, rs.trials)}")
-    elif typ == "display_health":
-        # Display-stack health from the leader's heartbeat correlator or displayd's own
-        # watchdogs. This branch is the ONLY thing that turns a dark projector into something
-        # a human learns about, so an alarm pages like a critical shepherd alert.
-        a = event.get("alarm") or {}
-        kind = a.get("kind", "display_health")
-        msg = a.get("msg", kind)
-        where = event.get("source", "display")
-        if a.get("level") == "alarm":
-            if _display_notify_due(rs, kind):
-                rs.notify(f"🔴 {rs.name} — display [{where}]: {msg} ({rs.session_id})")
-        elif kind.endswith("_ok") or a.get("level") == "event":
-            rs.display_notify_t.pop(kind.replace("_ok", "_lost"), None)
-            rs.notify(f"🟢 {rs.name} — display [{where}]: {msg} ({rs.session_id})")
     elif typ == "global_timeout":
         rs.notify(f"⏱️ {rs.name} — GLOBAL TIMEOUT: {event.get('n_dry', '?')} dry "
                   f"trials, aborting at trial {event.get('trial', '?')} "
-                  f"({rs.session_id}){metrics_suffix(rs, rs.trials)}")
+                  f"({rs.session_id})")
     elif typ == "session_end":
         rs.session_end_seen = True
-        # A run cut short by a dark projector must never page as a clean ✅ finish; the
-        # display_abort branch already sent the reason.
-        if event.get("end_reason") != "display_fault":
-            rs.notify(f"✅ {rs.name} — session ended: {event.get('n_completed', '?')}"
-                      f"/{event.get('n_planned', '?')} trials ({rs.session_id})"
-                      f"{metrics_suffix(rs, rs.trials)}")
+        rs.notify(f"✅ {rs.name} — session ended: {event.get('n_completed', '?')}"
+                  f"/{event.get('n_planned', '?')} trials ({rs.session_id})")
         # A natural end MUST tear down server-side (stop the camera, kill the engine); the
         # browser only flips its own phase. Separate thread: teardown does blocking HTTP.
         from controller.experiment import teardown_session   # lazy: avoids an import cycle

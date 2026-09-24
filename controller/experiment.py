@@ -21,7 +21,7 @@ import yaml
 from flask import Blueprint, Response, g, jsonify, request
 
 from shared.config import (load_task, save_task, make_session_id, register_session,
-                           get_subject_history, photodiode_init_payload)
+                           get_subject_history)
 from shared.mjpeg_relay import relay
 from controller import settings
 from controller.registry import registry, RigState
@@ -64,27 +64,6 @@ def _session_dir(rs: RigState, root: Path) -> Path:
     subject_id = rs.session["subject_id"]
     date_str = rs.session["date"]
     return Path(root) / subject_id / f"{subject_id}_{date_str}" / rs.session_id
-
-
-def _warp_path(rs: RigState) -> Path:
-    """Per-rig warp map (display_calibration/<rig>/warp_map.npz) with the legacy single-file
-    location as fallback until every rig has been migrated."""
-    per_rig = ROOT / "display_calibration" / rs.name / "warp_map.npz"
-    return per_rig if per_rig.exists() else ROOT / "display_calibration" / "warp_map.npz"
-
-
-def _cam_exposure(rs: RigState, cam_cfg: dict) -> dict:
-    """Effective camera exposure/gain: the runtime override merged over the rig-yaml defaults."""
-    ov = rs.camera_override or {}
-    return {
-        "auto_exposure": ov.get("auto_exposure", cam_cfg.get("auto_exposure", True)),
-        "exposure_ms": ov.get("exposure_ms", cam_cfg.get("exposure_ms", 10)),
-        "gain": ov.get("gain", cam_cfg.get("gain", 1.0)),
-    }
-
-
-def _camera_ip(rs: RigState):
-    return next((pi["ip"] for pi in rs.pis if "camera" in pi.get("devices", [])), None)
 
 
 def _fmt_hm(ms) -> str:
@@ -207,8 +186,6 @@ def load_rig():
 
     rs.deployed = False
     rs.phase = "setup"
-    rs.trial_table = []
-    rs.camera_override = {}   # drop runtime exposure tweaks -> revert to the rig yaml
 
     rig = rs.config
     api_port = rs.api_port
@@ -231,52 +208,22 @@ def load_rig():
             pi_results[pname] = {"ok": False, "error": str(e)}
             continue
 
+        # Initialize this Pi's devices. Generic: pi_api resolves the class from each device's
+        # `type`, so the controller needs no per-device knowledge — this branch ships none.
         init_errors = []
         for dev_name in pi.get("devices", []):
             dev_cfg = devices.get(dev_name, {})
             if not dev_cfg.get("enabled", True):
                 continue
             try:
-                if dev_name == "display":
-                    requests.post(f"http://{ip}:{api_port}/api/shutdown_display", json={}, timeout=5)
-                    r = requests.post(f"http://{ip}:{api_port}/api/init_projector", json={}, timeout=35)
-                    if not r.json().get("ok"):
-                        init_errors.append(r.json().get(
-                            "error", "Projector failed to initialize — is it powered on?"))
-                elif dev_name == "lick_sensor":
-                    r = requests.post(f"http://{ip}:{api_port}/api/init_lick", json={
-                        "i2c_address": dev_cfg.get("i2c_address", "0x5A"),
-                        "electrode": dev_cfg.get("electrode", 4),
-                    }, timeout=10)
-                    if not r.json().get("ok"):
-                        init_errors.append(r.json().get("error", "Lick sensor failed — check I2C connection"))
-                elif dev_name == "reward":
-                    r = requests.post(f"http://{ip}:{api_port}/api/init_reward", json={
-                        "pins": dev_cfg.get("pins", {"main": {"gpio": 18}}),
-                    }, timeout=10)
-                    if not r.json().get("ok"):
-                        init_errors.append(r.json().get("error", "Reward valve failed — check GPIO pins/wiring"))
-                elif dev_name == "camera":
-                    r = requests.post(f"http://{ip}:{api_port}/api/init_camera", json={}, timeout=10)
-                    if not r.json().get("ok"):
-                        init_errors.append(r.json().get("error", "Camera not detected — check CSI cable"))
-                elif dev_name == "photodiode":
-                    # No follower_ip here: the experiment path verifies later, at leader-engine
-                    # init, over UDP (the setup UI shut this display down at Load Rig).
-                    r = requests.post(f"http://{ip}:{api_port}/api/init_photodiode",
-                                      json=photodiode_init_payload(dev_cfg), timeout=10)
-                    resp = r.json()
-                    if not resp.get("ok"):
-                        init_errors.append(resp.get("error", "Photodiode failed — check the GPIO pin/wiring"))
-                elif dev_name == "encoder":
-                    r = requests.post(f"http://{ip}:{api_port}/api/init_encoder", json={
-                        "i2c_address": dev_cfg.get("i2c_address", "0x36"),
-                        "i2c_bus": dev_cfg.get("i2c_bus", 1),
-                        "wheel_diameter_cm": dev_cfg.get("wheel_diameter_cm", 15.0),
-                        "sample_hz": dev_cfg.get("sample_hz", 100),
-                    }, timeout=10)
-                    if not r.json().get("ok"):
-                        init_errors.append(r.json().get("error", "Encoder failed — check I2C 0x36 / magnet"))
+                r = requests.post(f"http://{ip}:{api_port}/api/init_device", json={
+                    "name": dev_name,
+                    "type": dev_cfg.get("type", dev_name),
+                    "config": dev_cfg,
+                }, timeout=25)
+                j = r.json()
+                if not j.get("ok"):
+                    init_errors.append(f"{dev_name}: {j.get('error', j.get('message', 'init failed'))}")
             except requests.exceptions.Timeout:
                 init_errors.append(f"{dev_name}: timed out waiting for response")
             except requests.exceptions.ConnectionError:
@@ -344,7 +291,6 @@ def reset():
     rs.trials.clear()
     rs.session_end_seen = False
     rs.session_dir = None
-    rs.rt_hits_path = None
     return jsonify({"ok": True, **rs.snapshot()})
 
 
@@ -424,7 +370,7 @@ def save_task_as_route():
 
 @bp.route("/deploy", methods=["POST"])
 def deploy():
-    """Upload code + configs, generate stims on the Leader, push them to the Follower(s)."""
+    """Upload code + configs to the Pis. A successful Deploy is what enables Go."""
     rs: RigState = g.rs
     rig, task = rs.config, rs.task_config
     if not rig or not task:
@@ -438,7 +384,6 @@ def deploy():
 
     api_port = rs.api_port
     leader = rs.leader()
-    followers = rs.followers()
     steps = []
     try:
         # 0. Upload code to Pis — the file list is shared/deploy_manifest.py.
@@ -464,87 +409,15 @@ def deploy():
                 raise RuntimeError(f"{pi['name']} did not come back after restart: {results[pi['name']]['error']}")
         steps.append("Restarted pi_api on all Pis")
 
-        # 0c. Restart displayd on any Pi that runs it (new displayd/renderer code takes effect).
-        for pi in rs.pis:
-            try:
-                r = requests.post(f"http://{pi['ip']}:{api_port}/api/restart_displayd", json={}, timeout=120)
-                d = r.json() if r.ok else {}
-                if d.get("skipped"):
-                    continue
-                steps.append(f"displayd restarted on {pi['name']} ({d.get('state', '?')})" if d.get("ok")
-                             else f"WARNING: displayd restart failed on {pi['name']}: {d.get('error', r.status_code)}")
-            except Exception as e:
-                steps.append(f"WARNING: displayd restart error on {pi['name']}: {e}")
-
-        # 0d. Confirm the projector is up on each follower.
-        for fpi in followers:
-            display_cfg = rig.get("devices", {}).get("display", {})
-            if display_cfg.get("enabled", True) and "display" in fpi.get("devices", []):
-                try:
-                    r = requests.post(f"http://{fpi['ip']}:{api_port}/api/init_projector", json={}, timeout=35)
-                    if r.json().get("ok"):
-                        steps.append(f"Re-initialized projector on {fpi['name']}")
-                    else:
-                        steps.append(f"Projector re-init warning on {fpi['name']}: {r.json().get('error', '?')}")
-                except Exception as e:
-                    steps.append(f"Projector re-init failed on {fpi['name']}: {e}")
-
         # 1. Rig config to all Pis (under its own filename: pi_api sees rigs/<rig>.yaml)
         for pi in rs.pis:
             _upload_file(pi["ip"], api_port, str(rs.path), f"rigs/{rs.path.name}")
         steps.append("Uploaded rig config to all Pis")
 
-        # 2. Task config to the Leader, then generate stims there
-        remote_task_path = f"experiments/{Path(rs.task_path).name}"
-        _upload_file(leader["ip"], api_port, rs.task_path, remote_task_path)
+        # 2. Task config to the Leader. There is no stimulus pipeline on this branch — the engine
+        #    runs the generic 4-phase loop — so nothing is generated here or pushed to a follower.
+        _upload_file(leader["ip"], api_port, rs.task_path, f"experiments/{Path(rs.task_path).name}")
         steps.append("Uploaded task config to Leader")
-        r = requests.post(
-            f"http://{leader['ip']}:{api_port}/api/generate_stims",
-            json={"task_config": remote_task_path,
-                  "session_id": rs.session_id,
-                  "apply_warp": rig.get("devices", {}).get("display", {}).get("apply_warp", False),
-                  "contrast_metric": rig.get("devices", {}).get("display", {}).get("contrast_metric", "weber")},
-            timeout=30)
-        if r.status_code != 200:
-            raise RuntimeError(f"Stim generation failed (HTTP {r.status_code}): {r.text[:500]}")
-        try:
-            stim_result = r.json()
-        except Exception:
-            raise RuntimeError(f"Stim generation returned invalid response: {r.text[:500]}")
-        if not stim_result.get("ok"):
-            raise RuntimeError(f"Stim generation error: {stim_result.get('error', 'unknown')}")
-        steps.append(f"Generated stims: {stim_result.get('n_trials', '?')} trials")
-
-        # 3. NPZ from the Leader to the Follower(s)
-        npz_remote = stim_result.get("npz_path", "")
-        if npz_remote:
-            r = requests.get(f"http://{leader['ip']}:{api_port}/api/download/{npz_remote}",
-                             timeout=15, stream=True)
-            tmp_npz = Path(tempfile.mktemp(suffix=".npz"))
-            with open(tmp_npz, "wb") as f:
-                for chunk in r.iter_content(8192):
-                    f.write(chunk)
-            for fpi in followers:
-                try:
-                    _upload_file(fpi["ip"], api_port, str(tmp_npz), f"stims/{rs.session_id}/stimuli.npz")
-                    steps.append(f"Pushed stims to {fpi['name']}")
-                except Exception as e:
-                    steps.append(f"Push stims to {fpi['name']} FAILED: {e}")
-            tmp_npz.unlink(missing_ok=True)
-
-            # 4. Universal trial table (YAML) from the Leader
-            yaml_remote = npz_remote.replace("stimuli.npz", "trials.yaml")
-            try:
-                r = requests.get(f"http://{leader['ip']}:{api_port}/api/download/{yaml_remote}", timeout=10)
-                r.raise_for_status()
-                table = yaml.safe_load(r.content)
-                if not isinstance(table, list):
-                    raise ValueError(f"Expected list, got {type(table).__name__}")
-                rs.trial_table = table
-                steps.append(f"Trial table: {len(table)} trials")
-            except Exception as e:
-                print(f"Trial table download failed: {e}")
-                rs.trial_table = []
 
         rs.deployed = True
         rs.phase = "deployed"
@@ -555,63 +428,6 @@ def deploy():
         return jsonify({"ok": False, "error": str(e), "steps": steps})
     finally:
         rs.release_busy()
-
-
-@bp.route("/correct_contrast", methods=["POST"])
-def correct_contrast():
-    """Clamp entered contrast value(s) to the achievable ceiling in the active metric (matches
-    what stim generation bakes in: per-azimuth luminance when apply_warp + a warp map exist)."""
-    import numpy as np
-    from shared.stim_generator import (get_luminance_correction, fraction_to_metric,
-                                       snap_contrast_to_bitcode)
-    rs: RigState = g.rs
-    data = request.get_json(silent=True) or {}
-    try:
-        values = [float(v) for v in (data.get("values") or [])]
-        bg = float(data.get("background_gray") or 0.0)
-    except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "invalid values or background_gray"}), 400
-    block_seq = data.get("block_sequence") or [0.0]
-    display_cfg = (rs.config or {}).get("devices", {}).get("display", {})
-    metric = display_cfg.get("contrast_metric", "weber")
-    apply_warp = display_cfg.get("apply_warp", False)
-
-    max_lum = 1.0
-    note = ("apply_warp off; global display ceiling" if not apply_warp
-            else "no warp map; global display ceiling")
-    warp_path = _warp_path(rs)
-    if apply_warp and warp_path.exists():
-        try:
-            warp = np.load(str(warp_path))
-            azs = set()
-            for az in block_seq:
-                try:
-                    azs.add(abs(float(az)))
-                except (TypeError, ValueError):
-                    pass
-            azs = azs or {0.0}
-            max_lum = max(get_luminance_correction(warp, az) for az in azs)
-            note = ("per-azimuth luminance (empirical)" if "lum_az_empirical" in warp.files
-                    else "per-azimuth luminance (theoretical)")
-        except Exception as e:
-            note = f"luminance unavailable ({e}); global display ceiling"
-            max_lum = 1.0
-    f_ceiling = 1.0 / max_lum if max_lum > 0 else 1.0
-    c_ceiling = min(fraction_to_metric(f_ceiling, bg, metric), 1.0)
-    corrected = [round(snap_contrast_to_bitcode(min(v, c_ceiling), bg, metric), 4) for v in values]
-    c_ceiling = snap_contrast_to_bitcode(c_ceiling, bg, metric)
-    return jsonify({"ok": True, "corrected": corrected,
-                    "ceiling": round(float(c_ceiling), 4), "metric": metric, "note": note})
-
-
-@bp.route("/trial_table")
-def get_trial_table():
-    return jsonify({"trials": g.rs.trial_table or []})
-
-
-@bp.route("/drain_events", methods=["POST"])
-def drain_events():
-    return jsonify({"ok": True, "drained": g.rs.drain()})
 
 
 # ── run ──
@@ -639,15 +455,14 @@ def go():
 def _go(rs: RigState):
     rig = rs.config
     leader = rs.leader()
-    followers = rs.followers()
     api_port = rs.api_port
     cmd_port = rig["network"]["command_port"]
     session = rs.session
 
     _body = request.get_json(silent=True) or {}
     save = _body.get("save", {})
-    # Create the session data folder NOW under the controller's data root so the live plots
-    # can be saved into it at end/stop; the Data tab later syncs the Pi's files into the same place.
+    # Create the session folder under the controller's data root now, so whatever the UI saves
+    # at end/stop lands with the session; the Data tab syncs the Pi's own files into it later.
     try:
         sdir = _session_dir(rs, settings.data_root())
         sdir.mkdir(parents=True, exist_ok=True)
@@ -660,16 +475,7 @@ def _go(rs: RigState):
     task_filename = Path(rs.task_path).name
     steps = []
 
-    # Live-RT temp file for this session (hit-trial RTs, appended by the demux).
-    rs.rt_hits_path = os.path.join(tempfile.gettempdir(), f"vrfarm_rt_{rs.name}_{rs.session_id}.txt")
-    try:
-        with open(rs.rt_hits_path, "w") as f:
-            f.write("# response_time_ms (hit trials)\n")
-    except Exception as e:
-        print(f"[go:{rs.name}] could not open RT temp file: {e}")
-        rs.rt_hits_path = None
-
-    # Stop leftover processes, release devices on all Pis
+    # Stop leftover processes and release devices on every Pi
     for pi in rs.pis:
         try:
             requests.post(f"http://{pi['ip']}:{api_port}/api/stop", json={}, timeout=5)
@@ -684,35 +490,14 @@ def _go(rs: RigState):
         except Exception:
             pass
 
-    # Projector up on followers, pi_api's display lease released
-    for fpi in followers:
-        for ep, to in (("shutdown_display", 3), ("init_projector", 35)):
-            try:
-                requests.post(f"http://{fpi['ip']}:{api_port}/api/{ep}", json={}, timeout=to)
-            except Exception:
-                pass
-
-    # Follower engine(s)
-    for fpi in followers:
-        stim_path = f"/home/vruser/rig/stims/{rs.session_id}/stimuli.npz"
-        try:
-            r = requests.post(f"http://{fpi['ip']}:{api_port}/api/start",
-                              json={"script": "follower",
-                                    "args": ["--rig", f"/home/vruser/rig/rigs/{rig_filename}",
-                                             "--stims", stim_path]}, timeout=10)
-            res = r.json()
-            if res.get("ok"):
-                steps.append(f"Follower started on {fpi['name']} (pid {res.get('pid', '?')})")
-            else:
-                return jsonify({"ok": False, "error": f"Follower on {fpi['name']}: {res.get('error', 'unknown')}", "steps": steps})
-        except Exception as e:
-            return jsonify({"ok": False, "error": f"Failed to start follower on {fpi['name']}: {e}", "steps": steps})
-
-    # Leader engine. Behavioral devices the user chose NOT to save -> --no-save.
-    skip_save = [d for d in ("lick_sensor", "reward", "photodiode", "encoder") if not save.get(d, True)]
+    # Leader engine. Devices unchecked in the Actions row go to --no-save, and the engine then
+    # skips their HDF5 datasets. Relative paths: pi_api resolves them against ~/rig on the Pi,
+    # whatever that Pi's user is called.
+    skip_save = [d for d, cfg in (rig.get("devices") or {}).items()
+                 if cfg.get("enabled", True) and not save.get(d, True)]
     leader_args = [
-        "--rig", f"/home/vruser/rig/rigs/{rig_filename}",
-        "--task", f"/home/vruser/rig/experiments/{task_filename}",
+        "--rig", f"rigs/{rig_filename}",
+        "--task", f"experiments/{task_filename}",
         "--subject", session["subject_id"],
         "--date", session["date"],
         "--session-num", str(int(session["session_num"])),
@@ -732,8 +517,8 @@ def _go(rs: RigState):
     except Exception as e:
         return jsonify({"ok": False, "error": f"Failed to start leader: {e}", "steps": steps})
 
-    # Wait for the leader to finish device init ("Waiting for START command..."); surface its
-    # error if it exits during init instead.
+    # Wait for the leader to finish device init ("Waiting for START command..."); if it exits
+    # during init instead, surface its error rather than a silent no-start.
     leader_ready = False
     for _ in range(60):        # up to ~30 s
         time.sleep(0.5)
@@ -754,69 +539,48 @@ def _go(rs: RigState):
     if not leader_ready:
         steps.append("⚠️  Leader readiness not confirmed after 30 s — proceeding")
 
-    # Camera: RECORD to disk if 'camera' is checked, else PREVIEW-only (livestream, no file).
-    cam_cfg = rig.get("devices", {}).get("camera", {})
-    save_camera = bool(save.get("camera", True))
-    cam_recording = False
-    if cam_cfg.get("enabled", False):
-        video_dir = (rig.get("data") or {}).get("video_dir") or "/media/vruser/ssd/video"
-        payload = {
-            "resolution": cam_cfg.get("resolution", [1280, 720]),
-            "fps": cam_cfg.get("fps", 50),
-            "bitrate_mbps": cam_cfg.get("bitrate_mbps", 4),
-            "h264_profile": cam_cfg.get("h264_profile", "main"),
-            "gop_s": cam_cfg.get("gop_s", 5.0),
-            "sensor_mode": cam_cfg.get("sensor_mode"),
-            "bit_depth": cam_cfg.get("bit_depth"),
-            "live_preset": cam_cfg.get("live_preset", "med"),
-            **_cam_exposure(rs, cam_cfg),
-        }
-        if save_camera:
-            payload.update({"session_id": rs.session_id, "video_dir": video_dir})
+    # Every video device: RECORD when its save box is checked, else preview-only livestream.
+    for dev_name, dev_cfg, pi in _video_devices(rig):
+        save_this = bool(save.get(dev_name, True))
+        video_dir = (rig.get("data") or {}).get("video_dir") or ""
+        payload = {"device": dev_name, "type": dev_cfg.get("type", dev_name), "config": dev_cfg}
+        if save_this:
+            payload.update({"session_id": rs.session_id, "video_dir": video_dir})   # -> record
         else:
-            payload["downsample"] = True
-        for pi in rs.pis:
-            if "camera" not in pi.get("devices", []):
-                continue
+            payload["downsample"] = True                                            # -> preview only
+        try:
+            requests.post(f"http://{pi['ip']}:{api_port}/api/camera_preview_stop",
+                          json={"device": dev_name}, timeout=5)
+            r = requests.post(f"http://{pi['ip']}:{api_port}/api/camera_preview_start",
+                              json=payload, timeout=15)
+            ok, err = False, f"HTTP {r.status_code}"
             try:
-                requests.post(f"http://{pi['ip']}:{api_port}/api/camera_preview_stop", json={}, timeout=5)
-                r = requests.post(f"http://{pi['ip']}:{api_port}/api/camera_preview_start",
-                                  json=payload, timeout=10)
-                ok, err = False, f"HTTP {r.status_code}"
-                try:
-                    j = r.json()
-                    ok, err = bool(j.get("ok")), j.get("error", err)
-                except Exception:
-                    pass
-                if ok and save_camera:
-                    cam_recording = True
-                    steps.append(f"Camera recording on {pi['name']}")
-                elif ok:
-                    steps.append(f"Camera livestream (NOT saved) on {pi['name']}")
-                elif save_camera:
-                    warn = (f"⚠️  CAMERA NOT RECORDING on {pi['name']}: {err} — session runs "
-                            f"WITHOUT video. Check the SSD / video_dir ({video_dir}).")
-                    steps.append(warn)
-                    rs.logger.warning(warn)
-                else:
-                    steps.append(f"⚠️  Camera livestream failed on {pi['name']}: {err}")
-            except Exception as e:
-                if save_camera:
-                    warn = (f"⚠️  CAMERA NOT RECORDING on {pi['name']}: {e} — session runs "
-                            f"WITHOUT video. Check the SSD / video_dir.")
-                    steps.append(warn)
-                    rs.logger.warning(warn)
-                else:
-                    steps.append(f"⚠️  Camera livestream failed on {pi['name']}: {e}")
-            break
-        print(f"[go:{rs.name}] Camera: {'recording' if cam_recording else ('livestream (not saved)' if not save_camera else 'FAILED — no video')}")
+                j = r.json()
+                ok, err = bool(j.get("ok")), j.get("error", err)
+            except Exception:
+                pass
+            if ok and save_this:
+                steps.append(f"{dev_name} recording on {pi['name']}")
+            elif ok:
+                steps.append(f"{dev_name} livestream (NOT saved) on {pi['name']}")
+            elif save_this:
+                warn = (f"⚠️  {dev_name.upper()} NOT RECORDING on {pi['name']}: {err} — the session "
+                        f"runs WITHOUT this video. Check video_dir ({video_dir or 'unset'}).")
+                steps.append(warn)
+                rs.logger.warning(warn)
+            else:
+                steps.append(f"⚠️  {dev_name} livestream failed on {pi['name']}: {err}")
+        except Exception as e:
+            if save_this:
+                warn = (f"⚠️  {dev_name.upper()} NOT RECORDING on {pi['name']}: {e} — the session "
+                        f"runs WITHOUT this video. Check video_dir.")
+                steps.append(warn)
+                rs.logger.warning(warn)
+            else:
+                steps.append(f"⚠️  {dev_name} livestream failed on {pi['name']}: {e}")
 
     time.sleep(1.5)
-    # Whether this session should have video, for the leader's metadata and later the Data tab:
-    # camera unchecked, or a recording that never started, means none is expected — not lost.
-    camera_requested = bool(cam_cfg.get("enabled", False)) and save_camera
-    send_command(leader["ip"], cmd_port, {"cmd": "START", "session_id": rs.session_id,
-                                          "camera_requested": camera_requested, "camera_saved": cam_recording})
+    send_command(leader["ip"], cmd_port, {"cmd": "START", "session_id": rs.session_id})
     steps.append("START command sent")
 
     rs.phase = "running"
@@ -834,47 +598,31 @@ def _go(rs: RigState):
     return jsonify({"ok": True, "steps": steps})
 
 
+def _video_devices(rig):
+    """(name, config, pi) for every enabled device the rig marks `video: true` — the ones the
+    controller previews and records through the camera endpoints below."""
+    out = []
+    for name, cfg in (rig.get("devices") or {}).items():
+        if not cfg.get("enabled", True) or not cfg.get("video", False):
+            continue
+        pi = next((p for p in rig["pis"] if name in p.get("devices", [])), None)
+        if pi is not None:
+            out.append((name, cfg, pi))
+    return out
+
+
+def _find_video_device(rig, name):
+    """(name, cfg, pi) for a named video device, or the first one when name is falsy."""
+    devs = _video_devices(rig)
+    if not name:
+        return devs[0] if devs else None
+    return next((d for d in devs if d[0] == name), None)
+
+
 @bp.route("/stop", methods=["POST"])
 def stop():
     teardown_session(g.rs, "manual")
     return jsonify({"ok": True})
-
-
-@bp.route("/reward", methods=["POST"])
-def manual_reward():
-    rs: RigState = g.rs
-    send_command(rs.leader()["ip"], rs.config["network"]["command_port"], {"cmd": "REWARD"})
-    return jsonify({"ok": True})
-
-
-@bp.route("/save_plots", methods=["POST"])
-def save_plots():
-    """Write the browser's live-plot PNGs into the session folder (created at Go)."""
-    rs: RigState = g.rs
-    req = request.get_json(silent=True) or {}
-    plots = req.get("plots", {})
-    sess_dir = rs.session_dir
-    if not sess_dir:
-        if not rs.session_id:
-            return jsonify({"ok": False, "error": "No active session"}), 400
-        sess_dir = str(_session_dir(rs, settings.data_root()))
-    d = Path(sess_dir)
-    try:
-        d.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        return jsonify({"ok": False, "error": f"Cannot create {d}: {e}"}), 500
-    written = []
-    for name, dataurl in plots.items():
-        if not isinstance(dataurl, str) or "," not in dataurl:
-            continue
-        try:
-            raw = base64.b64decode(dataurl.split(",", 1)[1])
-            safe = "".join(c for c in str(name) if c.isalnum() or c in "-_") or "plot"
-            (d / f"{safe}.png").write_bytes(raw)
-            written.append(f"{safe}.png")
-        except Exception:
-            pass
-    return jsonify({"ok": True, "dir": str(d), "written": written})
 
 
 @bp.route("/trials")
@@ -887,57 +635,21 @@ def subject_history(subject_id):
     return jsonify(get_subject_history(subject_id, settings.data_root() / "subjects"))
 
 
-@bp.route("/engine_logs")
-def engine_logs():
-    rs: RigState = g.rs
-    n = request.args.get("n", 50, type=int)
-    result = {}
-    for pi in rs.pis:
-        try:
-            r = requests.get(f"http://{pi['ip']}:{rs.api_port}/api/logs?n={n}", timeout=3)
-            result[pi["name"]] = r.json().get("lines", [])
-        except Exception as e:
-            result[pi["name"]] = [f"Error fetching logs: {e}"]
-    return jsonify(result)
-
-
-# ── camera ──
-
-@bp.route("/camera_controls", methods=["POST"])
-def camera_controls():
-    """Live exposure/gain tweak: runtime-only override, pushed to the running preview.
-    Refused once recording has started (phase 'running')."""
-    rs: RigState = g.rs
-    if rs.phase == "running":
-        return jsonify({"ok": False, "error": "locked during recording"}), 409
-    data = request.json or {}
-    ov = {k: data[k] for k in ("auto_exposure", "exposure_ms", "gain") if k in data}
-    rs.camera_override.update(ov)
-    ip = _camera_ip(rs)
-    if not ip:
-        return jsonify({"ok": True, "stored": ov})
-    try:
-        r = requests.post(f"http://{ip}:{rs.api_port}/api/camera_controls", json=ov, timeout=5)
-        return jsonify(r.json())
-    except Exception as e:
-        return jsonify({"ok": True, "stored": ov, "warn": str(e)})
-
+# ── video devices (preview / recording) ──
 
 @bp.route("/camera_start", methods=["POST"])
 def camera_start():
+    """Start a video device's preview. Body: {device}, defaulting to the rig's first video
+    device. pi_api refuses to restart one that is recording a session."""
     rs: RigState = g.rs
-    cam_cfg = rs.config.get("devices", {}).get("camera", {})
-    ip = _camera_ip(rs)
-    if not ip:
-        return jsonify({"ok": False, "error": "Camera not assigned"}), 400
+    found = _find_video_device(rs.config, (request.get_json(silent=True) or {}).get("device"))
+    if not found:
+        return jsonify({"ok": False, "error": "No video device assigned"}), 400
+    dev_name, cfg, pi = found
     try:
-        r = requests.post(f"http://{ip}:{rs.api_port}/api/camera_preview_start",
-                          json={"resolution": cam_cfg.get("resolution", [1280, 720]),
-                                "fps": cam_cfg.get("fps", 50),
-                                "downsample": True,
-                                "live_preset": cam_cfg.get("live_preset", "med"),
-                                **_cam_exposure(rs, cam_cfg)},
-                          timeout=10)
+        r = requests.post(f"http://{pi['ip']}:{rs.api_port}/api/camera_preview_start",
+                          json={"device": dev_name, "type": cfg.get("type", dev_name),
+                                "config": cfg, "downsample": True}, timeout=15)
         return jsonify(r.json())
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -945,39 +657,35 @@ def camera_start():
 
 @bp.route("/camera_stop", methods=["POST"])
 def camera_stop():
+    """Stop previews — all of them, or just {device}. Skipped while a session is running, so
+    this can never stop a recording."""
     rs: RigState = g.rs
     if rs.phase == "running":
-        return jsonify({"ok": True})      # never stop the session camera mid-run
-    for pi in rs.pis:
-        if "camera" in pi.get("devices", []):
-            try:
-                requests.post(f"http://{pi['ip']}:{rs.api_port}/api/camera_preview_stop", json={}, timeout=5)
-            except Exception:
-                pass
+        return jsonify({"ok": True})
+    want = (request.get_json(silent=True) or {}).get("device")
+    for dev_name, _cfg, pi in _video_devices(rs.config):
+        if want and dev_name != want:
+            continue
+        try:
+            requests.post(f"http://{pi['ip']}:{rs.api_port}/api/camera_preview_stop",
+                          json={"device": dev_name}, timeout=5)
+        except Exception:
+            pass
     return jsonify({"ok": True})
 
 
 @bp.route("/camera_feed")
 def camera_feed():
+    """Proxy a Pi video device's MJPEG stream (?device=<name>). The reconnecting relay rides
+    through pi_api restarts, the preview->record swap at Go, and the <img>-before-preview race
+    instead of collapsing to a silent blank."""
     rs: RigState = g.rs
-    ip = _camera_ip(rs)
-    if not ip:
-        return "No camera", 400
-    return Response(relay(f"http://{ip}:{rs.api_port}/api/camera_stream"),
+    found = _find_video_device(rs.config, request.args.get("device"))
+    if not found:
+        return "No video device", 400
+    dev_name, _cfg, pi = found
+    return Response(relay(f"http://{pi['ip']}:{rs.api_port}/api/camera_stream?device={dev_name}"),
                     mimetype="multipart/x-mixed-replace; boundary=frame")
-
-
-@bp.route("/camera_reset", methods=["POST"])
-def camera_reset():
-    rs: RigState = g.rs
-    ip = _camera_ip(rs)
-    if not ip:
-        return jsonify({"ok": False, "error": "Camera not assigned"}), 400
-    try:
-        r = requests.post(f"http://{ip}:{rs.api_port}/api/camera_reset", timeout=20)
-        return jsonify(r.json()), r.status_code
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 # ── live events ──

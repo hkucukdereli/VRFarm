@@ -19,8 +19,8 @@ Rigs are named after cheese.
 ## How it fits together
 
 ```
-Controller ── setup UI :4999   build and service the rig
-           └─ experiment UI :5000   run sessions, watch live, pull data
+Controller ── controller UI :5000   one app, four tabs: Network · Setup · Experiment · Data
+           │                       (build and service rigs, run sessions, watch live, sync data)
                 │
                 │  REST :5080   deploy code, init devices, camera
                 │  UDP  :5572 → START / STOP / REWARD
@@ -31,8 +31,8 @@ Controller ── setup UI :4999   build and service the rig
         delay → response window → post-stim, writing HDF5        │ SHOW / QUIT
         lick · reward · camera · photodiode · encoder            ▼
                                                           Follower Pi
-                                                    engine/follower.py: pygame
-                                                    renders from a pre-built NPZ
+                                                    displayd: KMS daemon, renderer
+                                                    child draws from a pre-built NPZ
 ```
 
 Three ideas carry most of the design:
@@ -54,18 +54,20 @@ Already-built rig, controller already set up:
 
 ```bash
 conda activate vrfarm
-python app/app.py       # experiment UI -> http://localhost:5000
+python controller/app.py   # -> http://localhost:5000 (Network / Setup / Experiment / Data)
 ```
 
-Then: **Load Rig → Load Experiment → fill in Subject/Date/Session # → Deploy → GO**,
-and **Transfer** when it ends. Walkthrough with screenshots:
+Then, in the Experiment tab: **Load rig → Connect → Load Experiment → fill in
+Subject/Date/Session # → Deploy → GO**. At the end of the day the **Data** tab syncs the
+sessions off the leaders (Sync Now, or Sync & Poweroff) — see [MULTI_RIG.md](docs/MULTI_RIG.md).
+Walkthrough with screenshots:
 [Experiment UI](docs/EXPERIMENT_UI.md).
 
 **No hardware?** The whole stack runs on loopback:
 
 ```bash
 python tools/mock_pi.py     # fake Pi + fake leader
-python app/app.py           # rig = demo, then Deploy -> GO for a scripted session
+python controller/app.py    # Experiment tab -> Load rig demo -> Connect -> Deploy -> GO
 ```
 
 **New machine or new rig?** Start at [CONTROLLER_SETUP.md](docs/CONTROLLER_SETUP.md),
@@ -94,9 +96,9 @@ then [INITIAL_SETUP_REFERENCE.md](docs/INITIAL_SETUP_REFERENCE.md).
 ## Repo layout
 
 ```
-app/           experiment UI (Flask + SSE)          localhost:5000
-setup/         rig setup UI (Flask)                 localhost:4999
-engine/        leader.py (trial loop) · follower.py (renderer)   -> run on the Pis
+controller/    the one controller UI (Flask + SSE)  localhost:5000 — Network / Setup / Experiment / Data
+engine/        leader.py (trial loop)                -> runs on the Leader Pi
+displayd/      KMS display daemon + renderer child      -> runs on the Follower Pi
 devices/       one file per device type + the Device base class
 pi_api/        REST API deployed to each Pi (port 5080) + systemd unit
 shared/        config loaders, stimulus generator, HDF5 consolidation, notifications

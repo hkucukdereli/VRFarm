@@ -33,6 +33,7 @@ PRE_S = float(os.environ.get("MOCK_PRE", 0.5))
 STIM_S = float(os.environ.get("MOCK_STIM", 1.0))
 POST_S = float(os.environ.get("MOCK_POST", 0.5))
 CTRL_HOST = os.environ.get("CTRL_HOST", "127.0.0.1")
+MOCK_RIG = os.environ.get("MOCK_RIG", "")                # rig name stamped on every event (multi-rig demux)
 
 app = Flask(__name__)
 _stop = threading.Event()       # set when the controller sends STOP
@@ -84,6 +85,8 @@ def catchall(endpoint):
 
 def _send(sock, evt):
     evt.setdefault("t", time.time())
+    if MOCK_RIG:
+        evt.setdefault("rig", MOCK_RIG)
     sock.sendto(json.dumps(evt).encode(), (CTRL_HOST, EVENT_PORT))
 
 

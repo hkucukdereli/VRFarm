@@ -1,7 +1,7 @@
 # VRFarm dev-catchme — Claude Code Handoff
 
 This is the **catchme branch**: the barebones leader-only template plus the four catchme
-devices, running on rig **demo0** (`rigs/demo0.yaml`) — one Pi 4, hostname rpi-demo0,
+devices, running on rig **catchme** (`rigs/catchme.yaml`) — one Pi 4, hostname rpi-demo0,
 192.168.10.103, user **pi**, Debian 11 bullseye (system python 3.9 — keep Pi-deployed
 code 3.9-compatible). The full attention-paradigm system lives on `main`; the stripped
 template this builds on is branch `barebones`, which now runs on the same four-tab
@@ -17,7 +17,7 @@ controller as `main` (Network / Setup / Experiment / Data, one app on :5000).
 | `gyroscope_i2c`   | the SAME sensor rewired to the Pi's i2c-1, polled via smbus2 | same |
 
 Only ONE gyro variant is physically wired at a time — flip the two `enabled:` flags in
-`rigs/demo0.yaml` together with the wiring. Shared pieces: `devices/mjpeg_pipe.py`
+`rigs/catchme.yaml` together with the wiring. Shared pieces: `devices/mjpeg_pipe.py`
 (subprocess MJPEG source + PipeCameraBase) and `devices/icm42670.py` (registers + ImuBase).
 Frame timestamps are pipe-arrival (`ts_source` in the metadata); NanEye fps is 30 for v1
 (sensor does 186 — raise after `measured_fps` proves headroom). Video devices record into
@@ -71,7 +71,7 @@ VRFarm/
 │   ├── template.yaml           <- task config: session (trial timing) + devices (per-device params)
 │   └── catchme_smoke.yaml      <- 3 short trials for a bench run
 ├── rigs/
-│   ├── demo0.yaml              <- THE catchme rig: rpi-demo0 (.103, user pi), two cameras + IMU
+│   ├── catchme.yaml            <- THE catchme rig: rpi-demo0 (.103, user pi), two cameras + IMU
 │   ├── _template.yaml          <- what Add rig starts from ('_' files are not rigs)
 │   ├── demo.yaml  demo2.yaml   <- loopback mock rigs (tools/mock_pi.py on :5080 / :5081)
 │   └── .trash/                 <- deleted rigs (gitignored)
@@ -220,7 +220,7 @@ can write `camera_saved` into `metadata.yaml` to get that check.
 ## Dry-run without hardware
 
 ```bash
-python tools/mock_pi.py                 # fake pi_api :5080 + fake leader (rig demo; demo0 needs the hardware)
+python tools/mock_pi.py                 # fake pi_api :5080 + fake leader (rig demo; catchme needs the hardware)
 python controller/app.py --no-browser   # Experiment tab -> demo -> Connect -> Deploy -> GO
 python tools/smoke_multirig.py          # two mock rigs end to end, ~30 s
 python tools/smoke_data.py              # the Data tab against a scratch data tree, ~60 s
@@ -250,7 +250,7 @@ python tools/smoke_data.py              # the Data tab against a scratch data tr
 - rpi-demo0 is bullseye = python 3.9: no `match`, no runtime `X | Y` unions in Pi-deployed code.
   Annotations are fine behind `from __future__ import annotations`.
 - NanEye: after a power cycle the vbridge FPGA must be reloaded before frames flow, and
-  enumeration alone does not mean the sensor streams — see the comment in `rigs/demo0.yaml`.
+  enumeration alone does not mean the sensor streams — see the comment in `rigs/catchme.yaml`.
 
 ## Style / conventions
 

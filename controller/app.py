@@ -108,11 +108,21 @@ def create_app() -> Flask:
 
     @app.route("/api/device_schemas")
     def api_device_schemas():
-        """task_params_schema for every registered device (the Setup device catalog)."""
+        """task_params_schema for every registered device (the Setup device catalog). Scans
+        devices/*.py: every module self-registers via @register_device, so a new device file
+        appears in the catalog with no controller edit. A module that needs Pi-only packages
+        still registers on the Pi; here it is simply skipped."""
+        import importlib
+        import pkgutil
+        import devices as _devices_pkg
         from devices.base import DEVICE_REGISTRY
-        import devices.lick_sensor, devices.reward, devices.camera          # noqa: F401,E401
-        import devices.photodiode, devices.display                         # noqa: F401,E401
-        import devices.calibration_probe, devices.encoder                  # noqa: F401,E401
+        for m in pkgutil.iter_modules(_devices_pkg.__path__):
+            if m.name == "base" or m.name.startswith("_"):
+                continue
+            try:
+                importlib.import_module(f"devices.{m.name}")
+            except Exception:
+                pass
         schemas = {}
         for name, cls in DEVICE_REGISTRY.items():
             schemas[name] = {

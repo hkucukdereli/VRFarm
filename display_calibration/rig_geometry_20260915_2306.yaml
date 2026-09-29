@@ -35,7 +35,7 @@ screen:
   altitude_max_deg: 39.81
   altitude_min_deg: -39.81
   azimuth_boundary_deg: 105
-  azimuth_height: 10
+  azimuth_height: 10.0
   height_cm: 20
   parabola_A: 12
   parabola_B: 0.055

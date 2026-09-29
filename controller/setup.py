@@ -283,11 +283,11 @@ def api_install_pi():
             ssh(ssh_prefix,
                 "sudo apt-get update -qq && sudo apt-get install -y "
                 "python3-pygame python3-numpy python3-yaml libdrm-tests "
-                "libegl1 libegl-mesa0 libgles2 libgl1-mesa-dri && "
+                "libegl1 libegl-mesa0 libgles2 libgl1 libgl1-mesa-dri && "
                 "sudo apt-mark hold libsdl2-2.0-0 python3-pygame",
                 timeout=300)
             steps.append("Installed displayd system packages (pygame/numpy/yaml/libdrm-tests + Mesa "
-                         "EGL/GLES: libegl1 libgles2 libgl1-mesa-dri; libsdl2 + python3-pygame held)")
+                         "EGL/GL: libegl1 libgles2 libgl1 libgl1-mesa-dri; libsdl2 + python3-pygame held)")
             svc_text = (ROOT / "displayd" / "displayd.service").read_text()
             svc_text = svc_text.replace("<name>", rs.name)     # the rig FILENAME is its identity
             if user != "vruser":

@@ -225,9 +225,12 @@ a real `rsync` >= 3.1 for the Data tab. `rsync_path: null` resolves to **the env
 **Follower**: `rig` env for pi_api; **system python3** for displayd/renderer and calib_geo
 (`python3-pygame`, `python3-numpy`, `python3-yaml` from apt — no Flask, and calib_geo's web
 UI is stdlib `http.server` for exactly that reason) plus the Mesa EGL/GLES stack (`libegl1`,
-`libegl-mesa0`, `libgles2`, `libgl1-mesa-dri`): a Lite image ships without it, and then SDL's
-kmsdrm backend fails with `NULL_BACKEND: EGL not initialized` while KMS itself looks fine.
-Install adds all of these.
+`libegl-mesa0`, `libgles2`, `libgl1`, `libgl1-mesa-dri`): a Lite image ships without it, and then
+SDL's kmsdrm backend fails with `NULL_BACKEND: EGL not initialized` while KMS itself looks fine.
+`libgl1` is not optional either: without desktop GL, SDL silently falls back to its GLES2
+renderer, which on the Pi 4 flips vsync-locked but **all-black** frames — 57 fps, DLPC happy,
+projector lit, and the 18 DPI data pins (`pinctrl get 4-21`) never read high (morbier-dlp,
+2026-09-29). Install adds all of these.
 
 pigpiod is built from source (`/usr/local/bin/pigpiod`, unit at
 `/etc/systemd/system/pigpiod.service`, enabled) — the apt package is gone on trixie.

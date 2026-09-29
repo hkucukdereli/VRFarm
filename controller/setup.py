@@ -276,13 +276,18 @@ def api_install_pi():
                              "its test pattern. Fix passwordless sudo, then re-run Install and reboot")
 
             # 5c. displayd prerequisites (system python3 pygame/numpy/yaml, held) + its unit.
+            #     The Mesa EGL/GLES stack is spelled out because a Lite image lacks it and
+            #     libsdl2 does not depend on it: without libegl1 + the v3d DRI driver SDL's
+            #     kmsdrm backend cannot create an EGL context, falls back to a null driver, and
+            #     the renderer dies with NULL_BACKEND "EGL not initialized" (morbier-dlp, 2026-09-29).
             ssh(ssh_prefix,
                 "sudo apt-get update -qq && sudo apt-get install -y "
-                "python3-pygame python3-numpy python3-yaml libdrm-tests && "
+                "python3-pygame python3-numpy python3-yaml libdrm-tests "
+                "libegl1 libegl-mesa0 libgles2 libgl1-mesa-dri && "
                 "sudo apt-mark hold libsdl2-2.0-0 python3-pygame",
                 timeout=300)
-            steps.append("Installed displayd system packages (pygame/numpy/yaml/libdrm-tests; "
-                         "libsdl2 + python3-pygame held)")
+            steps.append("Installed displayd system packages (pygame/numpy/yaml/libdrm-tests + Mesa "
+                         "EGL/GLES: libegl1 libgles2 libgl1-mesa-dri; libsdl2 + python3-pygame held)")
             svc_text = (ROOT / "displayd" / "displayd.service").read_text()
             svc_text = svc_text.replace("<name>", rs.name)     # the rig FILENAME is its identity
             if user != "vruser":

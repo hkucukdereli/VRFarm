@@ -252,9 +252,11 @@ display_diagnostics/preview/
 # The `latest` symlink is what compute_warp_map reads, so it is rig state too.
 # (Note the asymmetry with rig_geometry*.yaml, which IS tracked — geometry is authored by hand
 # in the calibrator and worth diffing; these are instrument readings.)
+# Per-rig layout: display_calibration/<rig>/intensity/ holds all of it (along-azimuth fits and
+# raw readings, the theoretical file, contrast cals). The flat patterns cover stray old files.
+display_calibration/*/intensity/
 display_calibration/luminance_cal_*.yaml
 display_calibration/luminance_measurements_*.yaml
-# ... and the same inside the per-rig folders (display_calibration/<rig>/)
 display_calibration/*/luminance_cal_*.yaml
 display_calibration/*/luminance_measurements_*.yaml
 

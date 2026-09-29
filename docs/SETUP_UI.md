@@ -15,7 +15,7 @@ conda activate vrfarm
 python controller/app.py     # http://localhost:5000 -> Setup tab
 ```
 
-It writes `rigs/<name>.yaml` and `display_calibration/<rig>/rig_geometry*.yaml`, and together
+It writes `rigs/<name>.yaml` and `display_calibration/<rig>/geometry/rig_geometry_<stamp>.yaml` (plus intensity files in `display_calibration/<rig>/intensity/`), and together
 with the Data tab it is the part of VRFarm that uses SSH — Install, Reboot, Shutdown, warp generation and
 geometry calibration all shell out over `ssh`/`scp`. See
 [CONTROLLER_SETUP.md §2](CONTROLLER_SETUP.md#2-passwordless-ssh-to-the-pis) if those
@@ -279,6 +279,11 @@ azimuth press **Show** (manual) and **Read** to take a Thorlabs PM100D reading �
 the value if no meter is attached. With at least two readings, **Fit & Apply** writes the
 calibration and rebuilds and redeploys the warp. `theoretical` uses the modelled falloff;
 `none` disables correction entirely.
+
+**Contrast Cal** (same section) measures one spot instead: the light at drive 1.0, 0.9 … 0.0 on
+black, the last being the projector's floor. **Save** writes
+`display_calibration/<rig>/intensity/contrast_cal_<stamp>.yaml`; the Experiment tab then offers it
+next to **Contrast**, where it turns contrast values into measured luminance contrast.
 
 ---
 

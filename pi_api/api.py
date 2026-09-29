@@ -444,7 +444,8 @@ def generate_stims():
         stim_dir.mkdir(parents=True, exist_ok=True)
         contrast_metric = data.get("contrast_metric", "weber")
         arrays = generate_stimuli(task_config, warp_map, str(stim_dir),
-                                  contrast_metric=contrast_metric)
+                                  contrast_metric=contrast_metric,
+                                  contrast_cal=data.get("contrast_cal"))
 
         result = {
             "ok": True,

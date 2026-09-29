@@ -186,7 +186,7 @@
           <div><label>Duration (s)</label><input type="number" id="p-duration_s" step="0.1" min="0.1" class="task-param"></div>
           <div><label>Altitude (deg)</label><input type="number" id="p-altitude_deg" step="1" class="task-param"></div>
         </div>
-        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0 8px;">
+        <div style="display:grid; grid-template-columns:1.5fr 1fr 1fr 0.8fr; gap:0 8px;">
           <div>
             <label>Contrast <span id="contrast-metric-label" style="color:#7bd">(Weber)</span> <span id="contrast-ceiling-hint" style="color:#888; font-size:10px"></span></label>
             <div style="display:flex; gap:4px; align-items:center;">
@@ -194,6 +194,11 @@
               <button type="button" id="btn-correct-contrast" class="btn btn-sm btn-blue" onclick="correctContrast()" title="Clamp values to the achievable ceiling (uniform across the session's azimuths)">Correct</button>
             </div>
           </div>
+          <div><label>Contrast cal</label>
+            <select id="p-contrast_calibration" class="task-param" onchange="onContrastCalChange()"
+                    title="none: contrast is the ratio of drive levels. A contrast cal file (Setup → Display → INTENSITY → Contrast Cal): contrast is the MEASURED luminance contrast, including the projector's black floor, so it can exceed 1 (e.g. 10:1 light = 900 % Weber on black)">
+              <option value="none">none (drive)</option>
+            </select></div>
           <div><label>Proportions</label><input type="text" id="p-contrast_proportions" class="task-param" title="e.g. [0.34, 0.33, 0.33]"></div>
           <div><label>Background</label><input type="number" id="p-background_gray" step="0.01" min="0" max="1" class="task-param" oninput="updateContrastHint()"></div>
         </div>
@@ -694,6 +699,7 @@ function populateTaskFields(t) {
   document.getElementById('p-contrast_proportions').value = JSON.stringify(c.proportions || [1]);
   document.getElementById('p-photodiode_sync_enabled').checked = !!stim.photodiode_sync_enabled;
   document.getElementById('p-photodiode_sync_every_n').value = stim.photodiode_sync_every_n ?? 5;
+  setContrastCalSelection(stim.contrast_calibration);
   refreshContrastMetric();
 
   // Reward
@@ -766,6 +772,7 @@ function collectTaskFields() {
       altitude_deg: _numField('p-altitude_deg', 10),
       go_rule: document.getElementById('p-go_rule').value,
       contrast: { values: contrastValues, proportions: contrastProportions },
+      contrast_calibration: _contrastCal() || 'none',
       photodiode_sync_enabled: document.getElementById('p-photodiode_sync_enabled').checked,
       photodiode_sync_every_n: parseInt(document.getElementById('p-photodiode_sync_every_n').value) || 5,
     },
@@ -955,16 +962,88 @@ function refreshContrastMetric() {
   const metric = _activeMetric();
   const name = {weber: 'Weber', michelson: 'Michelson', normalized: 'Normalized'}[metric] || metric;
   const lbl = document.getElementById('contrast-metric-label');
-  if (lbl) lbl.textContent = '(' + name + ')';
+  if (lbl) lbl.textContent = '(' + name + (_contrastCal() ? ', measured' : '') + ')';
+  const inp = document.getElementById('p-contrast_values');
+  if (inp) inp.title = _contrastCal()
+    ? 'MEASURED ' + name + ' contrast via ' + _contrastCal() + ' — can exceed 1 (1 = 100 %)'
+    : 'values in the active metric, 0..1 — e.g. [0.25, 0.15, 0.125]';
   updateContrastHint();
 }
 
+// ── Contrast calibration (measured luminance vs drive level, per rig) ──
+// The dropdown lists this rig's display_calibration/<rig>/intensity/contrast_cal_*.yaml. The
+// choice is a task parameter (stimulus.contrast_calibration); Deploy sends the file's readings to
+// the Leader, which turns each measured contrast into the drive level that produces it.
+let contrastCalFiles = [];
+let _contrastCalWanted = 'none';   // the task's value, kept even if this rig lacks the file
+
+function _contrastCal() {
+  const sel = document.getElementById('p-contrast_calibration');
+  const v = sel ? sel.value : 'none';
+  return (v && v !== 'none') ? v : null;
+}
+
+function _renderContrastCalOptions() {
+  const sel = document.getElementById('p-contrast_calibration');
+  if (!sel) return;
+  const want = _contrastCalWanted || 'none';
+  const opts = ['<option value="none">none (drive)</option>'];
+  contrastCalFiles.forEach(f => {
+    const ratio = (f.ratio != null && isFinite(f.ratio)) ? ` · ${(+f.ratio).toFixed(0)}:1` : '';
+    const at = (f.az_deg != null) ? ` @ az ${f.az_deg}°` : '';
+    opts.push(`<option value="${f.name}">${f.name.replace('.yaml', '')}${at}${ratio}</option>`);
+  });
+  if (want !== 'none' && !contrastCalFiles.some(f => f.name === want))
+    opts.push(`<option value="${want}">${want} (MISSING on this rig)</option>`);
+  sel.innerHTML = opts.join('');
+  sel.value = want;
+}
+
+async function loadContrastCals() {
+  try {
+    const d = await (await fetch(api('/contrast_cals'))).json();
+    contrastCalFiles = Array.isArray(d.files) ? d.files.filter(f => !f.error) : [];
+  } catch (e) { contrastCalFiles = []; }
+  _renderContrastCalOptions();
+  refreshContrastMetric();
+}
+
+function setContrastCalSelection(name) {
+  _contrastCalWanted = (name && name !== 'None') ? name : 'none';
+  _renderContrastCalOptions();
+  loadContrastCals();   // refresh the list for this rig (async; keeps the selection)
+}
+
+function onContrastCalChange() {
+  _contrastCalWanted = _contrastCal() || 'none';
+  refreshContrastMetric();
+}
+
 // Live hint: the display ceiling (f=1) in the active metric at the current background.
+let _hintSeq = 0;
 function updateContrastHint() {
   const el = document.getElementById('contrast-ceiling-hint');
   if (!el) return;
   const bg = parseFloat(document.getElementById('p-background_gray')?.value);
   if (!isFinite(bg)) { el.textContent = ''; return; }
+  const cal = _contrastCal();
+  if (cal) {
+    // Measured ceiling (drive 1.0 on this bg, lowest over the session's azimuths): server-side,
+    // because it needs the cal's readings and the rig's warp.
+    let blockSeq;
+    try { blockSeq = JSON.parse(document.getElementById('p-block_sequence').value); } catch (e) { blockSeq = [0]; }
+    const seq = ++_hintSeq;
+    el.textContent = '…';
+    fetch(api('/contrast_ceiling'), {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({contrast_calibration: cal, background_gray: bg, block_sequence: blockSeq})})
+      .then(r => r.json()).then(d => {
+        if (seq !== _hintSeq) return;
+        el.textContent = d.ok && d.ceiling != null
+          ? ('max ' + (isFinite(d.ceiling) ? (+d.ceiling).toFixed(2) : '∞') + ' measured @ this bg')
+          : ('cal error: ' + (d.error || '?'));
+      }).catch(() => { if (seq === _hintSeq) el.textContent = ''; });
+    return;
+  }
   // Input is capped at 1.0; the metric display ceiling only matters when it falls BELOW 1
   // (upper part of 0..1 would clip to white). When it's >=1 the whole 0..1 range is usable.
   const cmax = Math.min(fractionToMetric(1, bg, _activeMetric()), 1);
@@ -1016,7 +1095,8 @@ async function correctContrast() {
   try {
     const r = await fetch(api('/correct_contrast'), {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({values, background_gray: bg, block_sequence: blockSeq})
+      body: JSON.stringify({values, background_gray: bg, block_sequence: blockSeq,
+                            contrast_calibration: _contrastCal() || 'none'})
     });
     const data = await r.json();
     if (data.ok) {

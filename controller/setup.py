@@ -7,9 +7,9 @@ The Setup tab's backend: every route setup/app.py had, now under
 (controller/network.py); the device catalog, device init, calibration, warp and
 luminance work, Install / Deploy / Restart / Reboot / Shutdown per Pi all stay here.
 
-Calibration data files (rig_geometry*.yaml, warp_map.npz, luminance cals) are looked up in
-display_calibration/<rig>/ when that folder exists, else in the shared display_calibration/
-(the pre-multi-rig location) — see geo_dir(). The scripts always live in the shared folder.
+Calibration data lives per rig in display_calibration/<rig>/{geometry,intensity}/ plus
+display_calibration/<rig>/warp_map.npz — see controller/calib_paths.py. The scripts live in the
+shared display_calibration/ folder.
 """
 from __future__ import annotations
 import json
@@ -26,7 +26,7 @@ from flask import Blueprint, Response, g, jsonify, request
 
 from shared.config import save_rig_atomic, photodiode_init_payload
 from shared.mjpeg_relay import relay
-from controller import settings
+from controller import settings, calib_paths
 from controller.registry import registry, RigState
 from controller.ssh import ssh, scp, ssh_merged, ssh_ok, target as ssh_target
 
@@ -56,10 +56,18 @@ def _require_loaded():
 
 
 def geo_dir(rs: RigState) -> Path:
-    """Where this rig's calibration DATA lives: display_calibration/<rig>/ once migrated
-    (tools/migrate_calibration_dir.py), else the shared display_calibration/ folder."""
-    d = TOOLS_DIR / rs.name
-    return d if d.is_dir() else TOOLS_DIR
+    """display_calibration/<rig>/geometry/ (created on first use)."""
+    return calib_paths.geometry_dir(rs.name)
+
+
+def lum_dir(rs: RigState) -> Path:
+    """display_calibration/<rig>/intensity/ (created on first use)."""
+    return calib_paths.intensity_dir(rs.name)
+
+
+def _geo_file(rs: RigState, name: str | None) -> Path | None:
+    """Geometry `name` in this rig's folder, or the rig's current geometry when name is empty."""
+    return calib_paths.resolve_geometry(rs.name, rs.config, name)
 
 
 def _pi_user(rs: RigState, ip: str, fallback: str | None = None) -> str:
@@ -607,21 +615,32 @@ def _display_lum_mode(rs: RigState):
         return "theoretical"
 
 
+def _write_theoretical_cal(rs: RigState, geo_file: Path) -> Path:
+    """intensity/luminance_cal_<geostamp>_theoretical.yaml from the geometry model, so the rig
+    always has an intensity calibration file even before anything is measured."""
+    geo = yaml.safe_load(geo_file.read_text())
+    az, gain = _cwm().theoretical_luminance_curve(geo)
+    return calib_paths.lum_module(rs.name).save_theoretical_cal(az, gain, geo_file.name, lum_dir(rs))
+
+
 def _generate_and_deploy_warp(rs: RigState, geo_file: Path, lum_mode="theoretical"):
     """Build warp_map.npz on the controller from `geo_file`, then ATOMICALLY copy it + the
     geometry to every Pi and reload the live display. Returns (ok, steps, error)."""
     steps = []
-    gdir = geo_dir(rs)
+    rdir = calib_paths.rig_dir(rs.name)
     python = sys.executable
     script = str(TOOLS_DIR / "compute_warp_map.py")
-    argv = [python, script, "--geo", str(geo_file), "--lum-mode", lum_mode]
-    if gdir != TOOLS_DIR:
-        argv += ["--cal-dir", str(gdir)]
-    r = subprocess.run(argv, capture_output=True, text=True, timeout=60, cwd=str(gdir))
+    argv = [python, script, "--geo", str(geo_file), "--lum-mode", lum_mode, "--cal-dir", str(rdir)]
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=60, cwd=str(rdir))
     if r.returncode != 0:
         return False, steps, r.stderr[-500:]
     steps.append(f"Generated warp map from {geo_file.name} (luminance: {lum_mode})")
-    npz_path = gdir / "warp_map.npz"
+    try:
+        out = _write_theoretical_cal(rs, geo_file)
+        steps.append(f"Theoretical intensity cal → {out.name}")
+    except Exception as e:
+        steps.append(f"WARN theoretical intensity cal not written: {e}")
+    npz_path = calib_paths.warp_path(rs.name)
     if not npz_path.exists():
         return False, steps, "warp_map.npz not created"
     for pi in rs.pis:
@@ -652,14 +671,8 @@ def _generate_and_deploy_warp(rs: RigState, geo_file: Path, lum_mode="theoretica
 def api_generate_warp():
     rs: RigState = g.rs
     data = request.json or {}
-    gdir = geo_dir(rs)
-    name = data.get("geometry")
-    if name:
-        geo_file = (gdir / Path(name).name).resolve()
-    else:
-        gp = data.get("geometry_path", str(gdir / "rig_geometry.yaml"))
-        geo_file = (Path(gp) if Path(gp).is_absolute() else (ROOT / gp)).resolve()
-    if not geo_file.exists():
+    geo_file = _geo_file(rs, data.get("geometry"))
+    if geo_file is None or not geo_file.exists():
         return jsonify({"ok": False, "error": f"Geometry file not found: {geo_file}"}), 404
     lum_mode = data.get("lum_mode") or _display_lum_mode(rs)
     try:
@@ -695,14 +708,8 @@ def api_lum_read():
 
 
 def _lum_module(rs: RigState):
-    """fit_luminance_correction, pointed at this rig's calibration folder when it has one."""
-    if str(TOOLS_DIR) not in sys.path:
-        sys.path.insert(0, str(TOOLS_DIR))
-    import fit_luminance_correction as flc
-    gdir = geo_dir(rs)
-    if gdir != TOOLS_DIR and hasattr(flc, "set_cal_dir"):
-        flc.set_cal_dir(gdir)
-    return flc
+    """fit_luminance_correction, pointed at this rig's intensity folder."""
+    return calib_paths.lum_module(rs.name)
 
 
 @bp.route("/lum_apply", methods=["POST"])
@@ -714,16 +721,14 @@ def api_lum_apply():
     mode = data.get("mode", "theoretical")
     if mode not in ("empirical", "theoretical", "none"):
         return jsonify({"ok": False, "error": f"Unknown mode: {mode}"}), 400
-    gdir = geo_dir(rs)
-    name = data.get("geometry")
-    geo_file = ((gdir / Path(name).name) if name else (gdir / "rig_geometry.yaml")).resolve()
-    if not geo_file.exists():
+    geo_file = _geo_file(rs, data.get("geometry"))
+    if geo_file is None or not geo_file.exists():
         return jsonify({"ok": False, "error": f"Geometry file not found: {geo_file}"}), 404
     steps, fit = [], None
     if mode == "empirical" and data.get("cal_file") and not data.get("measurements"):
         try:
             flc = _lum_module(rs)
-            chosen = flc.select_luminance_cal(data["cal_file"])
+            chosen = flc.select_luminance_cal(data["cal_file"], cal_dir=lum_dir(rs))
             steps.append(f"Using saved cal {chosen.name} (no refit)")
         except Exception as e:
             return jsonify({"ok": False, "error": f"Could not select cal: {e}"}), 400
@@ -735,10 +740,11 @@ def api_lum_apply():
         try:
             flc = _lum_module(rs)
             raw = flc.save_luminance_measurements(valid, patch=data.get("patch"),
-                                                  method=data.get("method"), source="setup-ui")
+                                                  method=data.get("method"), source="setup-ui",
+                                                  cal_dir=lum_dir(rs))
             steps.append(f"Saved {len(valid)} raw readings → {raw.name}")
             az, gain, corr = flc.fit_luminance(valid)
-            out = flc.save_luminance_cal(az, gain, corr, source_file=raw.name)
+            out = flc.save_luminance_cal(az, gain, corr, source_file=raw.name, cal_dir=lum_dir(rs))
             steps.append(f"Fitted → {out.name}")
             asym = flc.azimuth_asymmetry(valid)
             if asym is None:
@@ -771,9 +777,36 @@ def api_lum_apply():
 def api_list_lum_cals():
     rs: RigState = g.rs
     try:
-        return jsonify(_lum_module(rs).list_luminance_cals())
+        return jsonify(_lum_module(rs).list_luminance_cals(lum_dir(rs)))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/list_contrast_cals")
+def api_list_contrast_cals():
+    """Saved contrast cals (luminance vs drive level at one spot), newest first."""
+    rs: RigState = g.rs
+    try:
+        return jsonify(_lum_module(rs).list_contrast_cals(lum_dir(rs)))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/save_contrast_cal", methods=["POST"])
+def api_save_contrast_cal():
+    """{measurements: [{level, reading}], patch: {az_deg, alt_deg, size_deg}, method}
+    -> intensity/contrast_cal_<ts>.yaml. Nothing is deployed: a task picks the file in the
+    Experiment tab and Deploy converts its contrasts through it."""
+    rs: RigState = g.rs
+    data = request.json or {}
+    try:
+        out = _lum_module(rs).save_contrast_cal(data.get("measurements") or [], patch=data.get("patch"),
+                                                method=data.get("method"), source="setup-ui",
+                                                cal_dir=lum_dir(rs))
+        cal = calib_paths.load_contrast_cal(rs.name, out.name)
+    except (ValueError, KeyError, TypeError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "name": out.name, "ratio": cal["ratio"]})
 
 
 # ── geometry calibration (calib_geo on the display Pi) ──
@@ -840,10 +873,8 @@ def api_start_calibration():
         return jsonify({"ok": False, "error": "rig is running a session"}), 409
     tgt = ssh_target(target_pi)
     ip = target_pi["ip"]
-    gdir = geo_dir(rs)
-    name = (request.json or {}).get("geometry") or "rig_geometry.yaml"
     geo_data = (request.json or {}).get("geometry_data")
-    geo_file = (gdir / Path(name).name).resolve()
+    geo_file = _geo_file(rs, (request.json or {}).get("geometry"))
     tools = ["calib_geo.py", "cal_start.sh", "cal_stop.sh", "panel_grid.py", "validate_calibration_pygame.py"]
     steps = []
     try:
@@ -872,7 +903,7 @@ def api_start_calibration():
         else:
             chk = subprocess.run(["ssh", "-o", "ConnectTimeout=5", tgt, "test -e ~/rig/calibration/rig_geometry.yaml"],
                                  capture_output=True, text=True, timeout=15)
-            if chk.returncode != 0 and geo_file.exists():
+            if chk.returncode != 0 and geo_file is not None and geo_file.exists():
                 scp(str(geo_file), f"{tgt}:~/rig/calibration/rig_geometry.yaml")
                 steps.append(f"Seeded rig_geometry.yaml from {geo_file.name}")
         if _displayd_active(tgt):
@@ -961,36 +992,46 @@ def api_check_warp():
 @bp.route("/list_geometries")
 def api_list_geometries():
     rs: RigState = g.rs
-    return jsonify([f.name for f in sorted(geo_dir(rs).glob("rig_geometry*.yaml"))])
+    return jsonify(calib_paths.geometry_files(rs.name))
 
 
 @bp.route("/load_geometry", methods=["POST"])
 def api_load_geometry():
     rs: RigState = g.rs
-    name = Path((request.json or {}).get("name", "rig_geometry.yaml")).name
-    path = geo_dir(rs) / name
-    if not path.exists():
-        return jsonify({"error": f"Not found: {name}"}), 404
+    path = _geo_file(rs, (request.json or {}).get("name"))
+    if path is None or not path.exists():
+        return jsonify({"error": f"Not found: {path.name if path else '(no geometry files)'}"}), 404
     with open(path) as f:
         geo = yaml.safe_load(f)
-    return jsonify({"name": name, "geometry": geo})
+    return jsonify({"name": path.name, "geometry": geo})
 
 
 @bp.route("/save_geometry", methods=["POST"])
 def api_save_geometry():
+    """Save edited geometry. Dated geometry files are records of a calibration, so an edit never
+    rewrites one: unchanged values -> nothing written; changed values -> a NEW
+    rig_geometry_<now>.yaml, whose name is returned so the UI selects it (and Save Rig makes it
+    the rig's display.geometry_file)."""
     rs: RigState = g.rs
     data = request.json or {}
-    name = Path(data.get("name", "rig_geometry.yaml")).name
     geo = data.get("geometry")
     if not geo:
         return jsonify({"ok": False, "error": "No geometry data"}), 400
+    base = _geo_file(rs, data.get("name"))
+    if base is not None and base.exists():
+        try:
+            if json.dumps(yaml.safe_load(base.read_text()), sort_keys=True) == json.dumps(geo, sort_keys=True):
+                return jsonify({"ok": True, "name": base.name, "unchanged": True})
+        except Exception:
+            pass
     if "projector" in geo and "resolution" in geo["projector"]:
         geo["projector"]["resolution"] = _FlowList(geo["projector"]["resolution"])
-    gdir = geo_dir(rs)
-    gdir.mkdir(parents=True, exist_ok=True)
-    with open(gdir / name, "w") as f:
+    name = calib_paths.new_geometry_name(rs.name)
+    with open(geo_dir(rs) / name, "w") as f:
+        if base is not None:
+            f.write(f"# edited in the Setup tab from {base.name}\n")
         yaml.dump(geo, f, default_flow_style=False, sort_keys=True)
-    return jsonify({"ok": True, "name": name})
+    return jsonify({"ok": True, "name": name, "created": True, "from": base.name if base else None})
 
 
 @bp.route("/receive_geometry", methods=["POST"])
@@ -1005,21 +1046,17 @@ def api_receive_geometry():
         yaml.safe_load(text)
     except Exception as e:
         return jsonify({"ok": False, "error": f"Invalid YAML: {e}"}), 400
-    gdir = geo_dir(rs)
-    gdir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M")
-    archive = f"rig_geometry_{stamp}.yaml"
-    (gdir / archive).write_text(text)
-    (gdir / "rig_geometry.yaml").write_text(text)
-    print(f"[receive_geometry:{rs.name}] archived {archive} + updated canonical rig_geometry.yaml")
-    return jsonify({"ok": True, "archived": archive, "canonical": "rig_geometry.yaml"})
+    archive = calib_paths.new_geometry_name(rs.name)
+    (geo_dir(rs) / archive).write_text(text)
+    print(f"[receive_geometry:{rs.name}] saved {archive}")
+    return jsonify({"ok": True, "archived": archive})
 
 
 @bp.route("/send_geometry", methods=["POST"])
 def api_send_geometry():
     rs: RigState = g.rs
     name = Path((request.json or {}).get("name", "")).name
-    src = geo_dir(rs) / name
+    src = geo_dir(rs) / name if name else None
     if not name or not src.exists():
         return jsonify({"ok": False, "error": f"Not found: {name}"}), 400
     target_pi = _display_pi(rs)

@@ -68,7 +68,7 @@ into the env, so a version mismatch breaks `import picamera2`. Create with
 │   ├── config.py  stim_generator.py  notify.py
 │   ├── leader_data.py                 <- Pi-side inventory / consolidate / purge for the Data tab (over SSH)
 │   └── deploy_manifest.py             <- single deploy file list (Install and Deploy)
-├── display_calibration/               <- geometry calibration (kmsdrm; calib_geo.py + cal_start/stop.sh)
+├── display_calibration/               <- calibration scripts + <rig>/{geometry,intensity}/ + <rig>/warp_map.npz
 ├── shepherd/                          <- Pi-side health monitor
 └── data/subjects/                     <- session history JSONs
 ```
@@ -268,8 +268,13 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
   once (`cp -n`), so new shepherd settings need code defaults.
 - Install sets every Pi's time zone to `Europe/Vienna` (`timedatectl`); before that the leader ran on
   Europe/London, so its log times read an hour behind the follower's. Recorded data is Unix time.
-- Calibration files are per rig once `display_calibration/<rig>/` exists
-  (`python tools/migrate_calibration_dir.py cheddar`); until then the shared folder is used.
+- Calibration files are per rig: `display_calibration/<rig>/geometry/rig_geometry_<stamp>.yaml`
+  (the rig YAML's `display.geometry_file` picks one; dated files are never rewritten, an edit saves
+  a new one), `display_calibration/<rig>/intensity/` (along-azimuth `luminance_cal_*`, a
+  `*_theoretical` file per geometry, and `contrast_cal_*` = light vs drive level at one spot), and
+  `display_calibration/<rig>/warp_map.npz`. A task's `stimulus.contrast_calibration` (Experiment tab,
+  next to Contrast) makes its contrast values MEASURED contrast; Deploy sends that file's readings to
+  the Leader. See `display_calibration/README.md`.
 - **One serial reader.** The Teensy's `/dev/ttyACM0` gives its bytes to exactly one process;
   a second reader silently steals them. Release pi_api's devices before bench tools.
 - The Teensy sync output is **pin 16** (scope-verified), analog in is **A1**.

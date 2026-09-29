@@ -1,6 +1,6 @@
 # Geometry Parameters Reference
 
-All parameters are in `rig_geometry.yaml` in this folder (`display_calibration/`).
+All parameters are in the rig's geometry file, `display_calibration/<rig>/geometry/rig_geometry_<stamp>.yaml` (on the Pi: `~/rig/calibration/rig_geometry.yaml`).
 
 The screen is a parabolic **cylinder**: cross-section from above follows `y = A - B*x²`,
 with the mouse eye at the origin (x = lateral, y = depth/forward, z = up). It is curved

@@ -170,13 +170,11 @@ wins and the old file is ignored (the log says so).
 
 ## Calibration files per rig
 
-Geometry, warp map and luminance files are looked up in `display_calibration/<rig>/` when that
-folder exists, else in the shared `display_calibration/` (the pre-multi-rig location). Give a
-rig its own folder once:
-
-```bash
-python tools/migrate_calibration_dir.py cheddar
-```
+Each rig has `display_calibration/<rig>/geometry/` (dated geometry files), `intensity/`
+(along-azimuth and contrast calibrations, plus a theoretical file) and its `warp_map.npz`; see
+[display_calibration/README.md](../display_calibration/README.md#where-the-files-live). The
+folders are created the first time the Setup tab touches a rig; a rig without geometry is seeded
+from `display_calibration/rig_geometry_default.yaml`.
 
 The geometry tool on the display Pi reports a saved geometry back to
 `/api/rigs/<rig>/setup/receive_geometry`; the Setup tab passes that address to `cal_start.sh`

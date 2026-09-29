@@ -548,7 +548,11 @@ def _load_empirical_cal():
     luminance_cal_latest.yaml, if present, for re-injection into warp_map.npz. Returns a dict
     {az, gain, correction, source} or None. This is what lets a measured correction survive
     every warp regeneration instead of being clobbered."""
-    path = CAL_DIR / "luminance_cal_latest.yaml"
+    # Per-rig layout: display_calibration/<rig>/intensity/luminance_cal_latest.yaml, with the
+    # warp written to display_calibration/<rig>/warp_map.npz. A flat folder still works.
+    path = CAL_DIR / "intensity" / "luminance_cal_latest.yaml"
+    if not path.exists():
+        path = CAL_DIR / "luminance_cal_latest.yaml"
     if not path.exists():
         return None
     try:
@@ -560,6 +564,16 @@ def _load_empirical_cal():
     except Exception as e:
         print(f"  [warn] could not read {path.name}: {e}")
         return None
+
+
+def theoretical_luminance_curve(geo):
+    """(az 0..105, gain) of the theoretical model for `geo` — what the warp bakes in as
+    lum_az/lum_gain_theoretical. The controller writes it out as the rig's theoretical
+    intensity calibration file, so every rig has one even before anything is measured."""
+    geo = normalize_geo(geo)
+    proj = build_projector(geo)
+    az_sym = np.linspace(0, 105, 53)
+    return az_sym, compute_theoretical_luminance_correction(geo, az_sym, proj)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -689,9 +703,8 @@ if __name__ == "__main__":
                         help='luminance correction baked into the warp (default: theoretical). '
                              'empirical re-injects luminance_cal_latest.yaml.')
     parser.add_argument('--cal-dir', default=None,
-                        help='folder holding luminance_cal_latest.yaml and receiving warp_map.npz '
-                             '(default: next to this script; the controller passes '
-                             'display_calibration/<rig>/ for a migrated rig)')
+                        help='rig folder: reads intensity/luminance_cal_latest.yaml, writes warp_map.npz '
+                             '(the controller passes display_calibration/<rig>/)')
     args = parser.parse_args()
     if args.cal_dir:
         CAL_DIR = Path(args.cal_dir).expanduser().resolve()

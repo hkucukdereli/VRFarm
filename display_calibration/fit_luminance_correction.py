@@ -33,12 +33,14 @@ WARP_MAP = CAL_DIR / "warp_map.npz"
 
 
 def set_cal_dir(path):
-    """Point every reader/writer here at another calibration folder. The controller calls this
-    with display_calibration/<rig>/ for a rig that has its own folder (multi-rig); the
-    functions below resolve their `cal_dir` argument against CAL_DIR at CALL time."""
+    """Point every reader/writer here at a rig's intensity folder. The controller calls this
+    with display_calibration/<rig>/intensity/; the rig's warp map is one level up
+    (display_calibration/<rig>/warp_map.npz). The functions below resolve their `cal_dir`
+    argument against CAL_DIR at CALL time."""
     global CAL_DIR, WARP_MAP
     CAL_DIR = Path(path)
-    WARP_MAP = CAL_DIR / "warp_map.npz"
+    base = CAL_DIR.parent if CAL_DIR.name == "intensity" else CAL_DIR
+    WARP_MAP = base / "warp_map.npz"
 
 
 def _reading(m):
@@ -194,7 +196,8 @@ def list_luminance_cals(cal_dir=None):
     for f in cal_dir.glob("luminance_cal_*.yaml"):
         if f.name == "luminance_cal_latest.yaml":
             continue
-        out.append({"name": f.name, "mtime": f.stat().st_mtime, "is_latest": f.name == target})
+        out.append({"name": f.name, "mtime": f.stat().st_mtime, "is_latest": f.name == target,
+                    "source": "theoretical" if f.stem.endswith("_theoretical") else "measured"})
     return sorted(out, key=lambda d: d["mtime"], reverse=True)
 
 
@@ -218,6 +221,116 @@ def select_luminance_cal(name, cal_dir=None):
         latest.unlink()
     latest.symlink_to(target.name)
     return target
+
+
+def save_theoretical_cal(az, gain, geometry_name, cal_dir=None):
+    """Write the geometry model's per-azimuth gain as an intensity cal file, same format as a
+    measured one, so every rig has an intensity calibration before anything is measured.
+
+    Named after the geometry it came from (rig_geometry_<stamp>.yaml ->
+    luminance_cal_<stamp>_theoretical.yaml), so rebuilding the same geometry rewrites the same
+    file instead of piling up copies. Returns the written path."""
+    import re
+    cal_dir = Path(cal_dir or CAL_DIR)
+    cal_dir.mkdir(parents=True, exist_ok=True)
+    m = re.search(r"(\d{8}_\d{4})", Path(geometry_name).stem)
+    stamp = m.group(1) if m else datetime.now().strftime('%Y%m%d_%H%M')
+    gain = np.asarray(gain, dtype=float)
+    gf = np.maximum(gain, 0.05)
+    correction = np.min(gf) / gf
+    out = cal_dir / f"luminance_cal_{stamp}_theoretical.yaml"
+    doc = {
+        'date': date.today().isoformat(),
+        'source': 'theoretical',
+        'geometry_file': Path(geometry_name).name,
+        'az_degrees': [float(x) for x in az],
+        'gain': [float(x) for x in gain],
+        'correction': [float(x) for x in correction],
+        'note': ('THEORETICAL: cos(incidence) of the projector beam on the parabolic screen, '
+                 'from the geometry file above. Not measured. gain: relative luminance '
+                 '(1.0 at center). correction: min(gain)/gain.'),
+    }
+    out.write_text(yaml.dump(doc, default_flow_style=False, sort_keys=False))
+    return out
+
+
+# ── Contrast calibration: luminance vs drive level at ONE azimuth/altitude ──
+#
+# The along-azimuth cal above equalizes brightness ACROSS the screen. This one measures how the
+# light at a single spot depends on the drive level (1.0 .. 0.0), including the black floor that
+# a drive of 0 still leaves (DMD leakage + stray light). With it, a contrast value means the
+# measured luminance contrast, not the drive ratio: on a black background the floor makes Weber
+# contrast finite and large (a 10:1 light ratio is 900 %), instead of undefined.
+
+def save_contrast_cal(measurements, patch=None, method=None, source=None, cal_dir=None):
+    """Write contrast_cal_<ts>.yaml. measurements: [{level: 0..1, reading: float}].
+    Returns the written path. Raises ValueError on unusable input."""
+    cal_dir = Path(cal_dir or CAL_DIR)
+    cal_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for m in measurements:
+        lv, rd = float(m["level"]), float(m["reading"])
+        if not 0.0 <= lv <= 1.0:
+            raise ValueError(f"level {lv} outside 0..1")
+        rows.append({"level": lv, "reading": rd})
+    rows.sort(key=lambda r: r["level"], reverse=True)
+    levels = [r["level"] for r in rows]
+    if len(rows) < 2 or max(levels) < 1.0 or min(levels) > 0.0:
+        raise ValueError("need readings at level 1.0 and level 0.0 (plus any in between)")
+    doc = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "kind": "contrast",
+        "source": source or "setup-ui",
+        "method": method,
+        # Conditions: a raw square (luminance correction OFF) at one az/alt on a black field.
+        "patch": {"shape": "square", "bg_gray": 0, "apply_lum": False, **(patch or {})},
+        "measurements": rows,
+        "note": ("reading = meter value at the patch for each drive level; level 0.0 is the "
+                 "black floor. Units cancel (only ratios are used)."),
+    }
+    out = cal_dir / f"contrast_cal_{datetime.now().strftime('%Y%m%d_%H%M')}.yaml"
+    out.write_text(yaml.dump(doc, default_flow_style=False, sort_keys=False))
+    return out
+
+
+def list_contrast_cals(cal_dir=None):
+    """Saved contrast cal files, newest first: [{name, mtime, az_deg, alt_deg, ratio}], where
+    ratio = reading(1.0) / reading(0.0) (inf when the floor read 0)."""
+    cal_dir = Path(cal_dir or CAL_DIR)
+    out = []
+    for f in cal_dir.glob("contrast_cal_*.yaml"):
+        entry = {"name": f.name, "mtime": f.stat().st_mtime}
+        try:
+            d = load_contrast_cal(f.name, cal_dir)
+            entry.update(az_deg=d["patch"].get("az_deg"), alt_deg=d["patch"].get("alt_deg"),
+                         ratio=d["ratio"])
+        except Exception as e:
+            entry["error"] = str(e)
+        out.append(entry)
+    return sorted(out, key=lambda d: d["mtime"], reverse=True)
+
+
+def load_contrast_cal(name, cal_dir=None):
+    """Read and validate one contrast cal. Returns {name, patch, levels, readings, ratio} with
+    levels ascending. Raises FileNotFoundError / ValueError."""
+    cal_dir = Path(cal_dir or CAL_DIR)
+    safe = Path(name).name
+    if not (safe.startswith("contrast_cal_") and safe.endswith(".yaml")):
+        raise ValueError(f"Not a contrast cal file: {name}")
+    path = cal_dir / safe
+    if not path.exists():
+        raise FileNotFoundError(f"No contrast cal {safe} in {cal_dir}")
+    d = yaml.safe_load(path.read_text()) or {}
+    rows = sorted(((float(m["level"]), float(m["reading"])) for m in d.get("measurements", [])))
+    if len(rows) < 2:
+        raise ValueError(f"{safe}: fewer than 2 readings")
+    levels = [r[0] for r in rows]
+    readings = [r[1] for r in rows]
+    if levels[0] > 0.0 or levels[-1] < 1.0:
+        raise ValueError(f"{safe}: needs readings at level 0.0 and 1.0")
+    ratio = readings[-1] / readings[0] if readings[0] > 0 else float("inf")
+    return {"name": safe, "patch": d.get("patch") or {}, "levels": levels,
+            "readings": readings, "ratio": ratio}
 
 
 def inject_into_warp(az_full, gain_fit, correction, warp_map=WARP_MAP):

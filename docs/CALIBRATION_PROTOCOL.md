@@ -162,6 +162,12 @@ Set in the **setup UI → display card → CALIBRATION → "Intensity" dropdown*
 3. For each azimuth a **white patch** lights on the projector at that location — rendered **raw** (`apply_lum:false`, contrast 1 on a black background) so the meter reads the true delivered luminance the fit is built from. Aim the meter at it, then click **Read** (auto-fills from the PM100D) or type the value. In **auto** mode the panel advances to the next azimuth automatically; in **manual** you click **Show** on the next row.
 4. When at least 2 azimuths are read, click **Fit & Apply**. This fits the gain curve (`fit_luminance_correction.fit_luminance`), writes `luminance_cal_latest.yaml`, rebuilds `warp_map.npz` with `--lum-mode empirical`, and ships it to the Pis (+ reloads the live display).
 
+Files land in `display_calibration/<rig>/intensity/`: the raw readings as `luminance_measurements_<stamp>.yaml`, the fit as `luminance_cal_<stamp>.yaml`, and `luminance_cal_latest.yaml` points at it. Every warp build also writes `luminance_cal_<geostamp>_theoretical.yaml`, so a rig always has an intensity file.
+
+### Contrast calibration (light vs drive level at one spot)
+
+Display card → INTENSITY → **Contrast Cal** opens a panel with drive levels 1.0, 0.9 … 0.1, 0.05, 0.0 at one az/alt (default az 0, the test-stimulus altitude, 15° patch). Each level is shown raw (`apply_lum:false`) on black; level 0.0 is a black patch, i.e. the floor (DMD leakage + stray light). Read or type each value, then **Save** → `intensity/contrast_cal_<stamp>.yaml`. Nothing is deployed: a task picks the file in the Experiment tab (dropdown next to **Contrast**). With a file selected, contrast values are **measured** contrast in the rig's metric, computed from the interpolated readings; Weber on black becomes finite (10:1 light = 9.0). **Correct** clamps to the measured ceiling (drive 1.0 on this background, lowest over the session's azimuths), and Deploy converts every value to the drive that produces it. With luminance correction on, the renderer scales drives by `C(az) ≤ 1` toward the floor, so the reachable measured contrast is lower where `C(az)` is small; the readings' shape is assumed to hold at every azimuth up to a constant factor.
+
 Because the correction rides the normal warp pipeline, it **survives Regenerate Warp**: `compute_warp_map.py --lum-mode empirical` re-injects `luminance_cal_latest.yaml` on every build, so it is never clobbered.
 
 ### What good output looks like
@@ -255,10 +261,12 @@ display_calibration/                 (on the controller; deployed to ~/rig/calib
 │     lum_gain_empirical  (N,)      Measured gain (empirical mode)
 │     lum_correction_empirical (N,) min(gain)/gain correction factor (empirical mode)
 │
-├── luminance_cal_YYYY-MM-DD.yaml   # Fitted correction (dated)
-├── luminance_cal_latest.yaml       # Symlink → most recent (re-injected on every warp build)
 └── warp_map_validation.png         # Last --validate plot
 ```
+
+Since 2026-09-29 the data files are per rig — `display_calibration/<rig>/geometry/`,
+`<rig>/intensity/` and `<rig>/warp_map.npz`; the tree above lists the scripts and the warp map's
+contents. Layout and naming: [display_calibration/README.md](../display_calibration/README.md#where-the-files-live).
 
 Reward calibration is **not** a file here — it lives in the rig YAML under `devices.reward.calibration`.
 

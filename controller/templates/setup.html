@@ -223,6 +223,7 @@ let lickPollInterval = null;
 let devicesInitialized = false;
 let geoFiles = [];          // available geometry YAML filenames
 let lumCalFiles = [];       // saved intensity cals: [{name, mtime, is_latest}], newest first
+let contrastCalFiles = [];  // saved contrast cals: [{name, mtime, az_deg, alt_deg, ratio}], newest first
 let geoData = null;         // loaded geometry object
 let geoCurrentName = '';    // currently loaded filename
 let derivedAz = { min: null, max: null };  // az range the warp fills (server ray-trace)
@@ -382,23 +383,37 @@ async function loadRig() {
 
 async function saveRig() {
   if (!rig) return;
-  // Save rig hardware config (the rig YAML) ...
+  // Edited geometry first: dated geometry files are records, so an edit is saved as a NEW
+  // rig_geometry_<now>.yaml (unchanged values write nothing) and the rig then points at it.
+  let geoNote = '';
+  if (geoData && geoCurrentName) {
+    const d = await _saveGeometryFile(geoCurrentName);
+    if (d && d.ok && d.created) geoNote = ' + new geometry ' + d.name + ' (from ' + d.from + ')';
+  }
+  // ... then the rig hardware config (the rig YAML), which records display.geometry_file.
   await fetch(SAPI + '/save', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify(rig)
   });
   try { if (window.parent !== window) window.parent.postMessage({type: 'vrfarm:rig-saved', rig: RIG}, '*'); } catch (e) {}
-  // ... and any edited geometry to its own file (rig_geometry.yaml), one unified Save.
-  if (geoData && geoCurrentName) {
-    const r = await fetch(SAPI + '/save_geometry', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name: geoCurrentName, geometry: geoData})
-    });
-    const d = await r.json();
-    log('Saved rig: ' + rig.name + (d.ok ? ' + ' + geoCurrentName : ''));
-  } else {
-    log('Saved rig: ' + rig.name);
+  log('Saved rig: ' + rig.name + geoNote);
+}
+
+// POST the edited geometry. On a change the server writes a new dated file; select it here and
+// point the rig at it (persisted by the caller's Save Rig, or by saveGeometry below).
+async function _saveGeometryFile(name) {
+  const r = await fetch(SAPI + '/save_geometry', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name, geometry: geoData})
+  });
+  const d = await r.json();
+  if (d.ok && d.created) {
+    geoCurrentName = d.name;
+    if (rig && rig.devices && rig.devices.display) rig.devices.display.geometry_file = d.name;
+    await loadGeoList();
+    renderDeviceList();
   }
+  return d;
 }
 
 // ── Pi management ──
@@ -781,10 +796,10 @@ async function checkWarp() {
     warpExists = data.exists;
   } catch (e) { warpExists = false; }
   await loadGeoList();
-  // Load the geometry file this rig points to (the rig YAML -> display.geometry_file).
-  const want = (rig && rig.devices && rig.devices.display
-                && rig.devices.display.geometry_file) || 'rig_geometry.yaml';
-  const name = geoFiles.includes(want) ? want : (geoFiles[0] || 'rig_geometry.yaml');
+  // Load the geometry file this rig points to (the rig YAML -> display.geometry_file), else the
+  // newest dated file in display_calibration/<rig>/geometry/.
+  const want = rig && rig.devices && rig.devices.display && rig.devices.display.geometry_file;
+  const name = (want && geoFiles.includes(want)) ? want : geoFiles[geoFiles.length - 1];
   if (geoFiles.length) await loadGeometry(name);
   else renderDeviceList();
 }
@@ -846,6 +861,10 @@ async function loadLumCalList() {
     const j = await r.json();
     lumCalFiles = Array.isArray(j) ? j : [];
   } catch (e) { lumCalFiles = []; }
+  try {
+    const j = await (await fetch(SAPI + '/list_contrast_cals')).json();
+    contrastCalFiles = Array.isArray(j) ? j : [];
+  } catch (e) { contrastCalFiles = []; }
 }
 async function refreshLumCalList() {
   await loadLumCalList();
@@ -880,7 +899,6 @@ async function applySavedLumCal() {
 }
 
 async function loadGeometry(name) {
-  name = name || 'rig_geometry.yaml';
   try {
     const r = await fetch(SAPI + '/load_geometry', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -922,19 +940,16 @@ function refreshDerivedAz() {
 
 async function saveGeometry(name) {
   if (!geoData) return;
-  name = name || geoCurrentName || 'rig_geometry.yaml';
+  name = name || geoCurrentName;
   try {
-    const r = await fetch(SAPI + '/save_geometry', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({name, geometry: geoData})
-    });
-    const data = await r.json();
-    if (data.ok) {
-      geoCurrentName = data.name;
-      log('Saved geometry: ' + data.name);
-      await loadGeoList();
-      renderDeviceList();
-    } else { log('Save failed: ' + (data.error || '')); }
+    const data = await _saveGeometryFile(name);
+    if (!data.ok) { log('Save failed: ' + (data.error || '')); return; }
+    if (data.created) {
+      // The rig now uses the new file; persist that so the rig YAML names what the warp is built from.
+      await fetch(SAPI + '/save', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                   body: JSON.stringify(rig)});
+      log('Geometry edited → saved as new ' + data.name + ' (from ' + data.from + '); rig now uses it');
+    }
   } catch (e) { log('Save error: ' + e); }
 }
 
@@ -1232,6 +1247,126 @@ async function lumFitApply() {
     }
   } catch (e) { log('Fit & apply error: ' + e); }
   finally { _unlockUI(); }
+}
+
+// ── Contrast calibration: light vs drive level at ONE spot ──
+// Where the along-azimuth cal equalizes brightness across the screen, this measures how the light
+// at one az/alt depends on the drive (1.0 .. 0.0) — including the black floor at 0.0 — so the
+// Experiment tab can express contrast as the MEASURED luminance contrast. The patch is raw
+// (luminance correction off) on a black field; level 0.0 is a black patch, i.e. the floor.
+const CC_LEVELS = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05, 0.0];
+let ccMeasure = null;
+
+function openContrastPanel() {
+  if (uiBusy) return;
+  if (!getPiForDevice('display')) { log('Display not assigned to a Pi'); return; }
+  const altEl = document.getElementById('test-stim-alt');
+  ccMeasure = {az: 0, alt: altEl ? (parseFloat(altEl.value) || 0) : 0, size: 15,
+               levels: CC_LEVELS.slice(), idx: 0, readings: {}};
+  renderContrastPanel();
+  showContrastPatch();
+}
+function closeContrastPanel() {
+  ccMeasure = null;
+  const p = document.getElementById('contrast-panel');
+  if (p) { p.style.display = 'none'; p.innerHTML = ''; }
+}
+function renderContrastPanel() {
+  const p = document.getElementById('contrast-panel');
+  if (!p || !ccMeasure) return;
+  const m = ccMeasure;
+  const rows = m.levels.map((lv, i) => {
+    const val = (lv in m.readings) ? m.readings[lv] : '';
+    const hl = (i === m.idx) ? ' style="background:#2d2d2d"' : '';
+    const mark = (i === m.idx) ? '◀' : ((lv in m.readings) ? '✓' : '');
+    return `<tr${hl}>
+      <td style="padding:2px 8px">${lv.toFixed(2)}${lv === 0 ? ' (floor)' : ''}</td>
+      <td><button class="btn btn-blue btn-sm" onclick="ccShow(${i})">Show</button></td>
+      <td><button class="btn btn-gray btn-sm" onclick="ccRead(${i})">Read</button></td>
+      <td><input type="number" step="any" style="width:96px" value="${val}"
+                 oninput="ccSetReading(${i}, this.value)"></td>
+      <td style="color:#6f6; width:14px">${mark}</td></tr>`;
+  }).join('');
+  const done = Object.keys(m.readings).length;
+  const hi = m.readings[1], lo = m.readings[0];
+  const ratio = (hi != null && lo != null && lo > 0) ? ` · 1.0/0.0 = ${(hi / lo).toFixed(1)}:1` : '';
+  p.style.display = 'block';
+  p.innerHTML = `
+    <div style="font-size:11px; color:#bbb; margin-bottom:4px">
+      Contrast cal — aim the meter at the patch, Read (or type) each level from 1.0 down to the black floor, then Save.
+      Az <input type="number" value="${m.az}" step="any" style="width:52px"
+        onchange="ccMeasure.az=parseFloat(this.value)||0; showContrastPatch()">°
+      &nbsp; Alt <input type="number" value="${m.alt}" step="any" style="width:52px"
+        onchange="ccMeasure.alt=parseFloat(this.value)||0; showContrastPatch()">°
+      &nbsp; Size <input type="number" value="${m.size}" min="1" step="1" style="width:52px"
+        onchange="ccMeasure.size=parseFloat(this.value)||15; showContrastPatch()">°
+    </div>
+    <table style="font-size:12px; border-collapse:collapse">${rows}</table>
+    <div style="margin-top:6px; display:flex; align-items:center; gap:8px">
+      <button class="btn btn-green btn-sm" onclick="ccSave()">Save</button>
+      <button class="btn btn-gray btn-sm" onclick="closeContrastPanel()">Cancel</button>
+      <span style="font-size:10px; color:#888">${done}/${m.levels.length} read${ratio}</span>
+    </div>`;
+}
+async function showContrastPatch() {
+  if (!ccMeasure) return;
+  const pi = getPiForDevice('display');
+  if (!pi) return;
+  const lv = ccMeasure.levels[ccMeasure.idx];
+  // Raw drive `lv` on black: normalized contrast on bg 0 is the drive itself; apply_lum:false so
+  // the meter sees the panel's own response, not the per-azimuth correction.
+  await retryProxy(pi.ip, '/api/test_stimulus', {
+    shape: 'square', az_deg: ccMeasure.az, alt_deg: ccMeasure.alt, size_deg: ccMeasure.size,
+    contrast: lv, bg_gray: 0, contrast_metric: 'normalized', apply_lum: false,
+  });
+}
+async function ccShow(i) {
+  if (!ccMeasure) return;
+  ccMeasure.idx = i;
+  renderContrastPanel();
+  await showContrastPatch();
+}
+function ccSetReading(i, val) {
+  if (!ccMeasure) return;
+  const lv = ccMeasure.levels[i];
+  if (val === '' || val == null) delete ccMeasure.readings[lv];
+  else ccMeasure.readings[lv] = parseFloat(val);
+}
+async function ccRead(i) {
+  if (!ccMeasure) return;
+  if (i !== ccMeasure.idx) {          // read what is ON SCREEN, never a different row's level
+    ccMeasure.idx = i;
+    renderContrastPanel();
+    await showContrastPatch();
+    await new Promise(res => setTimeout(res, LUM_SETTLE_MS));
+  }
+  const r = await fetch(SAPI + '/lum_read', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+  }).then(x => x.json()).catch(e => ({ok: false, error: String(e)}));
+  if (!r.ok) { log('Meter read failed (' + (r.error || '') + ') — type the value manually'); return; }
+  ccSetReading(i, r.value);
+  log('level ' + ccMeasure.levels[i] + ': ' + (+r.value).toPrecision(4));
+  const next = ccMeasure.levels.findIndex(lv => !(lv in ccMeasure.readings));
+  if (next >= 0) { ccMeasure.idx = next; renderContrastPanel(); await showContrastPatch(); }
+  else { renderContrastPanel(); log('All levels read — Save to write the contrast cal.'); }
+}
+async function ccSave() {
+  if (!ccMeasure) return;
+  const measurements = Object.keys(ccMeasure.readings).map(lv => ({
+    level: parseFloat(lv), reading: ccMeasure.readings[lv]}));
+  if (!(1 in ccMeasure.readings) || !(0 in ccMeasure.readings)) {
+    log('Contrast cal needs at least the 1.0 and the 0.0 (floor) readings.'); return;
+  }
+  const r = await fetch(SAPI + '/save_contrast_cal', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({measurements, method: 'manual',
+                          patch: {az_deg: ccMeasure.az, alt_deg: ccMeasure.alt, size_deg: ccMeasure.size}})
+  }).then(x => x.json()).catch(e => ({ok: false, error: String(e)}));
+  if (!r.ok) { log('Contrast cal save failed: ' + (r.error || '')); return; }
+  log('Saved ' + r.name + (isFinite(r.ratio) ? ' (1.0/0.0 = ' + (+r.ratio).toFixed(1) + ':1)' : ''));
+  closeContrastPanel();
+  await loadLumCalList();
+  renderDeviceList();
 }
 
 // The Calibrate control is a single toggle: green "Calibrate" starts, red "Stop Calib"
@@ -2056,6 +2191,7 @@ function renderDeviceList() {
 
   el.innerHTML = `<div class="device-tabs">${tabs}</div><div class="device-panels">${panels}</div>`;
   if (lumMeasure) renderLumPanel();   // re-hydrate an open intensity-cal panel after a re-render
+  if (ccMeasure) renderContrastPanel();
   // A re-render replaces every button element, and fresh elements are enabled by default — so a
   // re-render DURING a locked operation silently unlocked the UI. renderAll() already guarded
   // itself; the ~20 direct callers of this function did not. generateWarp was one of them: it
@@ -2334,6 +2470,12 @@ function renderDisplayControls(dev) {
     `<option value="${c.name}" ${c.is_latest ? 'selected' : ''}>${
       c.name.replace('.yaml','')}${c.is_latest ? ' ●' : ''}</option>`
   ).join('');
+  const ccNewest = contrastCalFiles[0];
+  const ccSummary = ccNewest
+    ? `${contrastCalFiles.length} saved · newest ${ccNewest.name.replace('.yaml','')}` +
+      (ccNewest.ratio != null && isFinite(ccNewest.ratio) ? ` (${(+ccNewest.ratio).toFixed(0)}:1)` : '') +
+      ' · pick one per task in the Experiment tab'
+    : 'none saved — measures light vs drive 1.0 → 0.0 at one spot, for measured contrast';
 
   // Geometry param fields (only shown when loaded)
   let geoFields = '';
@@ -2396,8 +2538,8 @@ function renderDisplayControls(dev) {
         ${gf('projector','lateral_offset_cm','Lat offset cm',p.lateral_offset_cm,0.1)}
       </div>
       <div style="font-size:10px; color:#888; margin-top:6px">
-        Edits persist to <b>${geoCurrentName || 'rig_geometry.yaml'}</b> when you click
-        <b>Save Rig</b> (top-left).
+        Editing <b>${geoCurrentName || '(no file)'}</b>. <b>Save Rig</b> (top-left) saves changed
+        values as a NEW dated geometry file and points the rig at it; dated files are never rewritten.
       </div>
     </div>`;
   }
@@ -2485,6 +2627,12 @@ function renderDisplayControls(dev) {
           : '<span style="font-size:10px; color:#888">no measurements saved yet</span>'}
       </div>
       <div id="lum-panel" style="display:none; margin-top:8px"></div>
+      <div class="device-controls" style="margin-top:6px">
+        <button class="btn btn-orange btn-sm" onclick="openContrastPanel()"
+                title="Measure the light at ONE spot for drive levels 1.0 → 0.0 (incl. the black floor). Saved as intensity/contrast_cal_<time>.yaml; the Experiment tab can then express contrast as MEASURED luminance contrast.">Contrast Cal</button>
+        <span style="font-size:10px; color:#888">${ccSummary}</span>
+      </div>
+      <div id="contrast-panel" style="display:none; margin-top:8px"></div>
     </div>
 
     <div class="disp-section">

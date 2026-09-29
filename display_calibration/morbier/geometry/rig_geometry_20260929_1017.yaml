@@ -1,3 +1,5 @@
+# morbier: NOT a morbier calibration. Copied on 2026-09-29 from cheddar's
+# rig_geometry_20260915_2306.yaml to bring the new projector up; run Geometry Cal on morbier.
 calibration:
   az90_x: 1580
   flip_h: true

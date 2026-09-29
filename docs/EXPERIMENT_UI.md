@@ -82,6 +82,13 @@ Everything here is live-editable and round-trips to YAML:
 - **N trials** is computed (`N blocks × Block size`) and read-only.
 - **Correct** clamps contrast to what the display can reach at the current background,
   and is the one control that explicitly invalidates a Deploy.
+- **Contrast cal** (next to Contrast) is `none` or one of the rig's
+  `display_calibration/<rig>/intensity/contrast_cal_*.yaml` files (made with Setup → Contrast Cal).
+  With a file, contrast values are **measured** luminance contrast in the rig's metric and may exceed
+  1 (10:1 light on black = 9.0 Weber); the label reads *(Weber, measured)*, the hint shows the
+  measured ceiling, and **Correct** clamps to it. The choice is saved in the task as
+  `stimulus.contrast_calibration`; Deploy refuses a file the loaded rig does not have. The NPZ and
+  trial table record `stim_drive`, `contrast_measured` and the file name.
 - Level `2.5` forces Adaptive on and locks the checkbox; Amount `Count` swaps the value
   field to a pulse count and enables **Gap (ms)**.
 

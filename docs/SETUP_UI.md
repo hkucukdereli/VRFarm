@@ -121,7 +121,9 @@ click the Pi-name chip to assign it. An unassigned device can never initialize.
 
 ![Pi cards](images/setup-04-pi-cards.png)
 
-The dot is green when the Pi's REST API answers. The chips are its assigned devices.
+The dot is **green** when both SSH and the Pi's REST API answer, **yellow** when SSH works but pi_api
+does not (Install or Restart API fixes that), **red** when SSH fails, grey until checked. The chips are
+its assigned devices.
 
 | Button | What it does | When to use it | Risk |
 |---|---|---|---|

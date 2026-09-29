@@ -1975,13 +1975,16 @@ function renderPiList() {
 
   el.innerHTML = rig.pis.map((pi, idx) => {
     const ps = piState[pi.ip] || {};
-    const dotClass = ps.checked ? (ps.ok ? 'dot-green' : 'dot-red') : 'dot-gray';
+    // green = SSH + API answer · yellow = SSH ok but pi_api down (Install/Restart API can fix it)
+    // · red = no SSH (nothing can be done from here) · gray = not checked yet
+    const dotClass = !ps.checked ? 'dot-gray' : !ps.ssh ? 'dot-red' : ps.api ? 'dot-green' : 'dot-yellow';
+    const dotTitle = !ps.checked ? 'not checked' : !ps.ssh ? 'SSH failed' : ps.api ? 'SSH + API ok' : 'SSH ok, API down';
     const offline = ps.checked && !ps.ok;   // API down (red dot) -> disable API-dependent buttons
     const noSsh = ps.checked && !ps.ssh;     // SSH down -> can't even Install (Install provisions over SSH)
     return `
     <div class="pi-card">
       <div class="pi-header">
-        <span class="status-dot ${dotClass}"></span>
+        <span class="status-dot ${dotClass}" title="${dotTitle}"></span>
         <strong>${pi.name}</strong>
         <span class="role-badge ${pi.role}">${pi.role}</span>
         <span style="color:#888; font-size:11px">${pi.ip}</span>

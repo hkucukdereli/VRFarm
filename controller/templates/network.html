@@ -105,9 +105,9 @@ async function api(method, path, body) {
 
 function dotFor(check) {
   if (!check) return '<span class="dot dot-grey" title="not checked"></span>';
-  if (check.api && check.ssh) return '<span class="dot dot-green" title="SSH + API ok"></span>';
-  if (check.api || check.ssh) return `<span class="dot dot-amber" title="${check.ssh ? 'SSH ok, API down' : 'API ok, SSH failed'}"></span>`;
-  return '<span class="dot dot-red" title="unreachable"></span>';
+  if (!check.ssh) return '<span class="dot dot-red" title="SSH failed"></span>';
+  if (check.api) return '<span class="dot dot-green" title="SSH + API ok"></span>';
+  return '<span class="dot dot-amber" title="SSH ok, API down"></span>';
 }
 
 async function refresh() {

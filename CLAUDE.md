@@ -272,9 +272,9 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
   (the rig YAML's `display.geometry_file` picks one; dated files are never rewritten, an edit saves
   a new one), `display_calibration/<rig>/intensity/` (along-azimuth `luminance_cal_*`, a
   `*_theoretical` file per geometry, and `contrast_cal_*` = light vs drive level at one spot), and
-  `display_calibration/<rig>/warp_map.npz`. A task's `stimulus.contrast_calibration` (Experiment tab,
-  next to Contrast) makes its contrast values MEASURED contrast; Deploy sends that file's readings to
-  the Leader. See `display_calibration/README.md`.
+  `display_calibration/<rig>/warp_map.npz`. The rig's `devices.display.contrast_calibration` (Setup →
+  INTENSITY → Use, Save Rig) makes contrast values MEASURED contrast; Deploy sends that file's
+  readings to the Leader. See `display_calibration/README.md`.
 - **One serial reader.** The Teensy's `/dev/ttyACM0` gives its bytes to exactly one process;
   a second reader silently steals them. Release pi_api's devices before bench tools.
 - The Teensy sync output is **pin 16** (scope-verified), analog in is **A1**.

@@ -166,7 +166,45 @@ Files land in `display_calibration/<rig>/intensity/`: the raw readings as `lumin
 
 ### Contrast calibration (light vs drive level at one spot)
 
-Display card → INTENSITY → **Contrast Cal** opens a panel with drive levels 1.0, 0.9 … 0.1, 0.05, 0.0 at one az/alt (default az 0, the test-stimulus altitude, 15° patch). Each level is shown raw (`apply_lum:false`) on black; level 0.0 is a black patch, i.e. the floor (DMD leakage + stray light). Read or type each value, then **Save** → `intensity/contrast_cal_<stamp>.yaml`. Nothing is deployed: a task picks the file in the Experiment tab (dropdown next to **Contrast**). With a file selected, contrast values are **measured** contrast in the rig's metric, computed from the interpolated readings; Weber on black becomes finite (10:1 light = 9.0). **Correct** clamps to the measured ceiling (drive 1.0 on this background, lowest over the session's azimuths), and Deploy converts every value to the drive that produces it. With luminance correction on, the renderer scales drives by `C(az) ≤ 1` toward the floor, so the reachable measured contrast is lower where `C(az)` is small; the readings' shape is assumed to hold at every azimuth up to a constant factor.
+The along-azimuth cal above equalizes brightness *across* the screen. The contrast cal measures how
+the light at **one spot** depends on the drive level, down to the black floor (DMD leakage + stray
+light). With it, a contrast value means the **measured** luminance contrast, not the drive ratio.
+
+**Measure** (Setup → Display card → INTENSITY):
+
+1. Initialize the display; projector warmed up, room dark, meter on a stand.
+2. Click **Contrast Cal**. Set the spot (Az, Alt, Size; default az 0°, the test-stimulus altitude,
+   15° patch). Rows are drive levels 1.0, 0.9 … 0.1, 0.05, 0.0.
+3. Each row shows a raw patch (`apply_lum:false`) on black; 0.0 is a black patch, i.e. the floor.
+   Click **Read** (PM100D) or type the value; the panel advances to the next level.
+4. **Save** → `display_calibration/<rig>/intensity/contrast_cal_<stamp>.yaml` (readings at 1.0 and
+   0.0 are required; units cancel, only ratios are used).
+
+**Use it** (per rig):
+
+5. Pick the file in the **Use** dropdown beside **Contrast Cal** (or `none (drive ratio)`) and
+   **Save Rig** — stored as `devices.display.contrast_calibration` in the rig YAML. The Experiment tab
+   reloads the rig and its Contrast label reads *(Weber, measured)*.
+6. Type contrast in **percent** (`[25, 15, 12.5]`; 100 = 100 %). Task files and data keep fractions.
+   Measured contrast can exceed 100 %: on black, a 10:1 light ratio is 900 % Weber.
+7. Read the boxes: under **Contrast**, each value's stimulus drive (0..1, = the trial table's
+   `stim_drive`) and its lx; under **Background**, the background's lx — both at the cal's spot.
+   **Correct** clamps to the measured ceiling (drive 1.0 on this background, lowest over the
+   session's azimuths). The Setup TESTS row shows the same at the test azimuth, and **Stimulus**
+   draws the measured contrast you typed.
+8. **Deploy** sends the file's readings to the Leader, which converts every value into the drive that
+   produces it (`shared/stim_generator.drive_for_measured_contrast`). The NPZ and `trials.yaml` record
+   `stim_drive`, `contrast_measured` and the file name. A rig YAML naming a file the rig does not have
+   blocks Deploy.
+
+**Assumptions and limits.** Metrics: Weber `(Ls−Lb)/Lb`, Michelson `(Ls−Lb)/(Ls+Lb)`, normalized
+`(Ls−Lb)/(L(1)−Lb)`, with `L()` interpolated from the readings. The readings' *shape* is assumed to
+hold at every azimuth up to a constant factor (which cancels in contrast). With luminance correction
+on, the renderer scales drives by `C(az) ≤ 1` toward the floor, so the reachable measured contrast is
+lower where `C(az)` is small (cheddar, az 0°, black background: about 970 %). Known issue: the
+along-azimuth correction multiplies the *drive*, but light is not linear in drive (cheddar: half drive
+≈ 21 % of full light), so absolute brightness is not perfectly uniform across azimuth (bg 0.2:
+≈1.15 lx at az 0° vs ≈1.03 lx at az 60°). Measured contrast is unaffected.
 
 Because the correction rides the normal warp pipeline, it **survives Regenerate Warp**: `compute_warp_map.py --lum-mode empirical` re-injects `luminance_cal_latest.yaml` on every build, so it is never clobbered.
 

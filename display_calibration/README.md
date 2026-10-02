@@ -37,8 +37,9 @@ On the Pis nothing changed: `~/rig/calibration/` holds `warp_map.npz` + `rig_geo
 
 **Two intensity calibrations.** The *along-azimuth* one (Intensity Cal) equalizes brightness across
 the screen and is baked into the warp. The *contrast* one (Contrast Cal) measures the light at a
-single az/alt for drive levels 1.0 down to 0.0, black floor included. A task can pick a contrast
-cal next to **Contrast** in the Experiment tab; its contrast values are then **measured** luminance
+single az/alt for drive levels 1.0 down to 0.0, black floor included. A rig can use one (Setup →
+Display → INTENSITY → **Use**, saved as `devices.display.contrast_calibration` by Save Rig); every
+task's contrast values on that rig are then **measured** luminance
 contrast (Weber `(Ls−Lb)/Lb`, Michelson, or normalized `(Ls−Lb)/(L(1)−Lb)`), so a 10:1 light ratio
 on black is 900 % Weber. Deploy sends the file's readings to the Leader, which turns each value into
 the drive level that produces it (`shared/stim_generator.drive_for_measured_contrast`).

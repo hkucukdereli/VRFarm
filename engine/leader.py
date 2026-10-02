@@ -1294,6 +1294,12 @@ class Leader:
             if warp_path.exists():
                 warp_map = np.load(str(warp_path))
             metric = self.rig["devices"].get("display", {}).get("contrast_metric", "weber")
+            # A rig with a contrast cal needs its readings, which only the controller's Deploy
+            # sends; regenerating here would silently fall back to drive-ratio contrast.
+            cal = self.rig["devices"].get("display", {}).get("contrast_calibration")
+            if cal not in (None, "", "none", "None"):
+                raise RuntimeError(f"rig uses contrast calibration {cal}: stimuli must come from "
+                                   f"Deploy (the Leader cannot regenerate them)")
             return generate_stimuli(self.task, warp_map, str(stim_dir),
                                     contrast_metric=metric)
         except Exception as e:

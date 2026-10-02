@@ -792,6 +792,24 @@ def api_list_contrast_cals():
         return jsonify({"error": str(e)}), 500
 
 
+@bp.route("/contrast_preview", methods=["POST"])
+def api_contrast_preview():
+    """Setup's TESTS row: {calibration (the card's current pick, saved or not), background_gray,
+    values, az_deg} -> controller.experiment.contrast_preview (same math as Deploy)."""
+    from controller.experiment import contrast_preview
+    rs: RigState = g.rs
+    data = request.json or {}
+    name = data.get("calibration")
+    name = None if name in (None, "", "none", "None") else str(name)
+    try:
+        az = data.get("az_deg")
+        return jsonify({"ok": True, **contrast_preview(rs, name, data.get("background_gray") or 0.0,
+                                                       data.get("values") or [],
+                                                       None if az is None else float(az))})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
 @bp.route("/save_contrast_cal", methods=["POST"])
 def api_save_contrast_cal():
     """{measurements: [{level, reading}], patch: {az_deg, alt_deg, size_deg}, method}

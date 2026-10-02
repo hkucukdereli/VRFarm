@@ -750,21 +750,65 @@ async function blankDisplay() {
 // Draw a single test patch (square/circle) at an az/alt with a given contrast on the Bg value.
 // Contrast is interpreted in the rig's active metric (Pi converts metric -> render fraction),
 // so the number here means the same thing as in the experiment card. Bg is the Blank field.
+// Contrast is typed in percent (50 = 50 %). With the card's contrast cal it is MEASURED contrast:
+// the controller turns it into the drive that produces it (same math as Deploy), and the Pi draws
+// that drive as a normalized fraction. Without one, the Pi converts metric -> fraction as before.
+function _testInputs() {
+  const bgInput = document.getElementById('blank-gray-value');
+  return {
+    az: parseFloat(document.getElementById('test-stim-az')?.value) || 0,
+    bg: Math.max(0, Math.min(1, bgInput ? (parseFloat(bgInput.value) || 0) : 0.0)),
+    contrast: Math.max(0, parseFloat(document.getElementById('test-stim-contrast')?.value) || 0) / 100,
+    cal: (rig && rig.devices && rig.devices.display && rig.devices.display.contrast_calibration) || 'none',
+  };
+}
+async function _testPreview(t) {
+  return fetch(SAPI + '/contrast_preview', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({calibration: t.cal, background_gray: t.bg, values: [t.contrast], az_deg: t.az})})
+    .then(r => r.json()).catch(e => ({ok: false, error: String(e)}));
+}
+function _fmtLux(x) {
+  if (x == null || !isFinite(x)) return '--';
+  return x < 10 ? x.toFixed(2) : (x < 100 ? x.toFixed(1) : x.toFixed(0));
+}
+let _testPrevSeq = 0, _testPrevT = null;
+function updateTestPreview() {
+  clearTimeout(_testPrevT);
+  _testPrevT = setTimeout(async () => {
+    const out = document.getElementById('test-stim-preview'), bgEl = document.getElementById('test-bg-lux');
+    if (!out || !rig) return;
+    const seq = ++_testPrevSeq, t = _testInputs(), d = await _testPreview(t);
+    if (seq !== _testPrevSeq) return;
+    if (!d.ok) { out.textContent = d.error || ''; if (bgEl) bgEl.textContent = ''; return; }
+    const st = d.stims[0], cal = !!d.calibration;
+    out.textContent = 'stim ' + st.drive.toFixed(3) + (cal ? ' · ' + _fmtLux(st.lux) + ' lx' : '')
+                      + (st.clipped ? ' (clips)' : '');
+    if (bgEl) bgEl.textContent = cal ? _fmtLux(d.bg_lux) + ' lx' : '';
+  }, 200);
+}
+
 async function testStimulus() {
   const pi = getPiForDevice('display');
   if (!pi) { log('Display not assigned to a Pi'); return; }
   const shape = document.getElementById('test-stim-shape').value;
-  const az = parseFloat(document.getElementById('test-stim-az').value) || 0;
   const alt = parseFloat(document.getElementById('test-stim-alt').value) || 0;
   const size = parseFloat(document.getElementById('test-stim-size').value) || 8;
-  const contrast = Math.max(0, Math.min(1, parseFloat(document.getElementById('test-stim-contrast').value) || 0));
-  const bgInput = document.getElementById('blank-gray-value');
-  const bg = Math.max(0, Math.min(1, bgInput ? parseFloat(bgInput.value) : 0.0));
+  const t = _testInputs();
   const metric = (rig.devices.display && rig.devices.display.contrast_metric) || 'weber';
-  log(`Drawing ${shape} @ az ${az}° alt ${alt}° (size ${size}°, contrast ${contrast}, bg ${bg})...`);
+  let contrast = t.contrast, sendMetric = metric, note = '';
+  if (t.cal !== 'none') {
+    const d = await _testPreview(t);
+    if (!d.ok) { log('Contrast cal: ' + (d.error || '?')); return; }
+    const st = d.stims[0];
+    contrast = t.bg < 1 ? Math.max(0, (st.drive - t.bg) / (1 - t.bg)) : 0;   // drive -> normalized fraction
+    sendMetric = 'normalized';
+    note = `, measured via ${d.calibration}: drive ${st.drive.toFixed(3)}, ${_fmtLux(st.lux)} lx on ${_fmtLux(d.bg_lux)} lx`
+           + (st.clipped ? ' — CLIPPED at drive 1.0' : '');
+  }
+  log(`Drawing ${shape} @ az ${t.az}° alt ${alt}° (size ${size}°, contrast ${(t.contrast * 100).toFixed(1)} %, bg ${t.bg}${note})...`);
   const result = await retryProxy(pi.ip, '/api/test_stimulus', {
-    shape, az_deg: az, alt_deg: alt, size_deg: size,
-    contrast, bg_gray: bg, contrast_metric: metric,
+    shape, az_deg: t.az, alt_deg: alt, size_deg: size,
+    contrast, bg_gray: t.bg, contrast_metric: sendMetric,
   });
   log(result.ok ? 'Stimulus drawn.' : 'Stimulus test failed: ' + (result.error || ''));
 }
@@ -772,21 +816,25 @@ async function testStimulus() {
 // Clamp the Stimulus-test contrast to the display ceiling at the current Bg, in the active metric
 // (fraction_to_metric at full headroom f=1), so it can't silently clip to white. Client-side only —
 // mirrors the experiment-UI Correct button's ceiling. Weber:(1-bg)/bg, Michelson:(1-bg)/(1+bg), Normalized:1.
-function correctTestContrast() {
+async function correctTestContrast() {
   const cEl = document.getElementById('test-stim-contrast');
   if (!cEl) return;
-  const bgEl = document.getElementById('blank-gray-value');
-  const bg = Math.max(0, Math.min(1, parseFloat(bgEl ? bgEl.value : 0) || 0));
+  const t = _testInputs();
   const metric = (rig.devices.display && rig.devices.display.contrast_metric) || 'weber';
-  const entered = Math.max(0, parseFloat(cEl.value) || 0);
-  let ceil;
-  if (metric === 'weber')          ceil = bg > 0 ? (1 - bg) / bg : Infinity;
-  else if (metric === 'michelson') ceil = (1 - bg) / (1 + bg);
+  let ceil, how = metric;
+  if (t.cal !== 'none') {
+    const d = await _testPreview(t);          // measured ceiling at this az and bg
+    if (!d.ok) { log('Contrast cal: ' + (d.error || '?')); return; }
+    ceil = d.ceiling == null ? Infinity : d.ceiling;
+    how = metric + ', measured via ' + d.calibration;
+  } else if (metric === 'weber')   ceil = t.bg > 0 ? (1 - t.bg) / t.bg : Infinity;
+  else if (metric === 'michelson') ceil = (1 - t.bg) / (1 + t.bg);
   else                             ceil = 1;   // normalized
-  const corrected = Math.max(0, Math.min(entered, ceil));
-  cEl.value = (+corrected).toFixed(3);
-  log(`Contrast corrected: ${entered.toFixed(3)} → ${corrected.toFixed(3)} `
-    + `(max ${isFinite(ceil) ? ceil.toFixed(3) : '∞'} @ bg ${bg}, ${metric})`);
+  const corrected = Math.max(0, Math.min(t.contrast, ceil));
+  cEl.value = parseFloat((corrected * 100).toFixed(2));
+  updateTestPreview();
+  log(`Contrast corrected: ${(t.contrast * 100).toFixed(2)} % → ${(corrected * 100).toFixed(2)} % `
+    + `(max ${isFinite(ceil) ? (ceil * 100).toFixed(1) + ' %' : '∞'} @ bg ${t.bg}, ${how})`);
 }
 
 async function checkWarp() {
@@ -1256,6 +1304,15 @@ async function lumFitApply() {
 // (luminance correction off) on a black field; level 0.0 is a black patch, i.e. the floor.
 const CC_LEVELS = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05, 0.0];
 let ccMeasure = null;
+
+// Pick the rig's contrast cal (or none); persisted by Save Rig, which reloads the Experiment tab.
+function selectContrastCal(name) {
+  if (!rig || !rig.devices || !rig.devices.display) return;
+  rig.devices.display.contrast_calibration = name || 'none';
+  updateTestPreview();
+  log('Contrast cal for ' + rig.name + ': ' + (name && name !== 'none' ? name : 'none (drive ratio)')
+      + ' — Save Rig to apply.');
+}
 
 function openContrastPanel() {
   if (uiBusy) return;
@@ -2201,6 +2258,7 @@ function renderDeviceList() {
   el.innerHTML = `<div class="device-tabs">${tabs}</div><div class="device-panels">${panels}</div>`;
   if (lumMeasure) renderLumPanel();   // re-hydrate an open intensity-cal panel after a re-render
   if (ccMeasure) renderContrastPanel();
+  updateTestPreview();
   // A re-render replaces every button element, and fresh elements are enabled by default — so a
   // re-render DURING a locked operation silently unlocked the UI. renderAll() already guarded
   // itself; the ~20 direct callers of this function did not. generateWarp was one of them: it
@@ -2479,12 +2537,14 @@ function renderDisplayControls(dev) {
     `<option value="${c.name}" ${c.is_latest ? 'selected' : ''}>${
       c.name.replace('.yaml','')}${c.is_latest ? ' ●' : ''}</option>`
   ).join('');
-  const ccNewest = contrastCalFiles[0];
-  const ccSummary = ccNewest
-    ? `${contrastCalFiles.length} saved · newest ${ccNewest.name.replace('.yaml','')}` +
-      (ccNewest.ratio != null && isFinite(ccNewest.ratio) ? ` (${(+ccNewest.ratio).toFixed(0)}:1)` : '') +
-      ' · pick one per task in the Experiment tab'
-    : 'none saved — measures light vs drive 1.0 → 0.0 at one spot, for measured contrast';
+  // Contrast cal in use by this rig (devices.display.contrast_calibration), persisted by Save Rig.
+  const ccActive = (rig.devices.display && rig.devices.display.contrast_calibration) || 'none';
+  const ccOpts = ['<option value="none">none (drive ratio)</option>'].concat(contrastCalFiles.map(c =>
+    `<option value="${c.name}" ${c.name === ccActive ? 'selected' : ''}>${c.name.replace('.yaml','')}` +
+    (c.az_deg != null ? ` @ az ${c.az_deg}°` : '') +
+    (c.ratio != null && isFinite(c.ratio) ? ` · ${(+c.ratio).toFixed(0)}:1` : '') + '</option>'));
+  if (ccActive !== 'none' && !contrastCalFiles.some(c => c.name === ccActive))
+    ccOpts.push(`<option value="${ccActive}" selected>${ccActive} (MISSING)</option>`);
 
   // Geometry param fields (only shown when loaded)
   let geoFields = '';
@@ -2583,7 +2643,8 @@ function renderDisplayControls(dev) {
         <button class="btn btn-gray btn-sm" onclick="blankDisplay()">Blank</button>
         <div class="device-field">
           <label>Bg</label>
-          <input type="number" id="blank-gray-value" value="0.0" min="0" max="1" step="0.01" style="width:60px">
+          <input type="number" id="blank-gray-value" value="0.0" min="0" max="1" step="0.01" style="width:60px" oninput="updateTestPreview()">
+          <span id="test-bg-lux" style="font-size:10px; color:#9ab" title="Background light at the contrast calibration's spot, from its meter readings"></span>
         </div>
         <button class="btn btn-green btn-sm" onclick="testStimulus()">Stimulus</button>
         <div class="device-field">
@@ -2594,14 +2655,15 @@ function renderDisplayControls(dev) {
           </select>
         </div>
         <div class="device-field"><label>Az°</label>
-          <input type="number" id="test-stim-az" value="0" step="1" style="width:56px"></div>
+          <input type="number" id="test-stim-az" value="0" step="1" style="width:56px" oninput="updateTestPreview()"></div>
         <div class="device-field"><label>Alt°</label>
           <input type="number" id="test-stim-alt" value="0" step="1" style="width:56px"></div>
         <div class="device-field"><label>Size°</label>
           <input type="number" id="test-stim-size" value="8" step="1" min="1" style="width:56px"></div>
-        <div class="device-field"><label>Contrast</label>
-          <input type="number" id="test-stim-contrast" value="0.5" min="0" max="1" step="0.01" style="width:60px"></div>
-        <button class="btn btn-gray btn-sm" onclick="correctTestContrast()" title="Clamp the contrast to the highest value showable at the current Bg in the active metric">Correct</button>
+        <div class="device-field"><label>Contrast %</label>
+          <input type="number" id="test-stim-contrast" value="50" min="0" step="1" style="width:64px" oninput="updateTestPreview()"></div>
+        <button class="btn btn-gray btn-sm" onclick="correctTestContrast()" title="Clamp the contrast to the highest value showable at the current Bg in the active metric (measured, with a contrast cal)">Correct</button>
+        <span id="test-stim-preview" style="font-size:10px; color:#9ab" title="Stimulus intensity: the 0..1 drive the renderer is given (before its per-azimuth luminance factor), and with a contrast cal the light at this azimuth"></span>
       </div>
     </div>
 
@@ -2639,7 +2701,14 @@ function renderDisplayControls(dev) {
       <div class="device-controls" style="margin-top:6px">
         <button class="btn btn-orange btn-sm" onclick="openContrastPanel()"
                 title="Measure the light at ONE spot for drive levels 1.0 → 0.0 (incl. the black floor). Saved as intensity/contrast_cal_<time>.yaml; the Experiment tab can then express contrast as MEASURED luminance contrast.">Contrast Cal</button>
-        <span style="font-size:10px; color:#888">${ccSummary}</span>
+        <div class="device-field">
+          <label>Use</label>
+          <select id="contrast-cal-select" onchange="selectContrastCal(this.value)" style="min-width:220px; max-width:320px"
+                  title="Contrast calibration for this rig. With a file, Experiment contrast values are MEASURED luminance contrast (incl. the black floor); none = drive ratio. Saved with Save Rig.">
+            ${ccOpts.join('')}
+          </select>
+        </div>
+        <span style="font-size:10px; color:#888">Save Rig to apply</span>
       </div>
       <div id="contrast-panel" style="display:none; margin-top:8px"></div>
     </div>

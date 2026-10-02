@@ -331,10 +331,10 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
         output_dir: directory to save stimuli.npz
         contrast_metric: how the config `contrast` value is interpreted — weber|michelson|normalized
             (from rig.devices.display.contrast_metric)
-        contrast_cal: {name, levels, readings} of the contrast cal the task selects in
-            stimulus.contrast_calibration. When given, `contrast` values are MEASURED contrasts and
-            are converted to drive levels through it. A task that names a cal but gets none here
-            is an error — silently falling back to drive-ratio contrast would mislabel every trial.
+        contrast_cal: {name, levels, readings} of the rig's contrast cal
+            (rig devices.display.contrast_calibration; the controller sends the readings at
+            Deploy). When given, `contrast` values are MEASURED contrasts and are converted to
+            drive levels through it. None = contrast is the drive ratio.
 
     Returns:
         dict of arrays (same as NPZ contents) for Leader to use directly
@@ -351,13 +351,7 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
     duration = stim_cfg.get("duration_s", 2.0)
     shape = str(stim_cfg.get("shape", "square")).lower()
     contrast_metric = str(contrast_metric).lower()
-    cal_name = stim_cfg.get("contrast_calibration")
-    cal_name = None if cal_name in (None, "", "none", "None") else str(cal_name)
-    if cal_name and not contrast_cal:
-        raise ValueError(f"task selects contrast calibration {cal_name} but none was provided "
-                         f"(deploy from the controller, which sends the file's readings)")
-    if contrast_cal and not cal_name:
-        contrast_cal = None
+    cal_name = str(contrast_cal.get("name") or "contrast_cal") if contrast_cal else None
     if contrast_cal:
         print(f"  Contrast values are MEASURED {contrast_metric} contrast via {contrast_cal.get('name')}")
     elif metric_degenerate(bg, contrast_metric):

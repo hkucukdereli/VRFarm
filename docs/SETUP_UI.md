@@ -282,8 +282,11 @@ calibration and rebuilds and redeploys the warp. `theoretical` uses the modelled
 
 **Contrast Cal** (same section) measures one spot instead: the light at drive 1.0, 0.9 … 0.0 on
 black, the last being the projector's floor. **Save** writes
-`display_calibration/<rig>/intensity/contrast_cal_<stamp>.yaml`; the Experiment tab then offers it
-next to **Contrast**, where it turns contrast values into measured luminance contrast.
+`display_calibration/<rig>/intensity/contrast_cal_<stamp>.yaml`. Pick the rig's file (or none) in
+the **Use** dropdown beside the button and **Save Rig**. The TESTS row follows the card's pick at once:
+**Contrast %** is measured contrast, **Stimulus** draws the drive that produces it, and the row shows
+the background's and the stimulus's lx at the test azimuth plus the stimulus drive (0..1). After saving, the Experiment tab treats contrast
+values as measured luminance contrast.
 
 ---
 

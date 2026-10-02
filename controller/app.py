@@ -124,17 +124,71 @@ def create_app() -> Flask:
             }
         return jsonify(schemas)
 
-    @app.route("/api/quit", methods=["POST"])
-    def quit_app():
+    def _quit_blockers() -> str | None:
         running = registry.any_running()
         if running:
-            return jsonify({"ok": False, "error": f"session running on {', '.join(running)}"}), 409
+            return f"session running on {', '.join(running)}"
+        busy = [f"{n} ({rs.busy_kind})" for n, rs in registry.rigs.items() if rs.busy_kind]
+        if busy:
+            return f"busy: {', '.join(busy)}"
+        return None
+
+    def _reachable_pis() -> list[dict]:
+        """Every Pi of every rig file (loaded or not) that answers SSH, followers listed before
+        their leader. Loopback Pis (mock/test rigs) are never included."""
+        import socket
+        import yaml
+        from concurrent.futures import ThreadPoolExecutor
+        from controller.ssh import target as ssh_target, is_local
+        pis = []
+        for name in registry.list_rig_files():
+            try:
+                cfg = yaml.safe_load(registry.rig_path(name).read_text()) or {}
+            except Exception:
+                continue
+            rig_pis = [p for p in (cfg.get("pis") or []) if p.get("ip")]
+            rig_pis.sort(key=lambda p: p.get("role") == "leader")          # followers first
+            for p in rig_pis:
+                if not is_local(ssh_target(p)):
+                    pis.append({"rig": name, "name": p.get("name", p["ip"]), "ip": p["ip"],
+                                "role": p.get("role", ""), "user": p.get("user") or "vruser"})
+
+        def up(p):
+            try:
+                with socket.create_connection((p["ip"], 22), timeout=1.5):
+                    return True
+            except OSError:
+                return False
+        with ThreadPoolExecutor(max_workers=16) as ex:
+            alive = list(ex.map(up, pis))
+        return [p for p, a in zip(pis, alive) if a]
+
+    @app.route("/api/quit/preview")
+    def quit_preview():
+        return jsonify({"ok": True, "blocked": _quit_blockers(), "pis": _reachable_pis()})
+
+    @app.route("/api/quit", methods=["POST"])
+    def quit_app():
+        blocked = _quit_blockers()
+        if blocked:
+            return jsonify({"ok": False, "error": blocked}), 409
+        poweroff = []
+        if (request.get_json(silent=True) or {}).get("poweroff_pis"):
+            from controller.ssh import target as ssh_target, ssh_result
+            for p in _reachable_pis():      # followers before their leader, one rig at a time
+                r = ssh_result(ssh_target(p), "sudo -n poweroff", timeout=15)
+                err = (r.stderr or "").lower()
+                # 255 with no sudo/password complaint = the Pi dropped the link while going down
+                ok = r.returncode == 0 or (r.returncode == 255 and "sudo" not in err and "password" not in err)
+                poweroff.append({"rig": p["rig"], "name": p["name"], "ip": p["ip"], "ok": ok,
+                                 "error": None if ok else (r.stderr or "").strip()[-200:]})
+                print(f"[quit] poweroff {p['name']} ({p['ip']}): {'sent' if ok else 'FAILED ' + err[-120:]}")
         func = request.environ.get("werkzeug.server.shutdown")
         if func:
             func()
         else:
             threading.Timer(0.3, lambda: os._exit(0)).start()
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "poweroff": poweroff})
 
     return app
 

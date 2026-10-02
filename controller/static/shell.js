@@ -196,11 +196,63 @@ function toast(msg) {
   clearTimeout(toastT); toastT = setTimeout(() => el.style.display = 'none', 6000);
 }
 
+// Quit dialog: optional "power off all connected Pis" first. The Pi list is every Pi of every
+// rig file that answers SSH right now (loaded or not), fetched when the dialog opens.
+function _esc(t) { return String(t).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c])); }
+
 async function quitApp() {
-  if (!confirm('Stop the VRFarm controller server?')) return;
-  const r = await fetch('/api/quit', {method: 'POST'}).then(r => r.json()).catch(() => ({ok: true}));
-  if (r && r.ok === false) { toast(r.error || 'refused'); return; }
-  document.body.innerHTML = '<div style="text-align:center;margin-top:40vh;color:#888;font-size:16px">Server stopped. You can close this tab.</div>';
+  const bg = document.createElement('div');
+  bg.className = 'modal-bg';
+  bg.innerHTML = `<div class="modal" style="min-width:440px">
+      <h3 style="margin:0 0 8px">Quit server</h3>
+      <div>Stop the VRFarm controller server?</div>
+      <div id="quit-blocked"></div>
+      <label style="display:flex; gap:8px; align-items:center; margin-top:12px; cursor:pointer">
+        <input type="checkbox" id="quit-poweroff" disabled> Power off all connected Pis first
+      </label>
+      <div id="quit-pis" class="muted" style="font-size:12px; margin:6px 0 0 24px">checking which Pis answer…</div>
+      <div class="actions">
+        <button class="btn btn-sm" id="quit-cancel">Cancel</button>
+        <button class="btn btn-sm btn-red" id="quit-ok">OK</button>
+      </div></div>`;
+  document.body.appendChild(bg);
+  const close = () => bg.remove();
+  bg.querySelector('#quit-cancel').onclick = close;
+  bg.addEventListener('click', e => { if (e.target === bg) close(); });
+  const cb = bg.querySelector('#quit-poweroff');
+  const okBtn = bg.querySelector('#quit-ok');
+  let pis = [];
+
+  fetch('/api/quit/preview').then(r => r.json()).then(d => {
+    pis = d.pis || [];
+    if (d.blocked) {
+      bg.querySelector('#quit-blocked').innerHTML = `<div class="warn">Can't quit: ${_esc(d.blocked)}</div>`;
+      okBtn.disabled = true;
+    }
+    const list = bg.querySelector('#quit-pis');
+    if (!pis.length) { list.textContent = 'No Pi answers SSH right now — nothing to power off.'; return; }
+    cb.disabled = false;
+    list.innerHTML = pis.map(p => `${_esc(p.name)} <span style="color:#666">(${_esc(p.ip)}, ${_esc(p.rig)} ${_esc(p.role)})</span>`).join('<br>');
+    cb.onchange = () => { okBtn.textContent = cb.checked ? `Power off ${pis.length} Pi${pis.length > 1 ? 's' : ''} and quit` : 'OK'; };
+  }).catch(() => { bg.querySelector('#quit-pis').textContent = 'Could not check the Pis.'; });
+
+  okBtn.onclick = async () => {
+    const poweroff = cb.checked;
+    okBtn.disabled = true; cb.disabled = true;
+    okBtn.textContent = poweroff ? 'Powering off…' : 'Quitting…';
+    const r = await fetch('/api/quit', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                       body: JSON.stringify({poweroff_pis: poweroff})})
+      .then(r => r.json()).catch(() => ({ok: true}));
+    if (r && r.ok === false) { close(); toast(r.error || 'refused'); return; }
+    const res = (r && r.poweroff) || [];
+    const lines = res.map(p => `${_esc(p.name)} (${_esc(p.ip)}): ${p.ok ? 'poweroff sent'
+                                : '<span style="color:#e66">FAILED — ' + _esc(p.error || '?') + '</span>'}`).join('<br>');
+    document.body.innerHTML = '<div style="text-align:center;margin-top:35vh;color:#888;font-size:16px">'
+      + 'Server stopped. You can close this tab.'
+      + (res.length ? '<div style="font-size:13px; margin-top:16px; line-height:1.6">' + lines
+         + '<div style="margin-top:8px; color:#666">Wait ~20 s for the green LEDs to stop before cutting power.</div></div>' : '')
+      + '</div>';
+  };
 }
 
 // ── boot ──

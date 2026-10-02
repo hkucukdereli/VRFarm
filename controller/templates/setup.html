@@ -1787,7 +1787,16 @@ async function stopPhotodiodeMonitor() {
 // Test: flash the red sync square every N frames on the follower display so the photodiode sees
 // real pulses (opens the scope too). Simulates the stimulus sync square during an experiment.
 async function startPhotodiodeTest() {
-  if (!(deviceState.photodiode && deviceState.photodiode.monitoring)) await startPhotodiodeMonitor();
+  // The flash runs on the display Pi and needs only the display. Edge monitoring needs the
+  // photodiode initialized — skip it when it isn't, so the square can still be flashed to
+  // troubleshoot a photodiode (or Teensy) that won't come up.
+  const pdReady = deviceState.photodiode && deviceState.photodiode.initialized === true;
+  if (pdReady && !deviceState.photodiode.monitoring) {
+    try { await startPhotodiodeMonitor(); }
+    catch (e) { log('Photodiode monitor did not start (' + e + ') — flashing anyway.'); }
+  } else if (!pdReady) {
+    log('Photodiode not initialized — flashing the sync square only, no edge monitoring.');
+  }
   const dpi = getPiForDevice('display');
   if (!dpi) { log('Display not assigned to a Pi'); return; }
   const pd = rig.devices.photodiode || {};
@@ -2771,7 +2780,7 @@ function renderPhotodiodeControls(dev) {
         : `<button class="btn btn-blue btn-sm" onclick="startPhotodiodeMonitor()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
       ${ds.testing
         ? `<button class="btn btn-red btn-sm" onclick="stopPhotodiodeTest()">Stop test</button>`
-        : `<button class="btn btn-sm" onclick="startPhotodiodeTest()" ${ds.initialized !== true ? 'disabled' : ''} title="Flash the red sync square every N frames on the display (simulates the stimulus sync pulse) and open the scope">Test</button>`}
+        : `<button class="btn btn-sm" onclick="startPhotodiodeTest()" title="Flash the red sync square every N frames on the display (simulates the stimulus sync pulse). Needs only the display: with the photodiode initialized it also opens the scope and counts edges; without it, it just flashes (for troubleshooting)">Test</button>`}
       ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">Edges: <span id="pulse-count">0</span> | Last: <span id="last-pulse-time">--</span></span>` : ''}
       ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">| V <span id="pd-v" style="font-weight:600">--</span> <span style="color:#556">[1% <span id="pd-v1">--</span> · 99% <span id="pd-v99">--</span>]</span></span>` : ''}
     </div>

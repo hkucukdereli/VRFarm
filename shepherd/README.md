@@ -78,20 +78,20 @@ journalctl -u shepherd -f
 sudo systemctl status shepherd
 ```
 
-**Config is seeded once, then owned by the Pi.** Install copies `config.yaml` with
-`cp -n` (no-clobber), so thresholds/messages you edit on the leader survive a
+**Config is seeded once, then owned by the Pi.** Install copies the repo's `shepherd/config_template.yaml` to
+`~/rig/shepherd/config.yaml` with `cp -n` (no-clobber), so thresholds/messages you edit on the leader survive a
 re-Install or Deploy. To change them:
 ```bash
 nano ~/rig/shepherd/config.yaml         # on the leader
 sudo systemctl restart shepherd         # shepherd reads the file once at startup
 ```
-(The repo copy is the default/template. A `shepherd.py` *code* change rides Deploy, and
+(The repo only tracks the template. A `shepherd.py` *code* change rides Deploy, and
 Deploy restarts shepherd so the change takes effect.)
 
 **Manually (for a quick look or a test):**
 ```bash
-python3 shepherd/shepherd.py --config shepherd/config.yaml
-python3 shepherd/shepherd.py --config shepherd/config.yaml --once   # one sample, then exit
+python3 shepherd/shepherd.py --config shepherd/config_template.yaml
+python3 shepherd/shepherd.py --config shepherd/config_template.yaml --once   # one sample, then exit
 ```
 
 ## pi_api grace period

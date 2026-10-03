@@ -158,7 +158,7 @@ re-**Install** or `sudo apt install rsync` on the leader. The Data tab says whic
 
 ## Settings: `controller/configs/controller.yaml`
 
-Machine-specific, gitignored, created on first run from `controller.example.yaml` in the same
+Machine-specific, gitignored, created on first run from `controller_template.yaml` in the same
 folder: UI port, the controller's IP (for the diagram), the event port, data root, auto purge, the
 rsync path, sync tuning (`parallel_rigs`, `bwlimit_mbps`, `verify_checksum_before_purge`,
 `shepherd_logs_keep_days`) and the rig groups. Per-rig settings stay in `rigs/<rig>.yaml`.
@@ -174,7 +174,7 @@ Each rig has `display_calibration/<rig>/geometry/` (dated geometry files), `inte
 (along-azimuth and contrast calibrations, plus a theoretical file) and its `warp_map.npz`; see
 [display_calibration/README.md](../display_calibration/README.md#where-the-files-live). The
 folders are created the first time the Setup tab touches a rig; a rig without geometry is seeded
-from `display_calibration/rig_geometry_default.yaml`.
+from `display_calibration/_template/geometry/rig_geometry_template.yaml`.
 
 The geometry tool on the display Pi reports a saved geometry back to
 `/api/rigs/<rig>/setup/receive_geometry`; the Setup tab passes that address to `cal_start.sh`

@@ -252,13 +252,7 @@ display_diagnostics/preview/
 # The `latest` symlink is what compute_warp_map reads, so it is rig state too.
 # (Note the asymmetry with rig_geometry*.yaml, which IS tracked — geometry is authored by hand
 # in the calibrator and worth diffing; these are instrument readings.)
-# Per-rig layout: display_calibration/<rig>/intensity/ holds all of it (along-azimuth fits and
-# raw readings, the theoretical file, contrast cals). The flat patterns cover stray old files.
-display_calibration/*/intensity/
-display_calibration/luminance_cal_*.yaml
-display_calibration/luminance_measurements_*.yaml
-display_calibration/*/luminance_cal_*.yaml
-display_calibration/*/luminance_measurements_*.yaml
+# (YAML is handled by the rule at the end of this file: only *_template.yaml is tracked.)
 
 # Controller-wide settings (machine-specific: data root, groups, ports), created from the tracked
 # controller/configs/controller.example.yaml. /controller.yaml is where the file lived before
@@ -269,3 +263,15 @@ controller/configs/.controller.*.yaml
 
 # soft-deleted rig configs (Network tab -> Delete)
 rigs/.trash/
+
+# ── YAML: only templates are tracked ──
+# Every real-world YAML — rig configs, experiment/task files, calibration files (geometry,
+# intensity, contrast), controller settings, shepherd config — stays on the machine that uses
+# it. The repo carries one <name>_template.yaml per kind, in the folder the real files live in:
+#   rigs/_template.yaml                    rigs/_demo_template.yaml, _demo2_template.yaml (mock rigs)
+#   experiments/_template.yaml             controller/configs/controller_template.yaml
+#   shepherd/config_template.yaml          display_calibration/_template/{geometry,intensity}/
+*.yaml
+*.yml
+!*_template.yaml
+!*_template.yml

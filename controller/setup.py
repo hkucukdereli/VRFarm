@@ -331,7 +331,7 @@ def api_install_pi():
         if role == "leader":
             shepherd_on = data.get("shepherd_enabled", True)
             scp(str(ROOT / "shepherd" / "shepherd.service"), f"{ssh_prefix}:/tmp/shepherd.service")
-            scp(str(ROOT / "shepherd" / "config.yaml"), f"{ssh_prefix}:/tmp/shepherd.config.yaml")
+            scp(str(ROOT / "shepherd" / "config_template.yaml"), f"{ssh_prefix}:/tmp/shepherd.config.yaml")
             svc_cmd = ("sudo systemctl enable shepherd && sudo systemctl restart shepherd"
                        if shepherd_on else
                        "sudo systemctl disable shepherd 2>/dev/null; sudo systemctl stop shepherd 2>/dev/null || true")

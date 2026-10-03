@@ -1,0 +1,13 @@
+# TEMPLATE — display_calibration/<rig>/intensity/luminance_cal_<YYYYmmdd_HHMM>.yaml
+# Along-azimuth luminance fit, written by Setup → INTENSITY → Intensity Cal (Fit & Apply) from
+# a luminance_measurements file, or as luminance_cal_<geostamp>_theoretical.yaml (source:
+# theoretical) from the geometry model on every warp build. luminance_cal_latest.yaml (a symlink)
+# names the one an "empirical" warp build bakes in. The real file has 211 points (0..105° in
+# 0.5° steps); this example is shortened.
+date: '2026-01-01'
+source: measured            # measured | theoretical
+source_file: luminance_measurements_20260101_1200.yaml   # theoretical files: geometry_file instead
+az_degrees: [0.0, 20.0, 40.0, 60.0, 80.0, 105.0]
+gain: [1.0, 0.70, 0.45, 0.28, 0.16, 0.09]        # relative light, 1.0 at az 0
+correction: [0.09, 0.129, 0.2, 0.321, 0.563, 1.0] # min(gain)/gain: drive factor that equalizes
+note: 'gain: relative luminance (1.0 at center). correction: multiply stimulus contrast by this to equalize.'

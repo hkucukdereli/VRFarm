@@ -66,14 +66,14 @@ Set **`flip_h` / `flip_v`** to whatever makes the whole image (including text) r
 
 ### Step 2 — Regenerate the warp map
 
-In the setup UI, display card → **GEOMETRY**: pick the geometry **File** in the dropdown, then click **"Generate Warp"** / **"Regenerate Warp"** (`controller/setup.py:api_generate_warp`). This ray-traces the selected `rig_geometry.yaml` into `warp_map.npz` **on the controller**, atomically copies the NPZ *and* the geometry to every Pi, and reloads the live display. The luminance mode baked in is the rig's stored `display.luminance_correction` (Part 2). The status line shows whether `warp_map.npz` is present on the Leader.
+In the setup UI, display card → **GEOMETRY**: pick the geometry **File** in the dropdown, then click **"Generate Warp"** / **"Regenerate Warp"** (`controller/setup.py:api_generate_warp`). This ray-traces the selected `rig_geometry.yaml` into `warp_map.npz` **on the controller**, atomically copies the NPZ *and* the geometry to every Pi, and reloads the live display. The light model baked in is the rig's intensity calibration (`devices.display.intensity_calibration`, default: the theoretical mock of the geometry) — see Part 2.
 
 Manual/CLI equivalent (on the controller, in `display_calibration/`):
 
 ```bash
 conda activate vrfarm
 python compute_warp_map.py --validate            # → warp_map.npz + warp_map_validation.png
-python compute_warp_map.py --geo rig_geometry.yaml --lum-mode theoretical
+python compute_warp_map.py --geo <rig>/geometry/rig_geometry_<stamp>.yaml --intensity-cal <rig>/intensity/intensity_cal_<stamp>.yaml --cal-dir <rig>
 ```
 
 `--validate` writes `warp_map_validation.png` with four panels:
@@ -129,116 +129,82 @@ calibration:                # landmark block — set by calib_geo, do NOT hand-e
 
 ---
 
-## Part 2 — Luminance (Intensity) Correction
+## Part 2 — Intensity Calibration (light model)
 
 ### What it does
 
-Compensates for the fact that the projector delivers less effective luminance to oblique screen positions. Without correction, a stimulus at 80° azimuth appears dimmer than the same stimulus at 0°, making apparent contrast location-dependent.
+The projector delivers less light to oblique screen positions, its light is not proportional to
+its drive level, and a drive of 0 still leaves a black floor (DMD leakage + stray light). One
+intensity calibration measures all three, and a light model built from it
+(`shared/intensity_model.py`) lets every part of the system work in **light** rather than drive:
 
-The correction is a **per-azimuth gain curve** baked into `warp_map.npz`. It is applied **per pixel at render time** by the Follower's renderer (`devices/display.py:_build_corr_map`) over the **whole field** — background, stimulus, and ITI blank alike. Stimulus generation therefore stores the *uncorrected* headroom fraction (`shared/stim_generator.py:generate_stimuli`); the renderer equalizes delivered luminance. **Which curve is applied is chosen by a mode**, stored per-rig at `rig.devices.display.luminance_correction` and baked into the warp as the `lum_correction_mode` key. (`shared/stim_generator.py:get_luminance_correction` — a scalar version of the same curve — backs the experiment-UI "Correct" button, not stimulus generation.)
+- the background is uniform in light across the screen,
+- **Bg / background_gray is a brightness**: 0..1 of the uniform range (0 = the darkest light
+  every azimuth can show, 1 = the brightest),
+- contrast is computed on light (Weber, Michelson or normalized), including the floor — on a
+  "black" background Weber contrast is finite and large.
 
-### The four modes
+The model is baked into `warp_map.npz` (arrays `int_*`) by Generate Warp / Apply and used, from
+that one file, by the renderer (per-pixel drive), the Leader (stimulus generation) and the
+controller (previews, Correct).
 
-Set in the **setup UI → display card → CALIBRATION → "Intensity" dropdown**, applied with the **"Intensity Cal"** button:
+### One file, one altitude
 
-| Mode | Dropdown option | What it does |
-|---|---|---|
-| **auto** | `auto (measure)` | Measure per-azimuth luminance with the meter; the panel **auto-advances** to the next azimuth after each reading. |
-| **manual** | `manual (measure)` | Same measurement, but you **Show** each azimuth explicitly and can jump around / redo. |
-| **theoretical** | `theoretical` | No measurement — apply the geometric projector-incidence model (monotone falloff). The default / fallback. |
-| **none** | `none` | No correction (flat, unity gain). |
+`display_calibration/<rig>/intensity/intensity_cal_<stamp>.yaml`
+(format: `display_calibration/_template/intensity/intensity_cal_template.yaml`):
 
-`auto` and `manual` both produce the stored mode **`empirical`** (`controller/setup.py:api_lum_apply`). Choosing `theoretical`/`none` and clicking Intensity Cal applies immediately (rebuild + redeploy the warp). The active mode persists via **Save Rig**.
+| Part | What you measure |
+|---|---|
+| Column 1 — `azimuth_sweep` | light at **full drive** at each azimuth row you choose; measure out to the screen edge (and both sides of centre to check symmetry) |
+| Level columns — `level_sweeps` | light at drive 1.0, 0.9 … 0.1, 0.05, 0.0 at an azimuth you set per column; add as many columns as you want (e.g. 0°, 45°, 85°) |
 
-### Equipment (empirical modes)
+The model: `L(az, v) = F(az) + (M(az) − F(az)) · h(v; az)`. `M` is column 1's shape re-anchored to
+each level column's drive-1 reading, `F` the level columns' floors, `h` their normalized
+responses; all interpolated in |az| between columns and held constant beyond. The uniform range is
+`max F .. min M` over the calibrated azimuths.
 
-- **Thorlabs PM100D** power meter (or any linear-in-luminance meter / spot photometer). Absolute units don't matter — the gain is normalized to 1.0 at center, so a power reading in **W** works as well as cd/m². Plug the console into the **controller** for automated reads (`controller/setup.py:_read_pm100d` uses `pyvisa` + `ThorlabsPM100`; the panel silently falls back to manual entry if the driver or meter is missing); otherwise just type the reading off the meter's display.
-- Projector on and warmed up (≥15 minutes), room lights off, mouse out of the setup.
+**Mocks.** Without a measurement the rig uses a mock in the same format, with a straight
+response (drive 0 = 0, drive 1 = 1) and no floor: `intensity_cal_<geostamp>_theoretical.yaml`
+(column 1 = the geometry model's cos(incidence) gain — the default, identical to the old
+theoretical correction) or `intensity_cal_none.yaml` (flat — brightness is the drive). Both are
+written automatically for the current geometry.
 
-### Procedure (auto / manual)
+### Procedure
 
-1. Load Rig → **Initialize the display**.
-2. Display card → CALIBRATION → set **Intensity = auto** (or manual) → click **Intensity Cal**. A measurement panel opens: one row per azimuth (**0, 20, 40, 60, 80, 100°**) and a patch **size** (default **15°** — big enough to overfill the sensor aperture).
-3. For each azimuth a **white patch** lights on the projector at that location — rendered **raw** (`apply_lum:false`, contrast 1 on a black background) so the meter reads the true delivered luminance the fit is built from. Aim the meter at it, then click **Read** (auto-fills from the PM100D) or type the value. In **auto** mode the panel advances to the next azimuth automatically; in **manual** you click **Show** on the next row.
-4. When at least 2 azimuths are read, click **Fit & Apply**. This fits the gain curve (`fit_luminance_correction.fit_luminance`), writes `luminance_cal_latest.yaml`, rebuilds `warp_map.npz` with `--lum-mode empirical`, and ships it to the Pis (+ reloads the live display).
-
-Files land in `display_calibration/<rig>/intensity/`: the raw readings as `luminance_measurements_<stamp>.yaml`, the fit as `luminance_cal_<stamp>.yaml`, and `luminance_cal_latest.yaml` points at it. Every warp build also writes `luminance_cal_<geostamp>_theoretical.yaml`, so a rig always has an intensity file.
-
-### Contrast calibration (light vs drive level at one spot)
-
-The along-azimuth cal above equalizes brightness *across* the screen. The contrast cal measures how
-the light at **one spot** depends on the drive level, down to the black floor (DMD leakage + stray
-light). With it, a contrast value means the **measured** luminance contrast, not the drive ratio.
-
-**Measure** (Setup → Display card → INTENSITY):
-
-1. Initialize the display; projector warmed up, room dark, meter on a stand.
-2. Click **Contrast Cal**. Set the spot (Az, Alt, Size; default az 0°, the test-stimulus altitude,
-   15° patch). Rows are drive levels 1.0, 0.9 … 0.1, 0.05, 0.0.
-3. Each row shows a raw patch (`apply_lum:false`) on black; 0.0 is a black patch, i.e. the floor.
-   Click **Read** (PM100D) or type the value; the panel advances to the next level.
-4. **Save** → `display_calibration/<rig>/intensity/contrast_cal_<stamp>.yaml` (readings at 1.0 and
-   0.0 are required; units cancel, only ratios are used).
-
-**Use it** (per rig):
-
-5. Pick the file in the **Use** dropdown beside **Contrast Cal** (or `none (drive ratio)`) and
-   **Save Rig** — stored as `devices.display.contrast_calibration` in the rig YAML. The Experiment tab
-   reloads the rig and its Contrast label reads *(Weber, measured)*.
-6. Type contrast in **percent** (`[25, 15, 12.5]`; 100 = 100 %). Task files and data keep fractions.
-   Measured contrast can exceed 100 %: on black, a 10:1 light ratio is 900 % Weber.
-7. Read the boxes: under **Contrast**, each value's stimulus drive (0..1, = the trial table's
-   `stim_drive`) and its lx; under **Background**, the background's lx — both at the cal's spot.
-   **Correct** clamps to the measured ceiling (drive 1.0 on this background, lowest over the
-   session's azimuths). The Setup TESTS row shows the same at the test azimuth, and **Stimulus**
-   draws the measured contrast you typed.
-8. **Deploy** sends the file's readings to the Leader, which converts every value into the drive that
-   produces it (`shared/stim_generator.drive_for_measured_contrast`). The NPZ and `trials.yaml` record
-   `stim_drive`, `contrast_measured` and the file name. A rig YAML naming a file the rig does not have
-   blocks Deploy.
-
-**Assumptions and limits.** Metrics: Weber `(Ls−Lb)/Lb`, Michelson `(Ls−Lb)/(Ls+Lb)`, normalized
-`(Ls−Lb)/(L(1)−Lb)`, with `L()` interpolated from the readings. The readings' *shape* is assumed to
-hold at every azimuth up to a constant factor (which cancels in contrast). With luminance correction
-on, the renderer scales drives by `C(az) ≤ 1` toward the floor, so the reachable measured contrast is
-lower where `C(az)` is small (cheddar, az 0°, black background: about 970 %). Known issue: the
-along-azimuth correction multiplies the *drive*, but light is not linear in drive (cheddar: half drive
-≈ 21 % of full light), so absolute brightness is not perfectly uniform across azimuth (bg 0.2:
-≈1.15 lx at az 0° vs ≈1.03 lx at az 60°). Measured contrast is unaffected.
-
-Because the correction rides the normal warp pipeline, it **survives Regenerate Warp**: `compute_warp_map.py --lum-mode empirical` re-injects `luminance_cal_latest.yaml` on every build, so it is never clobbered.
+1. Load the rig, **Initialize** the display. Projector warmed up (≥ 15 min), room dark, meter
+   (Thorlabs PM100D, or any linear meter) on a stand.
+2. Display card → **INTENSITY → Measure…**. Set **Alt** (used for the whole calibration),
+   **Size** (default 15°, overfills the sensor) and **Unit** (a label, e.g. lux).
+3. Column 1: edit/add azimuth rows (defaults 0, ±20 … ±100). For each row press **▶** (the patch
+   lights at full drive, raw) and **R** (PM100D) or type the value. R advances to the next empty row.
+4. Level columns: set each column's azimuth in its header, **+ column** for more. ▶ / R per cell;
+   rows are the drive levels, 0.0 being a black patch (the floor).
+5. **Save** writes the file and logs a fit report (uniform range, how much the column shapes
+   differ, left/right asymmetry). **Save & Apply** also applies it.
+6. **Apply** (or pick any file in the **Calibration** dropdown, then Apply) rebuilds
+   `warp_map.npz` with that file's light model, deploys it to the Pis, reloads a live display and
+   records the choice in the rig YAML (`devices.display.intensity_calibration`, saved at once).
 
 ### What good output looks like
 
-- Readings **descend toward the edges** (edges are dimmer).
-- The fitted gain is a smooth curve, 1.0 at center → lower at the edges.
-- The **correction = min(gain)/gain** *attenuates* rather than boosts: it is **1.0 (full drive) at the dimmest/outermost azimuth** and **< 1 (darker) at center**, so the bright center is dimmed down to match the edges. Delivered luminance (`drive × gain`) is then uniform across azimuth, and nothing ever clips.
+- Column 1 descends toward the edges; the L/R asymmetry is a few percent.
+- Every level column rises monotonically from its floor to its drive-1 reading.
+- Shape spread small (a few %) means one response curve fits the whole screen; large means the
+  interpolation between columns is doing real work — measure a column near each azimuth you use.
+- Check after Apply: TESTS → Blank at a mid brightness and read the meter at a few azimuths;
+  the light should match within a few percent.
 
-> **Full-field, per-column correction.** The correction is applied **per pixel at render time** to the **whole field — background, stimulus, and the ITI blank alike** (all pixels in an azimuth column get the same factor `C(az) = min(gain)/gain`; altitude doesn't matter). Because the background and stimulus scale together, this equalizes **absolute delivered luminance** *and* keeps **Weber/Michelson contrast** uniform — you get both. The only cost is peak brightness: **Bg = 1 is the brightest *uniform* level**, limited by the dimmest (outermost) azimuth. Set Intensity = **none** only if you want the raw, non-uniform projector output.
+### Gray scale & contrast metric
 
-### Legacy CLI (optional, on the follower)
-
-The old standalone scripts still exist: `display_test_patches.py` (PsychoPy patch stepper, hand-typed cd/m²) → `fit_luminance_correction.py`. The fit accepts either the neutral `reading` field or the legacy `luminance_cdm2`. The setup-UI flow is preferred — no PsychoPy, automated meter, and it deploys for you.
-
----
-
-## Display gray scale & contrast metric
-
-These are not calibration steps, but they set the units the calibrated screen is *driven* in, so they belong here.
-
-### 0..1 gray scale
-
-Display gray / blank is plain **0..1** luminance drive — **0 = fully dark, 1 = fully bright** — clamped to that range (`devices/display.py:blank_with_gray`). It is **not** the PsychoPy `[-1, 1]` scale. The stimulus `background_gray` (0..1) and the TESTS **Blank → Bg** field both use it. With a warp loaded, even a uniform blank is luminance-corrected per pixel so its *delivered* luminance is uniform across azimuth.
-
-### Contrast metric (Weber / Michelson / Normalized)
-
-Contrast in a task YAML's `stimulus.contrast.values` is interpreted in a **selectable metric**, set per-rig at `rig.devices.display.contrast_metric` via the display card **RENDERING → "Contrast metric"** dropdown:
-
-- **Weber** (default) — `C = (L_stim − L_bg) / L_bg`
-- **Michelson** — `C = (L_stim − L_bg) / (L_stim + L_bg)`
-- **Normalized** — the raw headroom fraction `f`, where `L_stim = L_bg + f·(1 − L_bg)`
-
-Conversions live in `shared/stim_generator.py` (`metric_to_fraction` / `fraction_to_metric`). Weber and Michelson divide by the background, so at a near-black or near-white background they degenerate and fall back to the normalized identity (`metric_degenerate`). The generator rounds each authored contrast **down to the nearest 8-bit-exact luminance code** (`snap_contrast_to_bitcode`) so the reported value matches what the renderer shows. The setup card's TESTS **"Correct"** button (and the experiment-UI equivalent) clamp a test contrast to the uniform-field ceiling at the current Bg in the active metric (Weber `(1−bg)/bg`, Michelson `(1−bg)/(1+bg)`, Normalized `1`).
+- **Bg / `stimulus.background_gray` = brightness**, 0..1 of the uniform range (`L = Lo + b·(Hi − Lo)`).
+  With the none mock it is the plain drive; with the theoretical mock it is the old corrected drive.
+- **Contrast** (`stimulus.contrast.values`, typed in percent in the UI, stored as fractions) is
+  defined on light, in the rig's metric (display card RENDERING → Contrast metric):
+  Weber `(Ls − Lb)/Lb`, Michelson `(Ls − Lb)/(Ls + Lb)`, normalized `(Ls − Lb)/(Hi − Lb)` (fraction of
+  the uniform headroom). Weber/Michelson on a background without light (a mock at brightness 0)
+  fall back to normalized.
+- A stimulus may be brighter than the uniform ceiling where the screen can deliver it; past
+  drive 1 a pixel clips. **Correct** clamps to what every session azimuth can show.
 
 ---
 
@@ -280,7 +246,7 @@ display_calibration/                 (on the controller; deployed to ~/rig/calib
 ├── validate_calibration_pygame.py  # On-projector warp validator (pygame; --flip-h/--flip-v)
 ├── validate_calibration.py         # Legacy PsychoPy validator (does not run on the follower)
 ├── display_test_patches.py         # Legacy CLI luminance patch stepper (setup-UI flow preferred)
-├── fit_luminance_correction.py     # Luminance fit — fit_luminance() reused by the setup UI
+├── intensity_cal.py                # intensity calibration files: save / mocks / list / load
 │
 ├── warp_map.npz                    # Generated — used by all experiments
 │   contains:
@@ -291,13 +257,10 @@ display_calibration/                 (on the controller; deployed to ~/rig/calib
 │     py_from_az       (Nalt×Naz)   Pixel Y for each (az, alt)
 │     az_samples       (Naz,)       Azimuth sample points
 │     alt_samples      (Nalt,)      Altitude sample points
-│     lum_correction_mode (str)    empirical | theoretical | none — which curve the
-│                                  runtime applies (get_luminance_correction / _build_corr_map)
-│     lum_az           (N,)         Azimuth points for the theoretical luminance arrays
-│     lum_gain_theoretical (N,)     Projector-incidence falloff (monotone) — the fallback
-│     lum_az_empirical    (N,)      Present only in empirical mode (measured)
-│     lum_gain_empirical  (N,)      Measured gain (empirical mode)
-│     lum_correction_empirical (N,) min(gain)/gain correction factor (empirical mode)
+│     lum_az, lum_gain_theoretical  Geometry gain (diagnostics/plots only)
+│     int_*                         The light model (shared/intensity_model.py): floor F,
+│                                   max light M, inverse responses, uniform range lo/hi,
+│                                   calibration name — used by renderer, Leader, controller
 │
 └── warp_map_validation.png         # Last --validate plot
 ```
@@ -333,24 +296,14 @@ Reward calibration is **not** a file here — it lives in the rig YAML under `de
 
 # Manual warp build (on the controller, in display_calibration/, vrfarm env):
 python compute_warp_map.py --validate                       # + validation plot
-python compute_warp_map.py --geo rig_geometry.yaml --lum-mode theoretical
+python compute_warp_map.py --geo <rig>/geometry/rig_geometry_<stamp>.yaml --intensity-cal <rig>/intensity/intensity_cal_<stamp>.yaml --cal-dir <rig>
 
 # On-projector visual validation (on the follower, projector X up):
 /usr/bin/python3 validate_calibration_pygame.py \
     --warp ~/rig/calibration/warp_map.npz [--flip-h] [--flip-v]
 
-# ── Luminance (intensity): PREFERRED path is the setup UI ───────────────────────
-#   Display card → CALIBRATION → Intensity dropdown (auto / manual / theoretical /
-#   none) → "Intensity Cal" button.
-
-# Rebuild the warp with a chosen luminance mode (what the UI does under the hood):
-python compute_warp_map.py --lum-mode empirical             # or theoretical / none
-
-# Legacy CLI: measure with a photometer, then fit. NOTE display_test_patches.py is a
-# PsychoPy script and PsychoPy is not installed on the follower (and would need X) — it is
-# kept for reference only; use the setup-UI Intensity Cal flow above.
-python display_test_patches.py
-python fit_luminance_correction.py [luminance_measurements_YYYY-MM-DD.yaml]
+# ── Intensity: setup UI → Display card → INTENSITY → Measure… / Calibration + Apply
+#   (Apply = compute_warp_map.py --intensity-cal <file> + deploy; no --intensity-cal = theoretical mock)
 
 # ── Reward valve: setup UI → reward card → editable ms/µL table → "Save Calibration"
 ```
@@ -374,7 +327,7 @@ One or more meter readings were bad. Re-measure the outlier azimuths (in the int
 **Contrast patches still look uneven after correction:**
 The meter reading may have included ambient light, or the patch didn't overfill the sensor. Turn room lights fully off, increase the patch **size**, and re-measure. Confirm the active mode is **`empirical`** (setup-UI status line), not `theoretical`/`none`.
 
-**Intensity Cal / Read does nothing or errors:**
+**Measure… / R (read) does nothing or errors:**
 The display must be **Initialized** first (the patch is shown through the live renderer). For automated reads the PM100D must be USB-connected to the controller with `pyvisa`/`ThorlabsPM100` installed — otherwise the panel still works with **manual entry** (type the meter's displayed value).
 
 **Reward volume is off / drifts:**

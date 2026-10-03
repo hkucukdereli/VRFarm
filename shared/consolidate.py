@@ -45,10 +45,14 @@ _NPZ_DATASET = {
     "duration_s": "duration_s", "prestim_durations": "prestim_s",
     "poststim_durations": "poststim_s", "iti_durations": "iti_planned_s",
     "block_delays": "block_delays", "block_start_indices": "block_start_indices",
+    # light model (shared/intensity_model): what each stimulus was in light, per trial
+    "stim_brightness": "stim_brightness", "stim_lum": "stim_lum", "stim_drive": "stim_drive",
+    "contrast_measured": "contrast_measured",
 }
 # stimuli.npz scalars -> /stimulus group attrs
 _NPZ_ATTR = ("background_gray", "global_delay", "shape",
-             "block_delay_skip_first", "sync_square_every_n")
+             "block_delay_skip_first", "sync_square_every_n",
+             "bg_lum", "intensity_calibration", "light_unit")
 # stimuli.npz arrays that duplicate recorded /trials data -> dropped
 _NPZ_SKIP = {"trial_idx", "block_num", "stim_az_deg", "contrast", "corr_contrast",
              "bg_gray", "n_trials"}

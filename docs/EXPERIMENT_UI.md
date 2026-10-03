@@ -83,14 +83,16 @@ Everything here is live-editable and round-trips to YAML:
 - **Correct** clamps contrast to what the display can reach at the current background,
   and is the one control that explicitly invalidates a Deploy.
 - **Contrast is typed in percent** (`[25, 15, 12.5]`, 100 = 100 %); the task file and the data keep
-  fractions (0.25). Under the box, each value's stimulus intensity is shown as the 0..1 drive the
-  renderer gets (= the trial table's `stim_drive`); with a contrast calibration also its light in lx,
-  and under **Background** the background's lx, both at the calibration's spot.
-- **Measured contrast** comes from the rig, not the task: when the rig has a contrast calibration
-  (Setup → Display → INTENSITY → **Use**, then Save Rig), contrast values are **measured** luminance
-  contrast in the rig's metric and may exceed 1 (10:1 light on black = 9.0 Weber). The label reads
-  *(Weber, measured)* (hover for the file), the hint shows the measured ceiling, and **Correct**
-  clamps to it. The NPZ and trial table record `stim_drive`, `contrast_measured` and the file name.
+  fractions (0.25). Contrast is defined on **light** through the rig's intensity calibration
+  (Setup → INTENSITY → Apply), in the rig's metric; it may exceed 100 % (on a background near the
+  black floor, Weber gets large).
+- **Background is a brightness**, 0..1 of the calibration's uniform range (0 = darkest light every
+  azimuth can show, 1 = brightest).
+- Under the boxes: the background's light, and per contrast value the stimulus light (the same at
+  every azimuth) and the drive it takes over the session's azimuths; "(clips)" = needs more than
+  full drive somewhere. The hint shows the ceiling; **Correct** clamps to it. The NPZ and trial
+  table record `stim_brightness`, `stim_lum`, `stim_drive`, `contrast_measured` and the
+  calibration's name.
 - Level `2.5` forces Adaptive on and locks the checkbox; Amount `Count` swaps the value
   field to a pulse count and enables **Gap (ms)**.
 

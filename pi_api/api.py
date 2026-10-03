@@ -444,8 +444,7 @@ def generate_stims():
         stim_dir.mkdir(parents=True, exist_ok=True)
         contrast_metric = data.get("contrast_metric", "weber")
         arrays = generate_stimuli(task_config, warp_map, str(stim_dir),
-                                  contrast_metric=contrast_metric,
-                                  contrast_cal=data.get("contrast_cal"))
+                                  contrast_metric=contrast_metric)
 
         result = {
             "ok": True,
@@ -700,20 +699,32 @@ def test_checkers():
 
 @app.route("/api/test_stimulus", methods=["POST"])
 def test_stimulus():
-    """Draw one test patch (square/circle) at az/alt with a contrast on the given bg.
-    Contrast arrives in the rig's active metric; convert it to the normalized render
-    fraction (same mapping generation uses) so the value matches the experiment card."""
+    """Draw one test patch (square/circle) at az/alt.
+
+    Normal test (apply_lum true): bg_gray is a background BRIGHTNESS (0..1 of the uniform range)
+    and contrast a fraction in contrast_metric (0.5 = 50 %), converted to the stimulus brightness
+    through the light model in THIS Pi's warp_map.npz — the same model and the same function
+    (shared.stim_generator.stimulus_for) stimulus generation uses.
+    Raw (apply_lum false, the intensity-calibration measurement): contrast and bg_gray are DRIVE
+    levels 0..1, drawn as-is with no light model."""
     data = request.json or {}
     bg = float(data.get("bg_gray", 0.0))
     contrast = float(data.get("contrast", 0.5))
     metric = data.get("contrast_metric", "weber")
-    try:
+    apply_lum = bool(data.get("apply_lum", True))
+    info = {}
+    if not apply_lum:
+        frac = max(0.0, min(1.0, contrast))
+    else:
         _ensure_rig_path()
-        from shared.stim_generator import metric_to_fraction
-        frac = float(metric_to_fraction(contrast, bg, metric))
-    except Exception:
-        frac = contrast   # fall back to raw fraction if the converter isn't importable
-    frac = max(0.0, min(1.0, frac))
+        import numpy as np
+        from shared.stim_generator import light_model, stimulus_for
+        warp_path = Path.home() / "rig" / "calibration" / "warp_map.npz"
+        model = light_model(np.load(str(warp_path)) if warp_path.exists() else None)
+        st = stimulus_for(model, contrast, bg, float(data.get("az_deg", 0.0)), metric)
+        frac = st["stim_brightness"]
+        info = {k: st[k] for k in ("stim_brightness", "stim_drive", "stim_lum", "bg_lum",
+                                   "contrast_measured", "clipped")}
     cmd = {
         "action": "stimulus",
         "az_deg": float(data.get("az_deg", 0.0)),
@@ -722,13 +733,11 @@ def test_stimulus():
         "corr_contrast": frac,
         "bg_gray": bg,
         "shape": data.get("shape", "square"),
-        # Intensity-cal measurement sends apply_lum:false to render RAW drive (so the meter reads
-        # the uncorrected delivered luminance the correction is fit from). Normal tests correct.
-        "apply_lum": bool(data.get("apply_lum", True)),
+        "apply_lum": apply_lum,
     }
     result = _displayd_render(cmd) if _displayd_alive() else _display_command(cmd)
     code = 200 if result.get("ok") else 500
-    return jsonify(result), code
+    return jsonify({**result, **info}), code
 
 
 @app.route("/api/reload_warp", methods=["POST"])

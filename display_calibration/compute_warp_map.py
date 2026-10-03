@@ -29,6 +29,8 @@ import numpy as np
 import yaml
 from pathlib import Path
 from scipy.interpolate import RegularGridInterpolator
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))   # shared/ (intensity model)
 
 # ── Load geometry ──────────────────────────────────────────────────────────────
 
@@ -543,29 +545,6 @@ def compute_theoretical_luminance_correction(geo, az_samples, proj):
     return gains
 
 
-def _load_empirical_cal():
-    """Load the latest empirical luminance fit (az/gain/correction) from
-    luminance_cal_latest.yaml, if present, for re-injection into warp_map.npz. Returns a dict
-    {az, gain, correction, source} or None. This is what lets a measured correction survive
-    every warp regeneration instead of being clobbered."""
-    # Per-rig layout: display_calibration/<rig>/intensity/luminance_cal_latest.yaml, with the
-    # warp written to display_calibration/<rig>/warp_map.npz. A flat folder still works.
-    path = CAL_DIR / "intensity" / "luminance_cal_latest.yaml"
-    if not path.exists():
-        path = CAL_DIR / "luminance_cal_latest.yaml"
-    if not path.exists():
-        return None
-    try:
-        d = yaml.safe_load(path.read_text()) or {}
-        return {"az": np.asarray(d["az_degrees"], dtype=float),
-                "gain": np.asarray(d["gain"], dtype=float),
-                "correction": np.asarray(d["correction"], dtype=float),
-                "source": path.name}
-    except Exception as e:
-        print(f"  [warn] could not read {path.name}: {e}")
-        return None
-
-
 def theoretical_luminance_curve(geo):
     """(az 0..105, gain) of the theoretical model for `geo` — what the warp bakes in as
     lum_az/lum_gain_theoretical. The controller writes it out as the rig's theoretical
@@ -578,7 +557,7 @@ def theoretical_luminance_curve(geo):
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def main(validate=False, geo_path=None, lum_mode="theoretical"):
+def main(validate=False, geo_path=None, intensity_cal=None):
     print(f"Loading rig geometry from {geo_path or GEO_FILE}...")
     geo = load_geometry(geo_path or GEO_FILE)
 
@@ -605,28 +584,29 @@ def main(validate=False, geo_path=None, lum_mode="theoretical"):
 
     # Save. Orientation (flip/offset) + usable frame are already BAKED into the maps by
     # orient_maps, so warp_map.npz is the complete physical transformation — the runtime
-    # uses az_map/valid_map directly, no further orientation step. `lum_correction_mode` tells
-    # the runtime (get_luminance_correction) which correction to apply.
+    # uses az_map/valid_map directly, no further orientation step. The int_* arrays below are the
+    # light model every consumer (renderer, Leader, controller) works from.
     out_path = CAL_DIR / "warp_map.npz"
     arrays = dict(
         az_map=az_map, alt_map=alt_map, valid_map=valid_map,
         px_from_az=px_map, py_from_az=py_map,
         az_samples=az_samples, alt_samples=alt_samples,
-        lum_az=az_sym, lum_gain_theoretical=lum_gain,
-        lum_correction_mode=lum_mode)
-    # Empirical mode: re-inject the measured curve so it survives every regeneration.
-    if lum_mode == "empirical":
-        cal = _load_empirical_cal()
-        if cal is not None:
-            arrays["lum_az_empirical"] = cal["az"]
-            arrays["lum_gain_empirical"] = cal["gain"]
-            arrays["lum_correction_empirical"] = cal["correction"]
-            print(f"  Injected empirical luminance correction from {cal['source']}")
-        else:
-            print("  [warn] lum-mode=empirical but no luminance_cal_latest.yaml found — "
-                  "runtime falls back to the theoretical curve")
+        lum_az=az_sym, lum_gain_theoretical=lum_gain)        # kept for plots/diagnostics only
+    # The light model the renderer, the Leader and the controller all use (shared/intensity_model):
+    # from the rig's intensity calibration file, or the theoretical mock of this geometry.
+    import yaml as _yaml
+    from shared.intensity_model import IntensityModel, mock_cal
+    if intensity_cal:
+        cal = _yaml.safe_load(Path(intensity_cal).read_text()) or {}
+        cal["name"] = Path(intensity_cal).name
+        label = Path(intensity_cal).name
+    else:
+        cal = mock_cal("theoretical", list(az_sym), list(lum_gain))
+        label = "theoretical mock (no --intensity-cal)"
+    model = IntensityModel.from_cal(cal)
+    arrays.update(model.to_arrays())
     np.savez(out_path, **arrays)
-    print(f"\nSaved: {out_path} (luminance mode: {lum_mode})")
+    print(f"\nSaved: {out_path} (intensity: {label}; uniform range {model.lo:.4g}..{model.hi:.4g} {model.unit})")
 
     if validate:
         _plot_validation(az_map, alt_map, valid_map,
@@ -698,14 +678,12 @@ if __name__ == "__main__":
                         help='geometry YAML to build from (default: ./rig_geometry.yaml)')
     parser.add_argument('--validate', action='store_true',
                         help='Show validation plots after computing')
-    parser.add_argument('--lum-mode', default='theoretical',
-                        choices=['empirical', 'theoretical', 'none'],
-                        help='luminance correction baked into the warp (default: theoretical). '
-                             'empirical re-injects luminance_cal_latest.yaml.')
+    parser.add_argument('--intensity-cal', default=None,
+                        help='intensity calibration YAML whose light model is baked into the warp '
+                             '(default: the theoretical mock of this geometry)')
     parser.add_argument('--cal-dir', default=None,
-                        help='rig folder: reads intensity/luminance_cal_latest.yaml, writes warp_map.npz '
-                             '(the controller passes display_calibration/<rig>/)')
+                        help='rig folder that receives warp_map.npz (the controller passes display_calibration/<rig>/)')
     args = parser.parse_args()
     if args.cal_dir:
         CAL_DIR = Path(args.cal_dir).expanduser().resolve()
-    main(validate=args.validate, geo_path=args.geo, lum_mode=args.lum_mode)
+    main(validate=args.validate, geo_path=args.geo, intensity_cal=args.intensity_cal)

@@ -270,23 +270,24 @@ the full procedure is in [CALIBRATION_PROTOCOL.md](CALIBRATION_PROTOCOL.md).
 
 ![Intensity calibration panel](images/setup-14-intensity.png)
 
-The projector is brighter at the centre than at the edges. The correction measures
-luminance at six azimuths and attenuates *down* to the dimmest one, so a stimulus has the
-same luminance wherever it appears.
+The projector is brighter at the centre than at the edges, its light is not proportional to its
+drive, and drive 0 still leaves a black floor. One intensity calibration measures all of it, and
+the light model built from it makes the background uniform in light and defines brightness and
+contrast on light (details: [CALIBRATION_PROTOCOL.md, Part 2](CALIBRATION_PROTOCOL.md)).
 
-Choose `auto` or `manual` under **Intensity**, press **Intensity Cal**, then for each
-azimuth press **Show** (manual) and **Read** to take a Thorlabs PM100D reading — or type
-the value if no meter is attached. With at least two readings, **Fit & Apply** writes the
-calibration and rebuilds and redeploys the warp. `theoretical` uses the modelled falloff;
-`none` disables correction entirely.
-
-**Contrast Cal** (same section) measures one spot instead: the light at drive 1.0, 0.9 … 0.0 on
-black, the last being the projector's floor. **Save** writes
-`display_calibration/<rig>/intensity/contrast_cal_<stamp>.yaml`. Pick the rig's file (or none) in
-the **Use** dropdown beside the button and **Save Rig**. The TESTS row follows the card's pick at once:
-**Contrast %** is measured contrast, **Stimulus** draws the drive that produces it, and the row shows
-the background's and the stimulus's lx at the test azimuth plus the stimulus drive (0..1). After saving, the Experiment tab treats contrast
-values as measured luminance contrast.
+- **Calibration** lists the rig's files: measured ones, and the `theoretical` (geometry model, the
+  default) and `none` mocks. **Apply** rebuilds and deploys the warp with the selected file and
+  makes it the rig's (`devices.display.intensity_calibration`, saved at once). The line below shows
+  the uniform range Bg 0..1 spans.
+- **Measure…** opens the measurement panel, at one **Alt** for the whole calibration. Column 1:
+  light at full drive at the azimuth rows you choose (**+ azimuth**). Level columns: light at drive
+  1.0 … 0.0 at the azimuth in each column header (**+ column**). ▶ shows a cell's patch (raw), R
+  reads the Thorlabs PM100D and advances, or type the value. **Save** writes
+  `display_calibration/<rig>/intensity/intensity_cal_<stamp>.yaml` and logs a fit report;
+  **Save & Apply** also applies it.
+- The TESTS row follows the applied calibration: **Bg** is a brightness, **Contrast %** is contrast
+  of light, and the row shows the background's and the stimulus's light plus the drive at the test
+  azimuth.
 
 ---
 

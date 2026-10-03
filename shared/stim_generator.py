@@ -9,7 +9,7 @@ YAML trial table shared with all consumers (UI, followers).
 
 Output arrays per trial:
   trial_idx, block_num, stim_az_deg, stim_alt_deg, contrast,
-  px_x, px_y, px_size, corr_contrast, duration_s, bg_gray
+  px_x, px_y, px_size, stim_brightness (= corr_contrast), stim_lum, stim_drive, duration_s, bg_gray
 """
 
 import numpy as np
@@ -71,181 +71,31 @@ def visual_angle_to_pixels(az_deg, alt_deg, size_deg, warp,
         return max(4, int(size_deg * px_per_deg))
 
 
-def gain_to_correction_curve(gain):
-    """Turn a per-azimuth luminance GAIN curve (bright at center az 0, dim toward the ±90° edges)
-    into a CORRECTION curve that EQUALIZES delivered luminance by attenuating the bright center
-    DOWN to the dim outermost azimuth:
-        corr = min(gain) / gain
-    So corr == 1.0 (full drive) at the dimmest/outermost az, and < 1.0 (darker) at center — the
-    delivered luminance (drive × gain = requested × min(gain)) is then the same at every azimuth.
-    Because it only ever attenuates (corr <= 1) it never needs clipping. Shared by
-    get_luminance_correction's theoretical branch and the Correct-contrast endpoint so they can't drift."""
-    g = np.maximum(gain, 0.05)
-    return np.min(g) / g
+def light_model(warp):
+    """The display's light model (shared/intensity_model) baked into warp_map.npz; identity (drive
+    = brightness = light) without a warp or for a warp built before the model existed."""
+    from shared.intensity_model import IntensityModel
+    return IntensityModel.from_arrays(warp) if warp is not None else IntensityModel.identity()
 
 
-def luminance_correction_curve(warp):
-    """Return (az_arr, corr_arr): the per-azimuth luminance CORRECTION curve (<= 1, attenuate-down)
-    honoring the NPZ's `lum_correction_mode` set at warp-build time:
-      - "none"        -> all 1.0 (no correction)
-      - "empirical"   -> measured lum_correction_empirical (fall back to theoretical if absent)
-      - "theoretical" -> min(gain)/gain of the theoretical curve
-    (No mode key -> legacy: empirical-if-present, else theoretical.) corr == 1.0 at the dimmest/
-    outermost az and < 1 at the bright center. The renderer (devices/display.py `_build_corr_map`)
-    interpolates this over az_map for the per-pixel, full-field correction — keep the two in sync."""
-    keys = warp.files if hasattr(warp, "files") else warp.keys()
-    mode = str(warp["lum_correction_mode"]) if "lum_correction_mode" in keys else None
-    if mode == "none":
-        az = np.asarray(warp["lum_az"], dtype=float)
-        return az, np.ones_like(az)
-    want_empirical = (mode == "empirical") or (mode is None and "lum_az_empirical" in keys)
-    if want_empirical and "lum_az_empirical" in keys:
-        return (np.asarray(warp["lum_az_empirical"], dtype=float),
-                np.asarray(warp["lum_correction_empirical"], dtype=float))
-    return (np.asarray(warp["lum_az"], dtype=float),
-            gain_to_correction_curve(warp["lum_gain_theoretical"]))
-
-
-def get_luminance_correction(warp, az_deg):
-    """Scalar per-azimuth luminance correction at az_deg (used by the experiment-UI Correct
-    button). Mode handling lives in luminance_correction_curve; the renderer applies the full
-    per-pixel version. Returns 1.0 for mode 'none'."""
-    az_arr, corr = luminance_correction_curve(warp)
-    return float(np.interp(abs(az_deg), az_arr, corr))
-
-
-# ── Contrast metric conversions ──
-# bg = background 0..1; c = contrast in the named metric; f = the "normalized headroom fraction" the
-# renderer consumes (stimulus luminance = bg + f*(1-bg)). Below ~1 code of background, Weber/Michelson
-# divide-by-bg degenerates, so we fall back to the normalized identity.
-_MIN_BG = 0.004
-
-
-def metric_to_fraction(c, bg, metric="weber"):
-    """Contrast value in `metric` (weber|michelson|normalized) -> normalized headroom fraction f."""
-    c = float(c)
-    bg = float(bg)
-    metric = str(metric).lower()
-    if metric == "normalized" or bg < _MIN_BG or bg > 1.0 - _MIN_BG:
-        return c
-    if metric == "weber":
-        return c * bg / (1.0 - bg)
-    if metric == "michelson":
-        c = min(c, 0.999)   # c -> 1 diverges
-        return 2.0 * bg * c / ((1.0 - c) * (1.0 - bg))
-    return c   # unknown metric -> normalized
-
-
-def fraction_to_metric(f, bg, metric="weber"):
-    """Inverse of metric_to_fraction: normalized fraction f -> contrast in `metric` units (used to
-    report a ceiling in the metric the user typed)."""
-    f = float(f)
-    bg = float(bg)
-    metric = str(metric).lower()
-    if metric == "normalized" or bg < _MIN_BG or bg > 1.0 - _MIN_BG:
-        return f
-    if metric == "weber":
-        return f * (1.0 - bg) / bg
-    if metric == "michelson":
-        denom = 2.0 * bg + f * (1.0 - bg)
-        return f * (1.0 - bg) / denom if denom > 0 else 0.0
-    return f
-
-
-def snap_contrast_to_bitcode(c, bg, metric="weber"):
-    """Round a contrast value DOWN to the nearest one whose center-azimuth stimulus luminance is an
-    exact 8-bit code — perceived contrast can't be finer than one code, so this makes the reported
-    value match what the renderer (which does int(stim_lin*255)) actually shows. Uses the same floor
-    (int() truncates toward 0) as the renderer, referenced at the center (lum_corr=1)."""
-    bg = float(bg)
-    f = metric_to_fraction(c, bg, metric)
-    code = int((bg + f * (1.0 - bg)) * 255)          # floor, matches renderer's int()
-    denom = 1.0 - bg
-    if denom <= 1e-9:                                 # degenerate white bg -> no headroom
-        return fraction_to_metric(0.0, bg, metric)
-    # +1e-9 counters IEEE-754 undershoot so the renderer's int() floors to exactly `code`, not
-    # code-1 (the reconstructed luminance can otherwise land one ULP below code/255).
-    f_q = max(0.0, (code / 255.0 - bg) / denom + 1e-9)
-    return fraction_to_metric(f_q, bg, metric)
-
-
-def metric_degenerate(bg, metric) -> bool:
-    """True when Weber/Michelson can't be applied at this background (falls back to normalized)."""
-    bg = float(bg)
-    return str(metric).lower() in ("weber", "michelson") and (bg < _MIN_BG or bg > 1.0 - _MIN_BG)
-
-
-# ── Measured contrast calibration ──
-# A contrast cal (display_calibration/<rig>/intensity/contrast_cal_*.yaml, passed in as
-# {name, levels, readings}) is the meter reading at one screen spot for drive levels 0..1. The
-# renderer's drive is linear, but the light is not zero at drive 0 (DMD leakage + stray light),
-# so the MEASURED contrast of a drive pair is
-#     Weber     (L(s) - L(b)) / L(b)
-#     Michelson (L(s) - L(b)) / (L(s) + L(b))
-#     normalized(L(s) - L(b)) / (L(1) - L(b))       (fraction of the real headroom)
-# with L() interpolated from the readings. On a black background Weber is then finite: a 10:1
-# light ratio between drive 1 and drive 0 is 900 %. Readings are only used as ratios, so their
-# units cancel. With luminance correction on, the renderer scales every drive at azimuth az by
-# C(az) <= 1; the spot's L() shape is assumed to hold at every azimuth up to a constant factor
-# (which cancels), so the contrast at az is computed from the drives s*C(az) and b*C(az).
-
-def _cal_curve(cal):
-    lv = np.asarray(cal["levels"], dtype=float)
-    rd = np.asarray(cal["readings"], dtype=float)
-    order = np.argsort(lv)
-    lv, rd = lv[order], np.maximum.accumulate(rd[order])   # light never drops as drive rises
-    # strictly increasing copy for the inverse (flat stretches -> lowest drive that reaches L)
-    rd_inv = rd + np.arange(len(rd)) * 1e-12 * max(1.0, float(abs(rd).max()))
-    return lv, rd, rd_inv
-
-
-def cal_luminance(cal, drive):
-    lv, rd, _ = _cal_curve(cal)
-    return float(np.interp(min(max(float(drive), 0.0), 1.0), lv, rd))
-
-
-def _lum_to_contrast(ls, lb, lmax, metric):
-    metric = str(metric).lower()
-    if metric == "michelson":
-        return (ls - lb) / (ls + lb) if (ls + lb) > 0 else 0.0
-    if metric == "normalized":
-        return (ls - lb) / (lmax - lb) if lmax > lb else 0.0
-    return (ls - lb) / lb if lb > 0 else float("inf")      # weber (and unknown)
-
-
-def measured_contrast(stim_drive, bg_drive, cal, metric="weber", c_az=1.0):
-    """Measured contrast of a stimulus at drive `stim_drive` on background `bg_drive` (both 0..1,
-    before the per-azimuth correction factor c_az the renderer multiplies in)."""
-    ls = cal_luminance(cal, stim_drive * c_az)
-    lb = cal_luminance(cal, bg_drive * c_az)
-    return _lum_to_contrast(ls, lb, cal_luminance(cal, c_az), metric)
-
-
-def drive_for_measured_contrast(c, bg_drive, cal, metric="weber", c_az=1.0):
-    """Stimulus drive (0..1) whose MEASURED contrast on `bg_drive` is `c` in `metric`.
-    Returns (drive, clipped): clipped is True when c exceeds what drive 1.0 reaches, in which
-    case drive is 1.0. c_az is the renderer's per-azimuth correction factor (<= 1)."""
-    lv, rd, rd_inv = _cal_curve(cal)
-    c, metric = float(c), str(metric).lower()
-    c_az = float(c_az) if c_az and c_az > 0 else 1.0
-    lb = float(np.interp(bg_drive * c_az, lv, rd))
-    lmax = float(np.interp(c_az, lv, rd))
-    if metric == "michelson":
-        c = min(c, 0.999)
-        target = lb * (1.0 + c) / (1.0 - c)
-    elif metric == "normalized":
-        target = lb + c * (lmax - lb)
-    else:
-        target = lb * (1.0 + c)
-    clipped = target > lmax * (1.0 + 1e-9)
-    target = min(max(target, lb), lmax)
-    u = float(np.interp(target, rd_inv, lv))          # drive at the pixel (already x c_az)
-    return min(max(u / c_az, float(bg_drive)), 1.0), bool(clipped)
-
-
-def measured_contrast_ceiling(bg_drive, cal, metric="weber", c_az=1.0):
-    """Highest measured contrast any stimulus can reach on this background (drive 1.0)."""
-    return measured_contrast(1.0, bg_drive, cal, metric, c_az)
+def stimulus_for(model, contrast, bg_brightness, az_deg, metric="weber"):
+    """One trial's stimulus through the light model. contrast is a fraction in `metric` (0.5 =
+    50 %), bg_brightness 0..1 of the uniform range. Returns a dict:
+      bg_lum, stim_lum        light (calibration units) of background and requested stimulus
+      stim_brightness         what the renderer is given (may exceed 1)
+      stim_drive              drive at the stimulus centre (0..1, clipped)
+      contrast_measured       contrast actually delivered at the centre (after clipping)
+      clipped                 the request is brighter than drive 1 gives at this azimuth
+      degenerate              Weber/Michelson asked of a background without light (fell back to
+                              normalized: contrast = fraction of the headroom above background)"""
+    L_b = float(model.L_from_b(bg_brightness))
+    L_s = float(model.stim_light(contrast, L_b, metric))
+    top = float(model.max_light(az_deg))
+    shown = min(L_s, top)
+    return {"bg_lum": L_b, "stim_lum": L_s, "stim_brightness": float(model.b_from_L(L_s)),
+            "stim_drive": float(model.drive(az_deg, L_s)),
+            "contrast_measured": float(model.contrast(shown, L_b, metric)),
+            "clipped": L_s > top * (1 + 1e-9), "degenerate": model.degenerate(L_b, metric)}
 
 
 def build_block_trial_list(task_config: dict) -> list[dict]:
@@ -322,7 +172,7 @@ def build_block_trial_list(task_config: dict) -> list[dict]:
 
 
 def generate_stimuli(task_config: dict, warp_map, output_dir: str,
-                     contrast_metric: str = "weber", contrast_cal: dict | None = None) -> dict:
+                     contrast_metric: str = "weber") -> dict:
     """Generate full session stimulus list.
 
     Args:
@@ -330,11 +180,8 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
         warp_map: loaded NPZ (np.load result) or None for fallback
         output_dir: directory to save stimuli.npz
         contrast_metric: how the config `contrast` value is interpreted — weber|michelson|normalized
-            (from rig.devices.display.contrast_metric)
-        contrast_cal: {name, levels, readings} of the rig's contrast cal
-            (rig devices.display.contrast_calibration; the controller sends the readings at
-            Deploy). When given, `contrast` values are MEASURED contrasts and are converted to
-            drive levels through it. None = contrast is the drive ratio.
+            (from rig.devices.display.contrast_metric), always in LIGHT units through the warp's
+            light model; background_gray is a brightness, 0..1 of the uniform range
 
     Returns:
         dict of arrays (same as NPZ contents) for Leader to use directly
@@ -351,12 +198,11 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
     duration = stim_cfg.get("duration_s", 2.0)
     shape = str(stim_cfg.get("shape", "square")).lower()
     contrast_metric = str(contrast_metric).lower()
-    cal_name = str(contrast_cal.get("name") or "contrast_cal") if contrast_cal else None
-    if contrast_cal:
-        print(f"  Contrast values are MEASURED {contrast_metric} contrast via {contrast_cal.get('name')}")
-    elif metric_degenerate(bg, contrast_metric):
-        print(f"WARNING: contrast_metric '{contrast_metric}' undefined at background={bg}; "
-              f"falling back to 'normalized'.")
+    model = light_model(warp_map)
+    if model.degenerate(model.L_from_b(bg), contrast_metric):
+        print(f"WARNING: {contrast_metric} contrast is undefined on a background without light "
+              f"(brightness {bg}, calibration {model.name or model.source}); using 'normalized' "
+              f"(fraction of the headroom above the background).")
     proj_res = (1920, 1080)
 
     # Output arrays
@@ -369,8 +215,10 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
     px_y = np.zeros(n, dtype=np.float32)
     px_size = np.zeros(n, dtype=np.int32)
     corr_contrast = np.zeros(n, dtype=np.float32)
-    stim_drive = np.zeros(n, dtype=np.float32)          # stimulus drive level before C(az)
-    contrast_measured = np.full(n, np.nan, dtype=np.float32)   # achieved, when a cal is used
+    stim_brightness = np.zeros(n, dtype=np.float32)     # rendered: 0..1 of the uniform range (may be >1)
+    stim_lum = np.zeros(n, dtype=np.float32)            # requested stimulus light (calibration units)
+    stim_drive = np.zeros(n, dtype=np.float32)          # drive at the stimulus centre
+    contrast_measured = np.zeros(n, dtype=np.float32)   # contrast delivered at the centre
     duration_s = np.full(n, duration, dtype=np.float32)
     bg_gray = np.full(n, bg, dtype=np.float32)
     # visual-angle size per trial — drives the follower's spherical renderer (px_* is
@@ -378,7 +226,7 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
     stim_size_deg = np.full(n, float(stim_cfg.get("size_deg", 10.0)), dtype=np.float32)
 
     n_px_fallback = 0   # trials whose px_x/px_y came from the LINEAR fallback
-    n_clipped = 0       # trials whose requested measured contrast exceeded drive 1.0
+    n_clipped = 0       # trials asking for more light than drive 1.0 gives at their azimuth
     for i, t in enumerate(trials):
         trial_idx[i] = t["trial_idx"]
         block_num[i] = t["block_num"]
@@ -402,20 +250,16 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
             px_x[i] = proj_res[0] / 2 + t["az_deg"] * px_per_deg
             px_y[i] = proj_res[1] / 2 - t["alt_deg"] * px_per_deg
 
-        # Interpret the config contrast in the active metric -> normalized headroom fraction f.
-        # Luminance correction is applied PER-PIXEL at render time (full-field: background AND
-        # stimulus scale by C(az)), so generation stores the UNcorrected fraction; the renderer
-        # equalizes delivered luminance. (Field name stays corr_contrast for NPZ compatibility.)
-        if contrast_cal:
-            c_az = get_luminance_correction(warp_map, t["az_deg"]) if warp_map is not None else 1.0
-            drv, clipped = drive_for_measured_contrast(t["contrast"], bg, contrast_cal,
-                                                       contrast_metric, c_az)
-            n_clipped += int(clipped)
-            corr_contrast[i] = (drv - bg) / (1.0 - bg) if bg < 1.0 else 0.0
-            contrast_measured[i] = measured_contrast(drv, bg, contrast_cal, contrast_metric, c_az)
-        else:
-            corr_contrast[i] = min(metric_to_fraction(t["contrast"], bg, contrast_metric), 1.0)
-        stim_drive[i] = bg + corr_contrast[i] * (1.0 - bg)
+        # Contrast is defined on LIGHT (the warp's light model): background brightness -> light,
+        # contrast -> stimulus light -> the brightness the renderer is given. The renderer turns
+        # brightness into per-pixel drive with the same model, so delivered light is uniform.
+        st = stimulus_for(model, t["contrast"], bg, t["az_deg"], contrast_metric)
+        n_clipped += int(st["clipped"])
+        stim_brightness[i] = st["stim_brightness"]
+        stim_lum[i] = st["stim_lum"]
+        stim_drive[i] = st["stim_drive"]
+        contrast_measured[i] = st["contrast_measured"]
+        corr_contrast[i] = st["stim_brightness"]   # legacy field name: the rendered brightness
         if warp_map is not None:
             px_size[i] = visual_angle_to_pixels(
                 t["az_deg"], t["alt_deg"],
@@ -424,9 +268,9 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
             px_size[i] = max(4, int(stim_cfg["size_deg"] * px_per_deg))
 
     if n_clipped:
-        print(f"[stim_generator] WARNING: {n_clipped}/{n} trials asked for more measured contrast "
-              f"than drive 1.0 gives on this background — shown at drive 1.0 (see "
-              f"contrast_measured). Use Correct in the Experiment tab to clamp.", flush=True)
+        print(f"[stim_generator] WARNING: {n_clipped}/{n} trials asked for more light than drive "
+              f"1.0 gives at their azimuth — shown at drive 1.0 (see contrast_measured). Use "
+              f"Correct in the Experiment tab to clamp.", flush=True)
     if n_px_fallback:
         print(f"[stim_generator] WARNING: {n_px_fallback}/{n} trials used the LINEAR "
               f"az→px fallback (no warp map, or angle outside warp coverage). The linear "
@@ -471,9 +315,13 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
         px_size=px_size,
         stim_size_deg=stim_size_deg,
         corr_contrast=corr_contrast,
+        stim_brightness=stim_brightness,
+        stim_lum=stim_lum,
+        bg_lum=np.array([float(model.L_from_b(bg))]),
         stim_drive=stim_drive,
         contrast_measured=contrast_measured,
-        contrast_calibration=np.array([cal_name or "none"]),
+        intensity_calibration=np.array([model.name or model.source or "identity"]),
+        light_unit=np.array([model.unit]),
         duration_s=duration_s,
         bg_gray=bg_gray,
         iti_durations=iti_durations,
@@ -500,10 +348,10 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
             "az": float(stim_az_deg[i]),
             "alt": float(stim_alt_deg[i]),
             "contrast": float(contrast[i]),            # raw metric value (matches UI/HDF5)
-            "corr_contrast": float(corr_contrast[i]),  # rendered fraction
-            "stim_drive": float(stim_drive[i]),        # stimulus drive before C(az)
-            **({"contrast_measured": float(contrast_measured[i]),
-                "contrast_calibration": cal_name} if contrast_cal else {}),
+            "stim_brightness": float(stim_brightness[i]),   # rendered (0..1 of uniform range)
+            "stim_lum": float(stim_lum[i]),                 # requested light
+            "stim_drive": float(stim_drive[i]),             # drive at the stimulus centre
+            "contrast_measured": float(contrast_measured[i]),
             "duration_s": float(duration_s[i]),
             "prestim_s": float(prestim_durations[i]),
             "poststim_s": float(poststim_durations[i]),
@@ -520,7 +368,9 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
     print(f"Generated {n} trials across {n_blocks_total} blocks")
     print(f"  Azimuth range: {stim_az_deg.min():.0f} to {stim_az_deg.max():.0f} deg")
     print(f"  Pixel sizes: {px_size.min()}-{px_size.max()} px")
-    print(f"  Contrast: {corr_contrast.min():.3f}-{corr_contrast.max():.3f}")
+    print(f"  Stimulus brightness: {stim_brightness.min():.3f}-{stim_brightness.max():.3f} "
+          f"(light {stim_lum.min():.4g}-{stim_lum.max():.4g} {model.unit}, calibration "
+          f"{model.name or model.source or 'identity'})")
     print(f"  ITI: {iti_durations.min():.1f}-{iti_durations.max():.1f}s")
     print(f"  Pre-stim: {prestim_durations.min():.1f}-{prestim_durations.max():.1f}s")
     print(f"  Post-stim: {poststim_durations.min():.1f}-{poststim_durations.max():.1f}s")

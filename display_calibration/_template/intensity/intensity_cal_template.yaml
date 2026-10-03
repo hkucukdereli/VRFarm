@@ -1,0 +1,40 @@
+# TEMPLATE — display_calibration/<rig>/intensity/intensity_cal_<YYYYmmdd_HHMM>.yaml
+# One intensity calibration, measured in Setup → Display → INTENSITY → Measure, at ONE altitude:
+#   azimuth_sweep  column 1: light at FULL drive (1.0) along azimuth — measure out to the screen edge
+#   level_sweeps   one column per azimuth you choose: light vs drive 1.0 .. 0.0 (0.0 = black floor)
+# shared/intensity_model.py fits a light model from it (floor, max light and response per azimuth,
+# interpolated between columns) that the warp carries to the renderer. The rig uses the file named
+# by devices.display.intensity_calibration (Setup → INTENSITY → Apply). Readings are only used as
+# ratios and differences of light; `unit` labels them. Mock files (source: theoretical / none) use
+# this same format with a straight 0 -> 0, 1 -> 1 response.
+kind: intensity
+version: 1
+source: measured            # measured | theoretical | none
+timestamp: '2026-01-01T12:00:00'
+method: manual              # manual | auto (PM100D)
+unit: lux
+alt_deg: 20.0
+patch:
+  shape: square
+  size_deg: 15.0
+  bg_gray: 0
+  apply_lum: false          # measured raw: no correction while calibrating
+azimuth_sweep:
+- {az_deg: -80.0, reading: 42.0}
+- {az_deg: -40.0, reading: 116.0}
+- {az_deg: 0.0, reading: 261.0}
+- {az_deg: 40.0, reading: 118.0}
+- {az_deg: 80.0, reading: 44.0}
+level_sweeps:
+- az_deg: 0.0
+  measurements:
+  - {level: 1.0, reading: 233.0}
+  - {level: 0.5, reading: 50.0}
+  - {level: 0.2, reading: 7.8}
+  - {level: 0.0, reading: 0.85}
+- az_deg: 60.0
+  measurements:
+  - {level: 1.0, reading: 70.0}
+  - {level: 0.5, reading: 16.0}
+  - {level: 0.2, reading: 2.6}
+  - {level: 0.0, reading: 0.6}

@@ -1320,9 +1320,9 @@ class Leader:
                 if cand.exists():
                     with np.load(str(cand)) as z:
                         stims = {k: z[k] for k in z.files}
-                    cal = str(stims.get("contrast_calibration", ["none"])[0])
+                    cal = str(stims.get("intensity_calibration", ["(pre-light-model file)"])[0])
                     print(f"  Stimuli: loaded Deploy's {cand} "
-                          f"({int(stims['n_trials'][0])} trials, contrast cal {cal})")
+                          f"({int(stims['n_trials'][0])} trials, intensity calibration {cal})")
                     return stims
             print(f"  Stimuli: no deployed stimuli.npz for {self.session_id} — generating here")
             stim_dir.mkdir(parents=True, exist_ok=True)
@@ -1332,12 +1332,8 @@ class Leader:
             if warp_path.exists():
                 warp_map = np.load(str(warp_path))
             metric = self.rig["devices"].get("display", {}).get("contrast_metric", "weber")
-            # A rig with a contrast cal needs its readings, which only the controller's Deploy
-            # sends; regenerating here would silently fall back to drive-ratio contrast.
-            cal = self.rig["devices"].get("display", {}).get("contrast_calibration")
-            if cal not in (None, "", "none", "None"):
-                raise RuntimeError(f"rig uses contrast calibration {cal}: stimuli must come from "
-                                   f"Deploy (the Leader cannot regenerate them)")
+            # The light model travels in warp_map.npz, which Generate Warp copies to this Pi too,
+            # so a fallback generation here uses the same intensity calibration as Deploy.
             return generate_stimuli(self.task, warp_map, str(stim_dir),
                                     contrast_metric=metric)
         except Exception as e:

@@ -17,6 +17,7 @@ _COMMON = [
     ("shared/__init__.py", "shared/__init__.py"),
     ("shared/config.py", "shared/config.py"),
     ("shared/stim_generator.py", "shared/stim_generator.py"),
+    ("shared/intensity_model.py", "shared/intensity_model.py"),   # light model: generator + renderer
     ("shared/consolidate.py", "shared/consolidate.py"),   # data consolidation at Transfer
     # Devices
     ("devices/__init__.py", "devices/__init__.py"),

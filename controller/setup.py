@@ -606,40 +606,55 @@ def api_reinit_device():
     return jsonify({"ok": ok, "device": dev_name, "steps": steps})
 
 
-# ── warp map / luminance ──
+# ── warp map / intensity calibration ──
+#
+# One intensity calibration per rig (display_calibration/<rig>/intensity/intensity_cal_*.yaml):
+# column 1 = light at full drive along azimuth, level columns = light vs drive at chosen azimuths.
+# The rig YAML's devices.display.intensity_calibration names the file whose light model the warp
+# carries; without one the theoretical mock of the current geometry is used (= the old
+# theoretical correction). See display_calibration/intensity_cal.py, shared/intensity_model.py.
 
-def _display_lum_mode(rs: RigState):
-    try:
-        return rs.config.get("devices", {}).get("display", {}).get("luminance_correction", "theoretical")
-    except Exception:
-        return "theoretical"
+def _cal_mod():
+    if str(TOOLS_DIR) not in sys.path:
+        sys.path.insert(0, str(TOOLS_DIR))
+    import intensity_cal
+    return intensity_cal
 
 
-def _write_theoretical_cal(rs: RigState, geo_file: Path) -> Path:
-    """intensity/luminance_cal_<geostamp>_theoretical.yaml from the geometry model, so the rig
-    always has an intensity calibration file even before anything is measured."""
+def _ensure_mock_cals(rs: RigState, geo_file: Path) -> str:
+    """Write the theoretical mock for this geometry and the none mock; return the theoretical name."""
+    ic = _cal_mod()
     geo = yaml.safe_load(geo_file.read_text())
     az, gain = _cwm().theoretical_luminance_curve(geo)
-    return calib_paths.lum_module(rs.name).save_theoretical_cal(az, gain, geo_file.name, lum_dir(rs))
+    ic.write_none(lum_dir(rs))
+    return ic.write_theoretical(lum_dir(rs), az, gain, geo_file.name).name
 
 
-def _generate_and_deploy_warp(rs: RigState, geo_file: Path, lum_mode="theoretical"):
-    """Build warp_map.npz on the controller from `geo_file`, then ATOMICALLY copy it + the
-    geometry to every Pi and reload the live display. Returns (ok, steps, error)."""
+def _active_intensity_cal(rs: RigState, geo_file: Path) -> str:
+    """The rig's chosen intensity calibration if it exists, else the theoretical mock."""
+    theo = _ensure_mock_cals(rs, geo_file)
+    want = ((rs.config or {}).get("devices", {}).get("display", {}) or {}).get("intensity_calibration")
+    if want and (lum_dir(rs) / Path(want).name).exists():
+        return Path(want).name
+    return theo
+
+
+def _generate_and_deploy_warp(rs: RigState, geo_file: Path, cal_name: str | None = None):
+    """Build warp_map.npz on the controller from `geo_file` with the light model of `cal_name`
+    (default: the rig's active intensity calibration), then ATOMICALLY copy it + the geometry to
+    every Pi and reload the live display. Returns (ok, steps, error)."""
     steps = []
     rdir = calib_paths.rig_dir(rs.name)
-    python = sys.executable
-    script = str(TOOLS_DIR / "compute_warp_map.py")
-    argv = [python, script, "--geo", str(geo_file), "--lum-mode", lum_mode, "--cal-dir", str(rdir)]
+    cal_name = Path(cal_name).name if cal_name else _active_intensity_cal(rs, geo_file)
+    cal_path = lum_dir(rs) / cal_name
+    if not cal_path.exists():
+        return False, steps, f"intensity calibration {cal_name} not found"
+    argv = [sys.executable, str(TOOLS_DIR / "compute_warp_map.py"), "--geo", str(geo_file),
+            "--intensity-cal", str(cal_path), "--cal-dir", str(rdir)]
     r = subprocess.run(argv, capture_output=True, text=True, timeout=60, cwd=str(rdir))
     if r.returncode != 0:
         return False, steps, r.stderr[-500:]
-    steps.append(f"Generated warp map from {geo_file.name} (luminance: {lum_mode})")
-    try:
-        out = _write_theoretical_cal(rs, geo_file)
-        steps.append(f"Theoretical intensity cal → {out.name}")
-    except Exception as e:
-        steps.append(f"WARN theoretical intensity cal not written: {e}")
+    steps.append(f"Generated warp map from {geo_file.name} (intensity: {cal_name})")
     npz_path = calib_paths.warp_path(rs.name)
     if not npz_path.exists():
         return False, steps, "warp_map.npz not created"
@@ -674,9 +689,8 @@ def api_generate_warp():
     geo_file = _geo_file(rs, data.get("geometry"))
     if geo_file is None or not geo_file.exists():
         return jsonify({"ok": False, "error": f"Geometry file not found: {geo_file}"}), 404
-    lum_mode = data.get("lum_mode") or _display_lum_mode(rs)
     try:
-        ok, steps, err = _generate_and_deploy_warp(rs, geo_file, lum_mode)
+        ok, steps, err = _generate_and_deploy_warp(rs, geo_file)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "steps": []})
     return jsonify({"ok": ok, "error": err, "steps": steps})
@@ -707,124 +721,75 @@ def api_lum_read():
         return jsonify({"ok": False, "error": str(e)})
 
 
-def _lum_module(rs: RigState):
-    """fit_luminance_correction, pointed at this rig's intensity folder."""
-    return calib_paths.lum_module(rs.name)
-
-
-@bp.route("/lum_apply", methods=["POST"])
-def api_lum_apply():
-    """Apply a luminance-correction mode and redeploy the warp.
-    {mode: empirical|theoretical|none, measurements?: [{az_deg, reading}], geometry?, cal_file?}"""
+@bp.route("/intensity_cals")
+def api_intensity_cals():
+    """This rig's intensity calibrations (mocks created for the current geometry) + the active one."""
     rs: RigState = g.rs
-    data = request.json or {}
-    mode = data.get("mode", "theoretical")
-    if mode not in ("empirical", "theoretical", "none"):
-        return jsonify({"ok": False, "error": f"Unknown mode: {mode}"}), 400
-    geo_file = _geo_file(rs, data.get("geometry"))
+    try:
+        geo_file = _geo_file(rs, request.args.get("geometry"))
+        active = _active_intensity_cal(rs, geo_file) if geo_file and geo_file.exists() else None
+        return jsonify({"ok": True, "active": active, "files": _cal_mod().list_cals(lum_dir(rs))})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e), "files": []})
+
+
+@bp.route("/save_intensity_cal", methods=["POST"])
+def api_save_intensity_cal():
+    """{alt_deg, size_deg, unit, method, azimuth_sweep: [{az_deg, reading}],
+        level_sweeps: [{az_deg, measurements: [{level, reading}]}]}
+    -> intensity/intensity_cal_<now>.yaml + a fit report. Nothing is deployed (Apply does that)."""
+    rs: RigState = g.rs
+    d = request.json or {}
+    try:
+        path, report = _cal_mod().save_measured(
+            lum_dir(rs), d.get("alt_deg", 0.0), d.get("azimuth_sweep") or [], d.get("level_sweeps") or [],
+            size_deg=d.get("size_deg"), method=d.get("method"), unit=d.get("unit") or "lux")
+    except (ValueError, KeyError, TypeError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "name": path.name, "report": report})
+
+
+@bp.route("/intensity_apply", methods=["POST"])
+def api_intensity_apply():
+    """{name, geometry?}: rebuild + deploy the warp with this calibration's light model and record
+    it as the rig's devices.display.intensity_calibration (rig YAML saved at once — the warp on
+    the Pis now depends on it)."""
+    rs: RigState = g.rs
+    if rs.phase == "running":
+        return jsonify({"ok": False, "error": "rig is running a session"}), 409
+    d = request.json or {}
+    geo_file = _geo_file(rs, d.get("geometry"))
     if geo_file is None or not geo_file.exists():
         return jsonify({"ok": False, "error": f"Geometry file not found: {geo_file}"}), 404
-    steps, fit = [], None
-    if mode == "empirical" and data.get("cal_file") and not data.get("measurements"):
-        try:
-            flc = _lum_module(rs)
-            chosen = flc.select_luminance_cal(data["cal_file"], cal_dir=lum_dir(rs))
-            steps.append(f"Using saved cal {chosen.name} (no refit)")
-        except Exception as e:
-            return jsonify({"ok": False, "error": f"Could not select cal: {e}"}), 400
-    elif mode == "empirical":
-        valid = [m for m in (data.get("measurements") or [])
-                 if m.get("reading") not in (None, "") and m.get("az_deg") is not None]
-        if len(valid) < 2:
-            return jsonify({"ok": False, "error": "Need at least 2 azimuth readings to fit."}), 400
-        try:
-            flc = _lum_module(rs)
-            raw = flc.save_luminance_measurements(valid, patch=data.get("patch"),
-                                                  method=data.get("method"), source="setup-ui",
-                                                  cal_dir=lum_dir(rs))
-            steps.append(f"Saved {len(valid)} raw readings → {raw.name}")
-            az, gain, corr = flc.fit_luminance(valid)
-            out = flc.save_luminance_cal(az, gain, corr, source_file=raw.name, cal_dir=lum_dir(rs))
-            steps.append(f"Fitted → {out.name}")
-            asym = flc.azimuth_asymmetry(valid)
-            if asym is None:
-                steps.append("Only one side of centre measured — symmetry assumed, not checked")
-            else:
-                worst = max(asym["pairs"], key=lambda p: abs(p[3]))
-                steps.append(f"L/R symmetry: mean {100*asym['mean_rel']:.1f}%, "
-                             f"worst {100*worst[3]:+.1f}% at |az| {worst[0]:g}°")
-                if asym["max_rel"] > 0.10:
-                    steps.append("  ⚠ >10% left/right spread — the 1D symmetric correction is "
-                                 "averaging away a real gradient; check projector yaw / screen "
-                                 "mounting before trusting this fit")
-            fit = {"az": [float(x) for x in az], "gain": [float(x) for x in gain],
-                   "correction": [float(x) for x in corr]}
-        except Exception as e:
-            return jsonify({"ok": False, "error": f"Fit failed: {e}", "steps": steps}), 500
+    name = d.get("name") or _active_intensity_cal(rs, geo_file)
     try:
-        ok, dsteps, err = _generate_and_deploy_warp(rs, geo_file, mode)
+        _cal_mod().load(name, lum_dir(rs))                      # readable error before building
+        ok, steps, err = _generate_and_deploy_warp(rs, geo_file, name)
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e), "steps": steps})
-    steps += dsteps
-    try:
-        rs.config["devices"]["display"]["luminance_correction"] = mode
-    except Exception:
-        pass
-    return jsonify({"ok": ok, "error": err, "mode": mode, "fit": fit, "steps": steps})
-
-
-@bp.route("/list_lum_cals")
-def api_list_lum_cals():
-    rs: RigState = g.rs
-    try:
-        return jsonify(_lum_module(rs).list_luminance_cals(lum_dir(rs)))
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@bp.route("/list_contrast_cals")
-def api_list_contrast_cals():
-    """Saved contrast cals (luminance vs drive level at one spot), newest first."""
-    rs: RigState = g.rs
-    try:
-        return jsonify(_lum_module(rs).list_contrast_cals(lum_dir(rs)))
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"ok": False, "error": str(e), "steps": []})
+    if ok:
+        rs.config.setdefault("devices", {}).setdefault("display", {})["intensity_calibration"] = Path(name).name
+        for k in ("luminance_correction", "contrast_calibration"):       # superseded settings
+            rs.config["devices"]["display"].pop(k, None)
+        save_rig_atomic(rs.config, rs.path)
+        registry.reload_config(rs.name)
+        steps.append(f"Rig now uses {Path(name).name} (saved to {rs.path.name})")
+    return jsonify({"ok": ok, "error": err, "steps": steps, "active": Path(name).name})
 
 
 @bp.route("/contrast_preview", methods=["POST"])
 def api_contrast_preview():
-    """Setup's TESTS row: {calibration (the card's current pick, saved or not), background_gray,
-    values, az_deg} -> controller.experiment.contrast_preview (same math as Deploy)."""
+    """Setup's TESTS row: {background_gray, values, az_deg} -> controller.experiment.contrast_preview
+    at that azimuth, with the light model of the warp this rig runs."""
     from controller.experiment import contrast_preview
     rs: RigState = g.rs
-    data = request.json or {}
-    name = data.get("calibration")
-    name = None if name in (None, "", "none", "None") else str(name)
+    d = request.json or {}
     try:
-        az = data.get("az_deg")
-        return jsonify({"ok": True, **contrast_preview(rs, name, data.get("background_gray") or 0.0,
-                                                       data.get("values") or [],
-                                                       None if az is None else float(az))})
+        az = float(d.get("az_deg") or 0.0)
+        return jsonify({"ok": True, **contrast_preview(rs, d.get("background_gray") or 0.0,
+                                                       d.get("values") or [], [az])})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
-
-
-@bp.route("/save_contrast_cal", methods=["POST"])
-def api_save_contrast_cal():
-    """{measurements: [{level, reading}], patch: {az_deg, alt_deg, size_deg}, method}
-    -> intensity/contrast_cal_<ts>.yaml. Nothing is deployed: a task picks the file in the
-    Experiment tab and Deploy converts its contrasts through it."""
-    rs: RigState = g.rs
-    data = request.json or {}
-    try:
-        out = _lum_module(rs).save_contrast_cal(data.get("measurements") or [], patch=data.get("patch"),
-                                                method=data.get("method"), source="setup-ui",
-                                                cal_dir=lum_dir(rs))
-        cal = calib_paths.load_contrast_cal(rs.name, out.name)
-    except (ValueError, KeyError, TypeError) as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
-    return jsonify({"ok": True, "name": out.name, "ratio": cal["ratio"]})
 
 
 # ── geometry calibration (calib_geo on the display Pi) ──

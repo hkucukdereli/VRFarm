@@ -1,4 +1,4 @@
-last_saved: '2026-09-11'
+last_saved: '2026-10-03'
 stimulus:
   background_gray: 0.1
   size_deg: 4
@@ -8,7 +8,7 @@ stimulus:
   go_rule: all
   contrast:
     values:
-    - 0.4902
+    - 3
     proportions:
     - 1
   photodiode_sync_enabled: true

@@ -1,7 +1,7 @@
-last_saved: '2026-09-28'
+last_saved: '2026-10-02'
 stimulus:
   background_gray: 0.1
-  size_deg: 15
+  size_deg: 8
   shape: square
   duration_s: 2
   altitude_deg: 15
@@ -23,18 +23,20 @@ reward:
   response_window: 2
   pav_delay_s: 0.6
   timeout_rule: count
-  max_lick_rate: 0.6
+  max_lick_rate: 0.5
   timeout_phases:
   - iti
   resp_delay_s: 0.1
 session:
-  n_blocks: 4
-  block_size: 38
+  n_blocks: 6
+  block_size: 25
   block_sequence:
-  - 70
-  - -70
+  - -80
+  - 45
+  - -45
+  - 80
   iti:
-  - 8
+  - 5
   - 16
   prestim_duration: 0
   poststim_duration: 6.5

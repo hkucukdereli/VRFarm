@@ -21,7 +21,7 @@ config has no copy in git; `rigs/_template.yaml` is the tracked template.
 (Python 3.11) at `~/miniforge3/envs/vrfarm`. Rig link is the 10G SFP+ card (netplan `rig0`, matched by MAC) — see Network.
 ONE web app runs everything: `python controller/app.py` → http://localhost:5000 with
 four tabs, Network / Setup / Experiment / Data. Controller-wide settings (data root, auto purge, rig
-groups) live in `controller/configs/controller.yaml` (gitignored; template `controller.example.yaml`
+groups) live in `controller/configs/controller.yaml` (gitignored; template `controller_template.yaml`
 in the same folder). Full guide: `docs/MULTI_RIG.md`.
 **Both Pis:** Debian 13 (trixie), conda env `rig`, user `vruser`. The `rig` env Python
 **must match the system Python** (3.13 on trixie) — the camera bindings
@@ -61,7 +61,7 @@ into the env, so a version mismatch breaks `import picamera2`. Create with
 │   ├── experiment.py  setup.py        <- /api/rigs/<rig>/...  and  /api/rigs/<rig>/setup/...
 │   ├── network.py  data.py            <- rigs/Pis/groups CRUD; Data tab (SSH/rsync sync, purge, poweroff)
 │   ├── sync.py  jobs.py  ssh.py       <- Data-tab engine, background jobs, ssh/scp helpers
-│   ├── configs/                       <- controller.yaml (controller-wide settings, gitignored) + controller.example.yaml
+│   ├── configs/                       <- controller.yaml (controller-wide settings, gitignored) + controller_template.yaml
 │   └── templates/ static/             <- shell.html + one page per tab (per-rig pages run in iframes)
 ├── pi_api/api.py                      <- Flask REST API on each Pi, port 5080
 ├── shared/
@@ -304,6 +304,13 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
 ---
 
 ## Style / conventions
+
+- **Git tracks only `*_template.yaml`** — one template per YAML kind, next to where the real
+  files live (`rigs/_template.yaml`, `experiments/_template.yaml`,
+  `controller/configs/controller_template.yaml`, `shepherd/config_template.yaml`,
+  `display_calibration/_template/{geometry,intensity}/`, plus the mock rigs
+  `rigs/_demo_template.yaml` / `_demo2_template.yaml`). Every real rig, task, calibration and
+  settings YAML is gitignored and lives only on the controller, so back them up separately.
 
 - UDP datagrams for all real-time Pi communication; REST (Flask) for management; SSE to browsers
 - systemd for Pi process lifecycle (`vrfarm.service`, `displayd.service`, `pigpiod.service`)

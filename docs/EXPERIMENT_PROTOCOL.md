@@ -260,7 +260,7 @@ Pi; the **Auto purge** switch does that right after each verified sync. Details:
 ## Task Parameters
 
 A task YAML has four sections. Values below are the current defaults from
-`experiments/template.yaml` / `go_nogo_v1.yaml`; the code that reads them is
+`experiments/_template.yaml` (the only task file in git); the code that reads them is
 `engine/leader.py`, `shared/stim_generator.py`, and `devices/reward.py`.
 
 ### `stimulus:` — what to show

@@ -1,0 +1,25 @@
+# TEMPLATE — display_calibration/<rig>/intensity/luminance_measurements_<YYYYmmdd_HHMM>.yaml
+# Raw along-azimuth readings from Setup → INTENSITY → Intensity Cal (auto/manual), saved before
+# fitting. Each row: a white square (max drive, luminance correction OFF) at az_deg/alt_deg, and
+# the meter reading there. Units cancel (only ratios are used). Measure both sides of centre to
+# let the fit report left/right symmetry.
+timestamp: '2026-01-01T12:00:00'
+source: setup-ui
+method: manual              # auto | manual
+patch:
+  shape: square
+  contrast: 1
+  bg_gray: 0
+  apply_lum: false
+  size_deg: 15
+  alt_deg: 10
+measurements:
+- az_deg: -40.0
+  reading: 116.0
+  alt_deg: 10.0
+- az_deg: 0.0
+  reading: 261.0
+  alt_deg: 10.0
+- az_deg: 40.0
+  reading: 118.0
+  alt_deg: 10.0

@@ -17,7 +17,7 @@ the same file into editable boxes; `rigs/<rig>.yaml` points a rig at its file vi
 
 ```
 display_calibration/                          scripts, shared by every rig
-├── rig_geometry_default.yaml                 starting geometry for a rig with none yet
+├── _template/                                 one template per file kind; geometry/ seeds new rigs
 └── <rig>/                                    one folder per rig (created on first use)
     ├── geometry/rig_geometry_<YYYYmmdd_HHMM>.yaml     one file per calibration, never edited
     ├── intensity/
@@ -31,8 +31,8 @@ display_calibration/                          scripts, shared by every rig
 
 The rig YAML's `devices.display.geometry_file` names the geometry the rig uses. Dated files are
 records: **Save Rig** with edited values writes a *new* `rig_geometry_<now>.yaml` and points the rig
-at it; the Geometry Cal tool's Save also lands as a new dated file. Geometry files are tracked in
-git; everything in `intensity/` and the warp maps are not (measurement data, regenerable).
+at it; the Geometry Cal tool's Save also lands as a new dated file. None of these files are in git
+(only the `_template/` ones are): they live on the controller, so back them up.
 On the Pis nothing changed: `~/rig/calibration/` holds `warp_map.npz` + `rig_geometry.yaml`.
 
 **Two intensity calibrations.** The *along-azimuth* one (Intensity Cal) equalizes brightness across

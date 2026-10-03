@@ -292,7 +292,7 @@ values as measured luminance contrast.
 
 ## Running without a rig
 
-`rigs/demo.yaml` plus `tools/mock_pi.py` gives a fully interactive UI with no hardware —
+`rigs/demo.yaml` (created from the tracked `rigs/_demo_template.yaml` by the smoke test) plus `tools/mock_pi.py` gives a fully interactive UI with no hardware —
 useful for demos, for finding your way around, and for regenerating these screenshots.
 Both of its Pis are `127.0.0.1`, so a mis-click cannot reach the real rig.
 

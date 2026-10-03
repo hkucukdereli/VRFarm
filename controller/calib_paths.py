@@ -1,7 +1,8 @@
 """
 controller/calib_paths.py — where each rig's display calibration lives on the controller.
 
-    display_calibration/                 scripts shared by every rig (+ rig_geometry_default.yaml)
+    display_calibration/                 scripts shared by every rig
+    display_calibration/_template/        one template per file kind (geometry/, intensity/)
     display_calibration/<rig>/
         geometry/rig_geometry_<YYYYmmdd_HHMM>.yaml          one file per calibration, never edited
         intensity/luminance_cal_<stamp>.yaml                 along-azimuth fit (measured)
@@ -23,7 +24,7 @@ from pathlib import Path
 from controller import settings
 
 TOOLS_DIR = settings.ROOT / "display_calibration"
-DEFAULT_GEOMETRY = TOOLS_DIR / "rig_geometry_default.yaml"
+DEFAULT_GEOMETRY = TOOLS_DIR / "_template" / "geometry" / "rig_geometry_template.yaml"
 GEO_GLOB = "rig_geometry_*.yaml"
 
 
@@ -67,8 +68,8 @@ def geometry_files(rig: str) -> list[str]:
     files = sorted(f.name for f in gdir.glob(GEO_GLOB))
     if not files and DEFAULT_GEOMETRY.exists():
         name = new_geometry_name(rig)
-        text = DEFAULT_GEOMETRY.read_text()
-        (gdir / name).write_text(f"# {rig}: seeded from rig_geometry_default.yaml on "
+        text = "".join(l for l in DEFAULT_GEOMETRY.read_text().splitlines(True) if not l.startswith("#"))
+        (gdir / name).write_text(f"# {rig}: seeded from _template/geometry/rig_geometry_template.yaml on "
                                  f"{datetime.now():%Y-%m-%d}; not calibrated yet.\n" + text)
         files = [name]
     return files

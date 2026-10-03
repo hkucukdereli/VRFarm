@@ -4,7 +4,7 @@ controller/settings.py
 Controller-wide settings that are NOT per rig: the UI port, the controller's own IP, the
 event port every rig must agree on, where synced data lands, auto-purge, the rsync binary,
 sync tuning and the rig groups ("super rigs"). They live in controller/configs/controller.yaml,
-which is gitignored (machine-specific, like the data root); controller.example.yaml beside it
+which is gitignored (machine-specific, like the data root); controller_template.yaml beside it
 is the tracked template it is created from on first run. A controller.yaml still at the repo
 root, where it lived before, is moved into controller/configs/ on the first load.
 """
@@ -26,7 +26,7 @@ CONFIG_DIR = Path(__file__).resolve().parent / "configs"
 # VRFARM_SETTINGS points the app at another settings file (the smoke tests use a scratch one
 # so they never touch the real data root or groups).
 SETTINGS_PATH = Path(os.environ["VRFARM_SETTINGS"]).expanduser() if os.environ.get("VRFARM_SETTINGS") else CONFIG_DIR / "controller.yaml"
-EXAMPLE_PATH = CONFIG_DIR / "controller.example.yaml"
+EXAMPLE_PATH = CONFIG_DIR / "controller_template.yaml"
 LEGACY_PATH = ROOT / "controller.yaml"      # the location before controller/configs/
 
 DEFAULTS = {

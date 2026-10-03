@@ -364,7 +364,20 @@ def capture_experiment(pw, shots: Shots) -> None:
     browser.close()
 
 
+
+def ensure_demo_rigs(root: Path) -> None:
+    """rigs/demo.yaml and rigs/demo2.yaml (the mock rigs) are untracked like every real YAML;
+    create them from rigs/_demo_template.yaml / _demo2_template.yaml when missing."""
+    import shutil
+    for name in ("demo", "demo2"):
+        dst = root / "rigs" / f"{name}.yaml"
+        if not dst.exists():
+            shutil.copy(root / "rigs" / f"_{name}_template.yaml", dst)
+            print(f"created rigs/{name}.yaml from rigs/_{name}_template.yaml")
+
+
 def main() -> None:
+    ensure_demo_rigs(ROOT)
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--only", help="capture only shots whose name starts with this")

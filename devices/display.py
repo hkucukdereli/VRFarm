@@ -91,7 +91,10 @@ class Display(Device):
         self._warp = None
         self._patch_cache = {}
         self._blank_cache = {}   # corrected uniform-field surfaces, keyed by bg value
-        self._corr_map = None    # (H,W) per-pixel luminance correction C(az) in [0,1], 0 off-screen
+        self._corr_map = None    # (H,W) drive of a brightness-1 field (diagnostics; 0 off-screen)
+        self._model = None       # shared.intensity_model.IntensityModel from the warp (light model)
+        self._abs_az = None      # (H,W) |az| per pixel, NaN-free
+        self._field_cache = {}   # brightness -> (H,W) background drive
         self._sync_rect = None   # cached photodiode sync square (corner, dead-band capped)
         # Panel bit depth per channel. The DPI link is RGB666 (see dlp/sample_config/config_kms.txt:
         # "RGB666 on GPIO0-21 is this overlay's DEFAULT format"), so the hardware DISCARDS the low
@@ -191,10 +194,10 @@ class Display(Device):
         import pygame
         if self._screen is None:
             return
-        # Gray = 0..1 luminance (0 = no light, 1 = max). The red LED is off, so fill
-        # green+blue only (R=0); value maps to G=B=value*255.
+        # No warp: no light model either, so brightness IS drive (0..1). `corr_contrast` is the
+        # stimulus brightness. The red LED is off, so fill green+blue only (R=0).
         bg_lin = max(0.0, min(1.0, bg_gray))
-        stim_lin = bg_lin + corr_contrast * (1 - bg_lin)
+        stim_lin = max(0.0, min(1.0, corr_contrast))
         rgb = max(0, min(255, int(stim_lin * 255)))
         bg_rgb = max(0, min(255, int(bg_lin * 255)))
         # Fill background
@@ -216,10 +219,10 @@ class Display(Device):
         self.blank_with_gray(self.bg_gray)
 
     def blank_with_gray(self, gray_value: float):
-        """Fill the visible screen with a gray value (0..1). With a warp loaded, the background is
-        luminance-corrected per-pixel so its DELIVERED luminance is uniform across azimuth (same
-        full-field correction as the stimulus, so the whole session looks flat); without a warp it
-        falls back to a plain uniform fill. Green+blue only (red LED off)."""
+        """Fill the visible screen with a background BRIGHTNESS (0..1 of the calibration's uniform
+        range). With a warp loaded, every pixel gets the drive that delivers that light at its
+        azimuth (shared/intensity_model), so the field is uniform; without a warp brightness is the
+        drive. Green+blue only (red LED off)."""
         import pygame
         if self._screen is None:
             return
@@ -236,14 +239,22 @@ class Display(Device):
         pygame.display.flip()
 
     def field_drive(self, bg_lin):
-        """0..1 per-pixel drive for the uniform background field, before quantization. Split out of
-        _build_field_surface so it can be checked without a display (surface creation needs one);
-        display_diagnostics/dither_check.py drives the real thing through this."""
-        return bg_lin * self._corr_map   # _corr_map is 0 outside the visible screen
+        """0..1 per-pixel drive for a uniform background of brightness `bg_lin`, before
+        quantization (0 off-screen). Split out of _build_field_surface so it can be checked without
+        a display; display_diagnostics/dither_check.py drives the real thing through this."""
+        import numpy as np
+        key = round(float(bg_lin), 6)
+        d = self._field_cache.get(key)
+        if d is None:
+            valid = np.asarray(self._warp["valid_map"], dtype=bool)
+            d = np.zeros(self._abs_az.shape, dtype=np.float32)
+            d[valid] = self._model.drive(self._abs_az[valid], self._model.L_from_b(max(0.0, float(bg_lin))))
+            self._field_cache[key] = d
+        return d
 
     def _build_field_surface(self, bg_lin):
-        """Uniform background field with the full-field per-pixel luminance correction: valid
-        pixels driven at bg_lin*C(az) (uniform delivered luminance), invisible area BLACK."""
+        """Uniform background field: each valid pixel driven to deliver the same light (the light
+        model's inverse at its azimuth), invisible area BLACK."""
         import numpy as np
         import pygame
         valid = np.asarray(self._warp["valid_map"], dtype=bool)
@@ -264,7 +275,11 @@ class Display(Device):
             self._patch_cache = {}
             self._blank_cache = {}
             self._sync_rect = None
-            self._corr_map = self._build_corr_map()   # per-pixel luminance correction
+            from shared.intensity_model import IntensityModel
+            self._model = IntensityModel.from_arrays(self._warp)   # identity if the warp has none
+            self._abs_az = np.abs(np.nan_to_num(np.asarray(self._warp["az_map"], dtype=float), nan=0.0))
+            self._field_cache = {}
+            self._corr_map = self._build_corr_map()   # brightness-1 field drive (diagnostics)
             # Keyed on the map geometry, not on _corr_map: the raw (apply_lum=False) path writes a
             # gradient-free field that still gains from dithering, because truncation alone costs a
             # systematic half-step of brightness.
@@ -285,41 +300,17 @@ class Display(Device):
         return np.clip(v, 0, 255).astype(np.uint8)
 
     def _build_corr_map(self):
-        """Per-pixel luminance correction C(az) in [0,1] from the warp's lum data, honoring
-        `lum_correction_mode` (none->1, empirical->measured, theoretical->min(gain)/gain). Multiply
-        a pixel's drive by this to attenuate the bright center DOWN to the dim edges — full-field
-        equalization so delivered luminance is uniform across azimuth. Off-screen (invalid) pixels
-        -> 0. Mirrors shared.stim_generator.luminance_correction_curve / gain_to_correction_curve;
-        keep the formula in sync. Returns None if the warp has no usable geometry."""
-        import numpy as np
+        """(H,W) drive of a brightness-1 background, 0 off-screen. With the theoretical mock this
+        is exactly the old multiplicative correction C(az) = min(gain)/gain; kept for the dither
+        diagnostics, which scale it. The renderer itself goes through field_drive/patch_drive.
+        None if the warp has no usable geometry."""
         w = self._warp
         if w is None:
             return None
         keys = w.files if hasattr(w, "files") else list(w.keys())
-        if "az_map" not in keys or "valid_map" not in keys:
+        if "az_map" not in keys or "valid_map" not in keys or self._model is None:
             return None
-        mode = str(w["lum_correction_mode"]) if "lum_correction_mode" in keys else None
-        az_arr = corr = None
-        if mode == "none":
-            pass  # az_arr stays None -> all ones
-        elif (mode == "empirical" or (mode is None and "lum_az_empirical" in keys)) \
-                and "lum_az_empirical" in keys:
-            az_arr = np.asarray(w["lum_az_empirical"], dtype=float)
-            corr = np.asarray(w["lum_correction_empirical"], dtype=float)
-        elif "lum_gain_theoretical" in keys:
-            g = np.maximum(np.asarray(w["lum_gain_theoretical"], dtype=float), 0.05)
-            az_arr = np.asarray(w["lum_az"], dtype=float)
-            corr = np.min(g) / g
-        # (no lum data -> az_arr None -> no correction)
-        az_map = np.asarray(w["az_map"], dtype=float)
-        valid = np.asarray(w["valid_map"], dtype=bool)
-        if az_arr is None:
-            cmap = np.ones(az_map.shape, dtype=np.float32)
-        else:
-            cmap = np.interp(np.abs(np.nan_to_num(az_map, nan=0.0)),
-                             az_arr, corr).astype(np.float32)
-        cmap[~valid] = 0.0
-        return cmap
+        return self.field_drive(1.0)
 
     def show_patch_spherical(self, az_deg: float, alt_deg: float, size_deg: float,
                              frac: float, bg_gray: float,
@@ -327,10 +318,10 @@ class Display(Device):
                              apply_lum: bool = True):
         """Render a stimulus patch in true visual-angle space through the warp map, so it
         subtends `size_deg` at any azimuth/altitude and is shaped to the screen curvature. `frac`
-        is the UNcorrected headroom fraction (stimulus luminance = bg + frac*(1-bg) before the
-        per-pixel luminance correction). `shape` is "square" or "circle". `apply_lum` applies the
-        full-field per-pixel luminance correction (default); set False to render RAW drive — used
-        by the intensity-cal measurement, which must read the uncorrected delivered luminance.
+        is the stimulus BRIGHTNESS and `bg_gray` the background brightness (0..1 of the
+        calibration's uniform range; a stimulus may exceed 1, each pixel clipping at drive 1).
+        `shape` is "square" or "circle". `apply_lum=False` renders RAW drive instead (frac and bg
+        are drives, no light model) — the intensity-calibration measurement uses it.
         Surfaces are cached; silently no-ops if no warp is loaded (follower falls back to show_rect)."""
         import pygame
         surf = self._get_patch_surface(az_deg, alt_deg, size_deg, frac, bg_gray, shape, apply_lum)
@@ -386,9 +377,6 @@ class Display(Device):
         az_map = self._warp["az_map"]
         alt_map = self._warp["alt_map"]
         valid = np.asarray(self._warp["valid_map"], dtype=bool)
-        # Ideal (uncorrected) 0..1 drive: bg everywhere, stimulus = bg + frac*(1-bg) inside the shape.
-        bg_lin = max(0.0, min(1.0, bg_gray))
-        stim_lin = bg_lin + max(0.0, min(1.0, frac)) * (1 - bg_lin)
         half = size_deg / 2.0
         daz = az_map - az0
         dalt = alt_map - alt0
@@ -397,21 +385,25 @@ class Display(Device):
         else:
             inside = (np.abs(daz) <= half) & (np.abs(dalt) <= half)
         lit = valid & inside
-        ideal = np.where(lit, stim_lin, bg_lin)
-        # Full-field per-pixel luminance correction (or raw drive, masked to the visible screen).
-        if apply_lum and self._corr_map is not None:
-            return ideal * self._corr_map
-        return np.where(valid, ideal, 0.0)
+        if not apply_lum or self._model is None:
+            # RAW drive (measurement): frac / bg_gray are drive levels, masked to the screen.
+            ideal = np.where(lit, max(0.0, min(1.0, frac)), max(0.0, min(1.0, bg_gray)))
+            return np.where(valid, ideal, 0.0)
+        # Light model: background from the cached uniform field, stimulus pixels driven to deliver
+        # the stimulus light at their own azimuth (drive clips at 1 where it can't be reached).
+        drive = self.field_drive(bg_gray).copy()
+        L_s = self._model.L_from_b(max(0.0, float(frac)))
+        drive[lit] = self._model.drive(self._abs_az[lit], L_s)
+        return drive
 
     def _build_patch_surface(self, az0, alt0, size_deg, frac, bg_gray,
                              shape="square", apply_lum=True):
         """Compose the full (H, W) framebuffer for one patch: a bright stimulus over a background,
         both green+blue only (R=0). `shape` is "square" (within size_deg/2 in BOTH azimuth and
         altitude) or "circle" (radius size_deg/2 in the az/alt plane) — a visual-angle shape,
-        warp-shaped to the screen curvature. When apply_lum, EVERY pixel's drive (background AND
-        stimulus) is multiplied by the per-pixel correction C(az) so delivered luminance is uniform
-        across azimuth (the bright center is darkened to match the dim edges); Bg=1 then means full
-        LED at the edges and attenuated at center. The invisible area (~valid_map) stays BLACK —
+        warp-shaped to the screen curvature. When apply_lum, every pixel (background AND
+        stimulus) gets the drive that delivers its target light at its azimuth, through the light
+        model (shared/intensity_model) — uniform across the screen. The invisible area (~valid_map) stays BLACK —
         off-screen, reserved for the red photodiode sync square (see _draw_sync_border)."""
         import numpy as np
         import pygame

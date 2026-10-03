@@ -194,12 +194,12 @@
               <span style="color:#888">%</span>
               <button type="button" id="btn-correct-contrast" class="btn btn-sm btn-blue" onclick="correctContrast()" title="Clamp values to the achievable ceiling (uniform across the session's azimuths)">Correct</button>
             </div>
-            <div id="contrast-preview" style="font-size:10px; color:#9ab; margin-top:2px" title="Stimulus intensity per contrast value: the 0..1 drive the renderer is given (before its per-azimuth luminance factor), and with a contrast calibration the light at the calibration's spot"></div>
+            <div id="contrast-preview" style="font-size:10px; color:#9ab; margin-top:2px" title="Per contrast value: stimulus light (uniform across the screen) and the drive it takes, over the session's azimuths"></div>
           </div>
 
           <div><label>Proportions</label><input type="text" id="p-contrast_proportions" class="task-param" title="e.g. [0.34, 0.33, 0.33]"></div>
-          <div><label>Background</label><input type="number" id="p-background_gray" step="0.01" min="0" max="1" class="task-param" oninput="updateContrastHint()">
-            <div id="bg-lux" style="font-size:10px; color:#9ab; margin-top:2px" title="Background light at the contrast calibration's spot, from its meter readings"></div></div>
+          <div><label title="Background BRIGHTNESS, 0..1 of the rig intensity calibration's uniform range">Background</label><input type="number" id="p-background_gray" step="0.01" min="0" max="1" class="task-param" oninput="updateContrastHint()">
+            <div id="bg-lux" style="font-size:10px; color:#9ab; margin-top:2px" title="Background light (calibration units; uniform across the screen)"></div></div>
         </div>
         <div id="photodiode-sync-row" style="display:none; align-items:center; gap:12px; margin-top:4px;">
           <label style="margin:0; display:inline-flex; align-items:center; gap:4px; cursor:pointer;">
@@ -243,7 +243,7 @@
           <div><label>N blocks</label><input type="number" id="p-n_blocks" min="1" class="task-param" oninput="_updateNTrials()"></div>
           <div><label>Block size</label><input type="number" id="p-block_size" min="1" class="task-param" oninput="_updateNTrials()"></div>
           <div><label>N trials</label><input type="number" id="p-n_trials" readonly style="background:#2a2a2a; color:#888"></div>
-          <div><label>Block sequence (deg)</label><input type="text" id="p-block_sequence" class="task-param" title="e.g. [80, -40, 40]"></div>
+          <div><label>Block sequence (deg)</label><input type="text" id="p-block_sequence" class="task-param" oninput="updateContrastHint()" title="e.g. [80, -40, 40]"></div>
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0 8px;">
           <div><label>Pre-stim (s)</label><input type="text" id="p-prestim_duration" class="task-param" title="number or [min, max]"></div>
@@ -947,36 +947,21 @@ function _activeMetric() {
           && config.rig.devices.display.contrast_metric) || 'weber';
 }
 
-// Normalized headroom fraction f -> value in `metric` units (mirrors shared/stim_generator.py).
-function fractionToMetric(f, bg, metric) {
-  if (metric === 'normalized' || bg < 0.004) return f;
-  if (metric === 'weber') return f * (1 - bg) / bg;
-  if (metric === 'michelson') { const d = 2 * bg + f * (1 - bg); return d > 0 ? f * (1 - bg) / d : 0; }
-  return f;
-}
 
 function refreshContrastMetric() {
   const metric = _activeMetric();
   const name = {weber: 'Weber', michelson: 'Michelson', normalized: 'Normalized'}[metric] || metric;
   const lbl = document.getElementById('contrast-metric-label');
-  if (lbl) lbl.textContent = '(' + name + (_contrastCal() ? ', measured' : '') + ')';
-  if (lbl) lbl.title = _contrastCal()
-    ? 'Rig contrast calibration ' + _contrastCal() + ' (Setup → Display → INTENSITY): values are MEASURED luminance contrast'
-    : 'No contrast calibration on this rig (Setup → Display → INTENSITY): contrast is the drive ratio';
+  if (lbl) lbl.textContent = '(' + name + ')';
   const inp = document.getElementById('p-contrast_values');
-  if (inp) inp.title = _contrastCal()
-    ? 'MEASURED ' + name + ' contrast in percent via ' + _contrastCal() + ' — can exceed 100 %'
-    : 'percent in the active metric — e.g. [25, 15, 12.5]; 100 = 100 %';
+  if (inp) inp.title = 'percent ' + name + ' contrast of LIGHT (the rig\'s intensity calibration) — e.g. [25, 15, 12.5]; 100 = 100 %';
   updateContrastHint();
 }
 
-// ── Contrast calibration ──
-// Chosen per RIG in Setup → Display → INTENSITY and saved with the rig
-// (devices.display.contrast_calibration). With one, contrast values are MEASURED luminance
-// contrast; Deploy sends the file's readings to the Leader. Setup's Save Rig reloads this page's
-// rig config (vrfarm:reload-config), so the label follows it.
-// Contrast is TYPED in percent (100 = 100 %) but stored in the task and sent to the server as a
-// fraction (1.0), so task files, the trial table and the HDF5 data keep their meaning.
+// ── Contrast / brightness ──
+// Contrast is typed in percent (100 = 100 %) but stored in the task and sent to the server as a
+// fraction (1.0). Background is a BRIGHTNESS, 0..1 of the rig intensity calibration's uniform
+// range. Both are defined on light through the rig's light model (Setup → INTENSITY → Apply).
 function _toPct(f) { return parseFloat((Number(f) * 100).toFixed(4)); }
 function _contrastFractions() {
   let v;
@@ -989,66 +974,40 @@ function _fmtLux(x) {
   return x < 10 ? x.toFixed(2) : (x < 100 ? x.toFixed(1) : x.toFixed(0));
 }
 
-function _contrastCal() {
-  const v = config && config.rig && config.rig.devices && config.rig.devices.display
-            && config.rig.devices.display.contrast_calibration;
-  return (v && v !== 'none' && v !== 'None') ? v : null;
-}
 
 // Live hint: the display ceiling (f=1) in the active metric at the current background.
-let _hintSeq = 0, _previewSeq = 0, _previewT = null;
-// Readouts under Contrast and Background (server-side: same math as Deploy). Debounced.
-function updateContrastPreview() {
+let _previewSeq = 0, _previewT = null;
+function _blockSeq() {
+  try { return JSON.parse(document.getElementById('p-block_sequence').value); } catch (e) { return [0]; }
+}
+// Readouts under Contrast and Background, and the ceiling hint — one server call with the same
+// math as stimulus generation. Light is uniform by design (same at every azimuth); the drive it
+// takes varies, so it is shown as a range over the session's azimuths. Debounced.
+function updateContrastHint() {
   clearTimeout(_previewT);
   _previewT = setTimeout(async () => {
-    const out = document.getElementById('contrast-preview'), bgEl = document.getElementById('bg-lux');
-    if (!out) return;
+    const out = document.getElementById('contrast-preview'), bgEl = document.getElementById('bg-lux'),
+          hint = document.getElementById('contrast-ceiling-hint');
     const bg = parseFloat(document.getElementById('p-background_gray')?.value);
-    if (!isFinite(bg)) { out.textContent = ''; if (bgEl) bgEl.textContent = ''; return; }
+    if (!out || !isFinite(bg)) { if (out) out.textContent = ''; if (bgEl) bgEl.textContent = ''; if (hint) hint.textContent = ''; return; }
     const seq = ++_previewSeq;
     let d;
     try {
       d = await (await fetch(api('/contrast_preview'), {method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({background_gray: bg, values: _contrastFractions()})})).json();
+        body: JSON.stringify({background_gray: bg, values: _contrastFractions(), block_sequence: _blockSeq()})})).json();
     } catch (e) { return; }
     if (seq !== _previewSeq) return;
     if (!d.ok) { out.textContent = 'preview: ' + (d.error || '?'); if (bgEl) bgEl.textContent = ''; return; }
-    const cal = !!d.calibration;
-    out.textContent = 'stim ' + d.stims.map(st => st.drive.toFixed(3)
-        + (cal ? ' · ' + _fmtLux(st.lux) + ' lx' : '') + (st.clipped ? ' (clips)' : '')).join('  |  ')
-        + (cal ? '   @ az ' + d.az_deg + '°' : '');
-    if (bgEl) bgEl.textContent = cal ? (_fmtLux(d.bg_lux) + ' lx @ az ' + d.az_deg + '°') : '';
+    const u = d.unit || '';
+    const drv = st => st.drive_min.toFixed(3) === st.drive_max.toFixed(3)
+      ? st.drive_max.toFixed(3) : `${st.drive_min.toFixed(3)}–${st.drive_max.toFixed(3)}`;
+    out.textContent = 'stim ' + d.stims.map(st => `${_fmtLux(st.lux)} ${u} · drive ${drv(st)}`
+        + (st.clipped ? ' (clips)' : '')).join('  |  ');
+    out.title = `calibration ${d.calibration}; drive range over az ${d.azimuths.join(', ')}°`;
+    if (bgEl) bgEl.textContent = `${_fmtLux(d.bg_lux)} ${u}`;
+    if (hint) hint.textContent = (d.ceiling != null && isFinite(d.ceiling))
+      ? `max ${_toPct(d.ceiling).toFixed(0)} % @ this bg` + (d.degenerate ? ' (no bg light: normalized)' : '') : '';
   }, 250);
-}
-
-function updateContrastHint() {
-  updateContrastPreview();
-  const el = document.getElementById('contrast-ceiling-hint');
-  if (!el) return;
-  const bg = parseFloat(document.getElementById('p-background_gray')?.value);
-  if (!isFinite(bg)) { el.textContent = ''; return; }
-  const cal = _contrastCal();
-  if (cal) {
-    // Measured ceiling (drive 1.0 on this bg, lowest over the session's azimuths): server-side,
-    // because it needs the cal's readings and the rig's warp.
-    let blockSeq;
-    try { blockSeq = JSON.parse(document.getElementById('p-block_sequence').value); } catch (e) { blockSeq = [0]; }
-    const seq = ++_hintSeq;
-    el.textContent = '…';
-    fetch(api('/contrast_ceiling'), {method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({background_gray: bg, block_sequence: blockSeq})})
-      .then(r => r.json()).then(d => {
-        if (seq !== _hintSeq) return;
-        el.textContent = d.ok && d.ceiling != null
-          ? ('max ' + (isFinite(d.ceiling) ? _toPct(d.ceiling).toFixed(0) + ' %' : '∞') + ' measured @ this bg')
-          : ('cal error: ' + (d.error || '?'));
-      }).catch(() => { if (seq === _hintSeq) el.textContent = ''; });
-    return;
-  }
-  // Input is capped at 1.0; the metric display ceiling only matters when it falls BELOW 1
-  // (upper part of 0..1 would clip to white). When it's >=1 the whole 0..1 range is usable.
-  const cmax = Math.min(fractionToMetric(1, bg, _activeMetric()), 1);
-  el.textContent = (cmax < 0.999) ? ('max ' + _toPct(cmax).toFixed(0) + ' % @ this bg') : '';
 }
 
 // "Correct" button: clamp entered contrast(s) to the achievable uniform ceiling (server-computed

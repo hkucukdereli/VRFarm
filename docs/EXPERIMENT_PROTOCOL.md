@@ -267,7 +267,7 @@ A task YAML has four sections. Values below are the current defaults from
 
 | Param | Meaning |
 |---|---|
-| `background_gray` | Background luminance, plain **0..1** (0 = black, 1 = white). |
+| `background_gray` | Background **brightness**, 0..1 of the rig intensity calibration's uniform light range (0 = darkest light every azimuth can show, 1 = brightest). |
 | `size_deg` | Stimulus size in visual degrees. |
 | `shape` | `square` (etc.). |
 | `duration_s` | Total projector on-time for the stimulus. |

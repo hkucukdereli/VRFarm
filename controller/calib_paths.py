@@ -5,15 +5,15 @@ controller/calib_paths.py — where each rig's display calibration lives on the 
     display_calibration/_template/        one template per file kind (geometry/, intensity/)
     display_calibration/<rig>/
         geometry/rig_geometry_<YYYYmmdd_HHMM>.yaml          one file per calibration, never edited
-        intensity/luminance_cal_<stamp>.yaml                 along-azimuth fit (measured)
-        intensity/luminance_cal_<geostamp>_theoretical.yaml  the geometry model, always present
-        intensity/luminance_measurements_<stamp>.yaml        raw along-azimuth readings
-        intensity/luminance_cal_latest.yaml -> ...           what an 'empirical' warp build uses
-        intensity/contrast_cal_<stamp>.yaml                  luminance vs drive level at one spot
-        warp_map.npz                                         generated (gitignored)
+        intensity/intensity_cal_<stamp>.yaml                 measured: light along azimuth +
+                                                             light vs drive at chosen azimuths
+        intensity/intensity_cal_<geostamp>_theoretical.yaml  mock from the geometry (default)
+        intensity/intensity_cal_none.yaml                    mock: no correction
+        warp_map.npz                                         generated; carries the light model
 
 Which geometry a rig uses is `devices.display.geometry_file` in its rig YAML (a file name in
-geometry/). Dated files are records: an edited geometry is saved as a NEW dated file.
+geometry/); which intensity calibration, `devices.display.intensity_calibration`. Dated files
+are records: an edited geometry is saved as a NEW dated file.
 """
 from __future__ import annotations
 
@@ -89,17 +89,3 @@ def resolve_geometry(rig: str, rig_config: dict | None, name: str | None) -> Pat
     """Path of geometry `name` (basename only) in this rig's folder, or of the current one."""
     name = Path(name).name if name else current_geometry(rig, rig_config)
     return (geometry_dir(rig) / name) if name else None
-
-
-def lum_module(rig: str):
-    """display_calibration/fit_luminance_correction, pointed at this rig's intensity folder."""
-    if str(TOOLS_DIR) not in sys.path:
-        sys.path.insert(0, str(TOOLS_DIR))
-    import fit_luminance_correction as flc
-    flc.set_cal_dir(intensity_dir(rig))
-    return flc
-
-
-def load_contrast_cal(rig: str, name: str) -> dict:
-    """{name, patch, levels, readings, ratio} of intensity/<name>. Raises on missing/invalid."""
-    return lum_module(rig).load_contrast_cal(name, intensity_dir(rig))

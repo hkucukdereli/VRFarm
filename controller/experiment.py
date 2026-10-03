@@ -72,25 +72,26 @@ def _warp_path(rs: RigState) -> Path:
     return calib_paths.warp_path(rs.name)
 
 
-def _rig_contrast_cal_name(rs: RigState) -> str | None:
-    """The rig's devices.display.contrast_calibration (picked in Setup → INTENSITY and saved
-    with the rig), or None for none/unset."""
-    name = (((rs.config or {}).get("devices") or {}).get("display") or {}).get("contrast_calibration")
-    return None if name in (None, "", "none", "None") else str(name)
+def _rig_model(rs: RigState):
+    """The light model this rig renders with: the one baked into its controller-side warp map
+    (the copy Generate Warp / Apply deployed), or identity when apply_warp is off / no warp."""
+    import numpy as np
+    from shared.stim_generator import light_model
+    display_cfg = (rs.config or {}).get("devices", {}).get("display", {})
+    wp = _warp_path(rs)
+    if display_cfg.get("apply_warp", False) and wp.exists():
+        return light_model(np.load(str(wp)))
+    return light_model(None)
 
 
-def _load_task_contrast_cal(rs: RigState, name: str | None) -> dict | None:
-    """The selected contrast cal's {name, levels, readings, ...} from this rig's intensity
-    folder. Raises a readable RuntimeError when the rig names a file it does not have."""
-    if not name:
-        return None
-    from controller import calib_paths
-    try:
-        return calib_paths.load_contrast_cal(rs.name, name)
-    except FileNotFoundError:
-        raise RuntimeError(f"contrast calibration {name} is not in display_calibration/{rs.name}/"
-                           f"intensity/ — pick one of this rig's files (or none) in Setup → "
-                           f"Display → INTENSITY and Save Rig")
+def _session_azimuths(block_seq) -> list:
+    out = set()
+    for az in (block_seq or []):
+        try:
+            out.add(abs(float(az)))
+        except (TypeError, ValueError):
+            pass
+    return sorted(out) or [0.0]
 
 
 def _cam_exposure(rs: RigState, cam_cfg: dict) -> dict:
@@ -514,9 +515,8 @@ def deploy():
             _upload_file(pi["ip"], api_port, str(rs.path), f"rigs/{rs.path.name}")
         steps.append("Uploaded rig config to all Pis")
 
-        # 2. Task config to the Leader, then generate stims there. A selected contrast cal
-        #    travels in the request (its readings), so the Leader needs no calibration files.
-        contrast_cal = _load_task_contrast_cal(rs, _rig_contrast_cal_name(rs))
+        # 2. Task config to the Leader, then generate stims there (the light model rides in the
+        #    Leader's copy of warp_map.npz).
         remote_task_path = f"experiments/{Path(rs.task_path).name}"
         _upload_file(leader["ip"], api_port, rs.task_path, remote_task_path)
         steps.append("Uploaded task config to Leader")
@@ -525,9 +525,7 @@ def deploy():
             json={"task_config": remote_task_path,
                   "session_id": rs.session_id,
                   "apply_warp": rig.get("devices", {}).get("display", {}).get("apply_warp", False),
-                  "contrast_metric": rig.get("devices", {}).get("display", {}).get("contrast_metric", "weber"),
-                  "contrast_cal": ({"name": contrast_cal["name"], "levels": contrast_cal["levels"],
-                                    "readings": contrast_cal["readings"]} if contrast_cal else None)},
+                  "contrast_metric": rig.get("devices", {}).get("display", {}).get("contrast_metric", "weber")},
             timeout=30)
         if r.status_code != 200:
             raise RuntimeError(f"Stim generation failed (HTTP {r.status_code}): {r.text[:500]}")
@@ -537,8 +535,8 @@ def deploy():
             raise RuntimeError(f"Stim generation returned invalid response: {r.text[:500]}")
         if not stim_result.get("ok"):
             raise RuntimeError(f"Stim generation error: {stim_result.get('error', 'unknown')}")
-        steps.append(f"Generated stims: {stim_result.get('n_trials', '?')} trials"
-                     + (f" (measured contrast via {contrast_cal['name']})" if contrast_cal else ""))
+        steps.append(f"Generated stims: {stim_result.get('n_trials', '?')} trials "
+                     f"(intensity: {_rig_model(rs).name or 'none'})")
 
         # 3. NPZ from the Leader to the Follower(s)
         npz_remote = stim_result.get("npz_path", "")
@@ -584,11 +582,8 @@ def deploy():
 
 @bp.route("/correct_contrast", methods=["POST"])
 def correct_contrast():
-    """Clamp entered contrast value(s) to the achievable ceiling in the active metric (matches
-    what stim generation bakes in: per-azimuth luminance when apply_warp + a warp map exist)."""
-    import numpy as np
-    from shared.stim_generator import (get_luminance_correction, fraction_to_metric,
-                                       snap_contrast_to_bitcode)
+    """Clamp entered contrast fractions to the highest contrast EVERY session azimuth can show on
+    this background (drive 1 at the dimmest of them), through the rig's light model."""
     rs: RigState = g.rs
     data = request.get_json(silent=True) or {}
     try:
@@ -596,162 +591,53 @@ def correct_contrast():
         bg = float(data.get("background_gray") or 0.0)
     except (TypeError, ValueError):
         return jsonify({"ok": False, "error": "invalid values or background_gray"}), 400
-    block_seq = data.get("block_sequence") or [0.0]
-    display_cfg = (rs.config or {}).get("devices", {}).get("display", {})
-    metric = display_cfg.get("contrast_metric", "weber")
-    apply_warp = display_cfg.get("apply_warp", False)
-    cal_name = _rig_contrast_cal_name(rs)
-    if cal_name:
-        return _correct_contrast_measured(rs, values, bg, block_seq, metric, apply_warp, cal_name)
-
-    max_lum = 1.0
-    note = ("apply_warp off; global display ceiling" if not apply_warp
-            else "no warp map; global display ceiling")
-    warp_path = _warp_path(rs)
-    if apply_warp and warp_path.exists():
-        try:
-            warp = np.load(str(warp_path))
-            azs = set()
-            for az in block_seq:
-                try:
-                    azs.add(abs(float(az)))
-                except (TypeError, ValueError):
-                    pass
-            azs = azs or {0.0}
-            max_lum = max(get_luminance_correction(warp, az) for az in azs)
-            note = ("per-azimuth luminance (empirical)" if "lum_az_empirical" in warp.files
-                    else "per-azimuth luminance (theoretical)")
-        except Exception as e:
-            note = f"luminance unavailable ({e}); global display ceiling"
-            max_lum = 1.0
-    f_ceiling = 1.0 / max_lum if max_lum > 0 else 1.0
-    c_ceiling = min(fraction_to_metric(f_ceiling, bg, metric), 1.0)
-    corrected = [round(snap_contrast_to_bitcode(min(v, c_ceiling), bg, metric), 4) for v in values]
-    c_ceiling = snap_contrast_to_bitcode(c_ceiling, bg, metric)
-    return jsonify({"ok": True, "corrected": corrected,
-                    "ceiling": round(float(c_ceiling), 4), "metric": metric, "note": note})
-
-
-def _session_corrections(rs: RigState, block_seq, apply_warp):
-    """[(|az|, C(az))] for the session's azimuths — the renderer's per-azimuth drive factor."""
-    import numpy as np
-    from shared.stim_generator import get_luminance_correction
-    azs = set()
-    for az in block_seq:
-        try:
-            azs.add(abs(float(az)))
-        except (TypeError, ValueError):
-            pass
-    azs = sorted(azs or {0.0})
-    warp_path = _warp_path(rs)
-    if not (apply_warp and warp_path.exists()):
-        return [(az, 1.0) for az in azs], "no luminance correction"
-    warp = np.load(str(warp_path))
-    return [(az, get_luminance_correction(warp, az)) for az in azs], "with per-azimuth luminance correction"
-
-
-def _correct_contrast_measured(rs, values, bg, block_seq, metric, apply_warp, cal_name):
-    """Correct against a contrast cal: the ceiling is the MEASURED contrast of drive 1.0 on this
-    background, the lowest over the session's azimuths (so every block can show every value).
-    Measured contrast can exceed 1 (e.g. Weber on a near-black background)."""
-    from shared.stim_generator import measured_contrast_ceiling
-    try:
-        cal = _load_task_contrast_cal(rs, cal_name)
-        pairs, how = _session_corrections(rs, block_seq, apply_warp)
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
-    ceiling = min(measured_contrast_ceiling(bg, cal, metric, c) for _, c in pairs)
+    metric = ((rs.config or {}).get("devices", {}).get("display", {})).get("contrast_metric", "weber")
+    model = _rig_model(rs)
+    azs = _session_azimuths(data.get("block_sequence") or [0.0])
+    L_b = float(model.L_from_b(bg))
+    ceiling = float(model.ceiling(azs, L_b, metric))
     corrected = [round(min(v, ceiling), 4) for v in values]
-    return jsonify({"ok": True, "corrected": corrected, "ceiling": round(float(ceiling), 4),
-                    "metric": metric, "measured": True,
-                    "note": f"measured via {cal_name} ({how})"})
+    note = (f"light model {model.name or 'identity'}"
+            + (" — no background light, normalized contrast" if model.degenerate(L_b, metric) else ""))
+    return jsonify({"ok": True, "corrected": corrected, "ceiling": round(ceiling, 4),
+                    "metric": metric, "note": note})
 
 
-def contrast_preview(rs: RigState, cal_name, bg: float, values, az=None) -> dict:
-    """What a contrast list means on this rig, for the boxes in the Setup and Experiment tabs.
-
-    values are contrast FRACTIONS in the rig's metric (0.5 = 50 %). Returns
-      {calibration, metric, az_deg, c_az, bg_drive, bg_lux, ceiling,
-       stims: [{contrast, drive, lux, clipped}]}
-    drive is the stimulus intensity 0..1 the renderer is given (before its per-azimuth luminance
-    factor c_az), the same number the trial table records as stim_drive. With a contrast cal, the
-    lux values are the cal's meter readings interpolated at the cal's own spot (its az unless az is
-    given), i.e. L(drive * c_az); without one they are None."""
-    import numpy as np
-    from shared.stim_generator import (metric_to_fraction, fraction_to_metric, cal_luminance,
-                                       drive_for_measured_contrast, measured_contrast_ceiling,
-                                       get_luminance_correction)
-    display_cfg = (rs.config or {}).get("devices", {}).get("display", {})
-    metric = display_cfg.get("contrast_metric", "weber")
+def contrast_preview(rs: RigState, bg: float, values, azimuths) -> dict:
+    """What a background brightness and a contrast list mean on this rig, for the readouts in the
+    Setup and Experiment tabs (same function as stimulus generation: stimulus_for).
+    Returns {calibration, unit, metric, bg_lux, ceiling, azimuths,
+             stims: [{contrast, lux, drive_min, drive_max, clipped}]}
+    Light is uniform by design, so bg_lux and each stimulus lux hold at every azimuth; the drive it
+    takes varies, hence a min..max over `azimuths`."""
+    from shared.stim_generator import stimulus_for
+    model = _rig_model(rs)
+    metric = ((rs.config or {}).get("devices", {}).get("display", {})).get("contrast_metric", "weber")
     bg = min(max(float(bg), 0.0), 1.0)
-    cal = _load_task_contrast_cal(rs, cal_name) if cal_name else None
-    cal_az = float((cal or {}).get("patch", {}).get("az_deg") or 0.0) if cal else 0.0
-    if az is None:
-        az = cal_az
-    c_az, c_cal = 1.0, 1.0
-    warp_path = _warp_path(rs)
-    if display_cfg.get("apply_warp", False) and warp_path.exists():
-        warp = np.load(str(warp_path))
-        c_az = float(get_luminance_correction(warp, float(az)))
-        c_cal = float(get_luminance_correction(warp, cal_az))
-    # Lux away from the cal's azimuth: the screen's gain G(az) scales the light, and the
-    # correction is C = min(G)/G, so G(az)/G(cal_az) = C(cal_az)/C(az). (With correction off
-    # this is 1 — the lux is then only exact at the cal's own azimuth.) Contrast is unaffected.
-    k = c_cal / c_az if c_az > 0 else 1.0
+    azs = [abs(float(a)) for a in (azimuths or [0.0])]
     stims = []
     for v in values:
-        c = float(v)
-        if cal:
-            drive, clipped = drive_for_measured_contrast(c, bg, cal, metric, c_az)
-            lux = k * cal_luminance(cal, drive * c_az)
-        else:
-            f = metric_to_fraction(c, bg, metric)
-            clipped = f > 1.0 + 1e-9
-            drive, lux = bg + min(f, 1.0) * (1.0 - bg), None
-        stims.append({"contrast": c, "drive": round(float(drive), 4),
-                      "lux": None if lux is None else float(lux), "clipped": bool(clipped)})
-    if cal:
-        ceiling = measured_contrast_ceiling(bg, cal, metric, c_az)
-        bg_lux = k * cal_luminance(cal, bg * c_az)
-    else:
-        ceiling, bg_lux = fraction_to_metric(1.0, bg, metric), None
-    return {"calibration": cal["name"] if cal else None, "metric": metric, "az_deg": float(az),
-            "c_az": round(c_az, 4), "bg_drive": bg, "bg_lux": bg_lux,
-            "ceiling": float(ceiling) if np.isfinite(ceiling) else None, "stims": stims}
+        per = [stimulus_for(model, float(v), bg, a, metric) for a in azs]
+        stims.append({"contrast": float(v), "lux": per[0]["stim_lum"],
+                      "drive_min": min(p["stim_drive"] for p in per),
+                      "drive_max": max(p["stim_drive"] for p in per),
+                      "clipped": any(p["clipped"] for p in per)})
+    L_b = float(model.L_from_b(bg))
+    return {"calibration": model.name or model.source or "identity", "unit": model.unit,
+            "source": model.source, "metric": metric, "bg_lux": L_b, "azimuths": azs,
+            "ceiling": float(model.ceiling(azs, L_b, metric)),
+            "degenerate": bool(model.degenerate(L_b, metric)), "stims": stims}
 
 
 @bp.route("/contrast_preview", methods=["POST"])
 def contrast_preview_route():
-    """{background_gray, values} -> contrast_preview() with the rig's saved contrast cal."""
+    """{background_gray, values, block_sequence} -> contrast_preview over the session's azimuths."""
     rs: RigState = g.rs
     data = request.get_json(silent=True) or {}
     try:
-        return jsonify({"ok": True, **contrast_preview(rs, _rig_contrast_cal_name(rs),
-                                                       data.get("background_gray") or 0.0,
-                                                       data.get("values") or [])})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)})
-
-
-@bp.route("/contrast_ceiling", methods=["POST"])
-def contrast_ceiling():
-    """Measured-contrast ceiling for the hint next to Contrast, using the rig's contrast cal:
-    {background_gray, block_sequence} -> {calibration, ceiling, ratio}."""
-    from shared.stim_generator import measured_contrast_ceiling
-    rs: RigState = g.rs
-    data = request.get_json(silent=True) or {}
-    display_cfg = (rs.config or {}).get("devices", {}).get("display", {})
-    try:
-        cal = _load_task_contrast_cal(rs, _rig_contrast_cal_name(rs))
-        if not cal:
-            return jsonify({"ok": True, "calibration": None, "ceiling": None})
-        bg = float(data.get("background_gray") or 0.0)
-        pairs, _ = _session_corrections(rs, data.get("block_sequence") or [0.0],
-                                        display_cfg.get("apply_warp", False))
-        metric = display_cfg.get("contrast_metric", "weber")
-        ceiling = min(measured_contrast_ceiling(bg, cal, metric, c) for _, c in pairs)
-        return jsonify({"ok": True, "calibration": cal["name"], "ceiling": float(ceiling),
-                        "ratio": cal["ratio"], "metric": metric})
+        return jsonify({"ok": True, **contrast_preview(
+            rs, data.get("background_gray") or 0.0, data.get("values") or [],
+            _session_azimuths(data.get("block_sequence") or [0.0]))})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 

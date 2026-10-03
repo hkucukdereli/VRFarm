@@ -88,7 +88,7 @@ def contrast_fidelity(dev, bg, bits, contrasts, az=80.0, alt=10.0, size=8.0):
     tile = _build_dither_tile(dev._corr_map.shape, bits)
     rows = []
     for frac in contrasts:
-        drive = dev.patch_drive(az, alt, size, frac, bg)       # the real render math
+        drive = dev.patch_drive(az, alt, size, bg + frac * (1 - bg), bg)   # brightness = bg + c*(1-bg): the real render math
         ideal = np.minimum(drive * 255.0, ceiling)
         c_ideal = (ideal[inside].mean() - ideal[ring].mean()) / ideal[ring].mean()
         out = {}
@@ -110,10 +110,6 @@ def main() -> int:
                     default=[1.0, 0.25, 0.15, 0.125],
                     help="stimulus contrasts to check delivery of; the defaults are the values "
                          "attention_blocked_L25.yaml runs")
-    ap.add_argument("--mode", choices=["empirical", "theoretical", "none"], default="theoretical",
-                    help="force lum_correction_mode instead of using the one baked into the warp; "
-                         "the banding this checks for only exists when a correction is applied, so "
-                         "a warp saved with mode 'none' would otherwise vacuously pass")
     a = ap.parse_args()
 
     warp = Path(a.warp)
@@ -127,19 +123,14 @@ def main() -> int:
     if not dev.load_warp(str(warp)):
         print(f"could not load {warp}", file=sys.stderr)
         return 2
-    # _build_corr_map accepts a plain dict as well as an NpzFile, so the mode can be overridden
-    # without rewriting the file.
-    baked = str(dev._warp["lum_correction_mode"]) if "lum_correction_mode" in dev._warp.files \
-        else "<absent>"
-    dev._warp = {k: dev._warp[k] for k in dev._warp.files} | {"lum_correction_mode": a.mode}
-    dev._corr_map = dev._build_corr_map()
+    dev._corr_map = dev._build_corr_map()      # brightness-1 field drive, from the warp's light model
     if dev._corr_map is None:
-        print("warp has no luminance data -- nothing to check", file=sys.stderr)
+        print("warp has no geometry -- nothing to check", file=sys.stderr)
         return 2
     dev._dither = _build_dither_tile(dev._corr_map.shape, dev.panel_bits)
 
     valid = np.asarray(dev._warp["valid_map"], dtype=bool)
-    drive = a.bg * dev._corr_map
+    drive = dev.field_drive(a.bg)
     ideal = drive * 255.0
     row = valid.shape[0] // 2
 
@@ -148,7 +139,7 @@ def main() -> int:
     plain = panel_view(dev._quantize(drive), a.bits)
 
     corr = dev._corr_map[valid]
-    print(f"warp            : {warp}  (baked mode: {baked}, testing as: {a.mode})")
+    print(f"warp            : {warp}  (intensity: {dev._model.name or dev._model.source or 'identity'})")
     print(f"panel           : {a.bits} bits/channel  ->  {1 << a.bits} levels")
     print(f"C(az) range     : {corr.min():.4f} .. {corr.max():.4f}  "
           f"({corr.max() / max(corr.min(), 1e-9):.1f}:1)")

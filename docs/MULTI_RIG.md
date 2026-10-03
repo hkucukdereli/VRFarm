@@ -171,7 +171,7 @@ wins and the old file is ignored (the log says so).
 ## Calibration files per rig
 
 Each rig has `display_calibration/<rig>/geometry/` (dated geometry files), `intensity/`
-(along-azimuth and contrast calibrations, plus a theoretical file) and its `warp_map.npz`; see
+(intensity calibrations: measured `intensity_cal_*` plus theoretical and none mocks) and its `warp_map.npz`; see
 [display_calibration/README.md](../display_calibration/README.md#where-the-files-live). The
 folders are created the first time the Setup tab touches a rig; a rig without geometry is seeded
 from `display_calibration/_template/geometry/rig_geometry_template.yaml`.

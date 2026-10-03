@@ -248,15 +248,13 @@ def capture_setup(pw, shots: Shots) -> None:
     if shots.want("setup-14-intensity"):
         page.locator('.device-tabs .device-tab:has-text("Stimulus Display")').first.click()
         page.wait_for_timeout(300)
-        sel = page.locator('.device-panel[data-device="display"] select#lum-mode-select')
-        if sel.count():
-            sel.select_option("manual")
-            page.wait_for_timeout(200)
-            page.locator('.device-panel[data-device="display"] button:has-text("Intensity Cal")').first.click()
+        btn = page.locator('.device-panel[data-device="display"] button:has-text("Measure")')
+        if btn.count():
+            btn.first.click()
             page.wait_for_timeout(800)
-            shots.element(page, "#lum-panel", "setup-14-intensity")
+            shots.element(page, "#int-panel", "setup-14-intensity")
         else:
-            print("  !! intensity mode select not found — skipped setup-14-intensity")
+            print("  !! intensity Measure button not found — skipped setup-14-intensity")
 
     browser.close()
 

@@ -222,8 +222,8 @@ let piState = {};       // ip -> {checked: bool}
 let lickPollInterval = null;
 let devicesInitialized = false;
 let geoFiles = [];          // available geometry YAML filenames
-let lumCalFiles = [];       // saved intensity cals: [{name, mtime, is_latest}], newest first
-let contrastCalFiles = [];  // saved contrast cals: [{name, mtime, az_deg, alt_deg, ratio}], newest first
+let intCals = [];           // intensity calibrations: [{name, source, lo, hi, unit, columns, error}]
+let intActive = null;       // the one the rig's warp is built with
 let geoData = null;         // loaded geometry object
 let geoCurrentName = '';    // currently loaded filename
 let derivedAz = { min: null, max: null };  // az range the warp fills (server ray-trace)
@@ -747,29 +747,26 @@ async function blankDisplay() {
   log(result.ok ? `Display blanked (gray=${gray}).` : 'Failed: ' + (result.error || ''));
 }
 
-// Draw a single test patch (square/circle) at an az/alt with a given contrast on the Bg value.
-// Contrast is interpreted in the rig's active metric (Pi converts metric -> render fraction),
-// so the number here means the same thing as in the experiment card. Bg is the Blank field.
-// Contrast is typed in percent (50 = 50 %). With the card's contrast cal it is MEASURED contrast:
-// the controller turns it into the drive that produces it (same math as Deploy), and the Pi draws
-// that drive as a normalized fraction. Without one, the Pi converts metric -> fraction as before.
+// Draw a single test patch (square/circle) at an az/alt. Bg is a BRIGHTNESS (0..1 of the
+// calibration's uniform range) and contrast is typed in percent in the rig's metric; the
+// projector Pi turns both into drive through the light model in its warp (the same function
+// stimulus generation uses), so the patch matches the Experiment tab.
 function _testInputs() {
   const bgInput = document.getElementById('blank-gray-value');
   return {
     az: parseFloat(document.getElementById('test-stim-az')?.value) || 0,
     bg: Math.max(0, Math.min(1, bgInput ? (parseFloat(bgInput.value) || 0) : 0.0)),
     contrast: Math.max(0, parseFloat(document.getElementById('test-stim-contrast')?.value) || 0) / 100,
-    cal: (rig && rig.devices && rig.devices.display && rig.devices.display.contrast_calibration) || 'none',
   };
 }
 async function _testPreview(t) {
   return fetch(SAPI + '/contrast_preview', {method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({calibration: t.cal, background_gray: t.bg, values: [t.contrast], az_deg: t.az})})
+    body: JSON.stringify({background_gray: t.bg, values: [t.contrast], az_deg: t.az})})
     .then(r => r.json()).catch(e => ({ok: false, error: String(e)}));
 }
 function _fmtLux(x) {
   if (x == null || !isFinite(x)) return '--';
-  return x < 10 ? x.toFixed(2) : (x < 100 ? x.toFixed(1) : x.toFixed(0));
+  return x < 10 ? (+x).toFixed(2) : (x < 100 ? (+x).toFixed(1) : (+x).toFixed(0));
 }
 let _testPrevSeq = 0, _testPrevT = null;
 function updateTestPreview() {
@@ -780,10 +777,9 @@ function updateTestPreview() {
     const seq = ++_testPrevSeq, t = _testInputs(), d = await _testPreview(t);
     if (seq !== _testPrevSeq) return;
     if (!d.ok) { out.textContent = d.error || ''; if (bgEl) bgEl.textContent = ''; return; }
-    const st = d.stims[0], cal = !!d.calibration;
-    out.textContent = 'stim ' + st.drive.toFixed(3) + (cal ? ' · ' + _fmtLux(st.lux) + ' lx' : '')
-                      + (st.clipped ? ' (clips)' : '');
-    if (bgEl) bgEl.textContent = cal ? _fmtLux(d.bg_lux) + ' lx' : '';
+    const st = d.stims[0], u = d.unit || '';
+    out.textContent = `stim ${_fmtLux(st.lux)} ${u} · drive ${st.drive_max.toFixed(3)}` + (st.clipped ? ' (clips)' : '');
+    if (bgEl) bgEl.textContent = `${_fmtLux(d.bg_lux)} ${u}`;
   }, 200);
 }
 
@@ -795,46 +791,32 @@ async function testStimulus() {
   const size = parseFloat(document.getElementById('test-stim-size').value) || 8;
   const t = _testInputs();
   const metric = (rig.devices.display && rig.devices.display.contrast_metric) || 'weber';
-  let contrast = t.contrast, sendMetric = metric, note = '';
-  if (t.cal !== 'none') {
-    const d = await _testPreview(t);
-    if (!d.ok) { log('Contrast cal: ' + (d.error || '?')); return; }
-    const st = d.stims[0];
-    contrast = t.bg < 1 ? Math.max(0, (st.drive - t.bg) / (1 - t.bg)) : 0;   // drive -> normalized fraction
-    sendMetric = 'normalized';
-    note = `, measured via ${d.calibration}: drive ${st.drive.toFixed(3)}, ${_fmtLux(st.lux)} lx on ${_fmtLux(d.bg_lux)} lx`
-           + (st.clipped ? ' — CLIPPED at drive 1.0' : '');
-  }
-  log(`Drawing ${shape} @ az ${t.az}° alt ${alt}° (size ${size}°, contrast ${(t.contrast * 100).toFixed(1)} %, bg ${t.bg}${note})...`);
+  log(`Drawing ${shape} @ az ${t.az}° alt ${alt}° (size ${size}°, contrast ${(t.contrast * 100).toFixed(1)} %, bg brightness ${t.bg})...`);
   const result = await retryProxy(pi.ip, '/api/test_stimulus', {
     shape, az_deg: t.az, alt_deg: alt, size_deg: size,
-    contrast, bg_gray: t.bg, contrast_metric: sendMetric,
+    contrast: t.contrast, bg_gray: t.bg, contrast_metric: metric,
   });
-  log(result.ok ? 'Stimulus drawn.' : 'Stimulus test failed: ' + (result.error || ''));
+  log(result.ok ? (`Stimulus drawn` + (result.stim_lum != null
+        ? `: ${_fmtLux(result.stim_lum)} on ${_fmtLux(result.bg_lum)}, drive ${(+result.stim_drive).toFixed(3)}`
+          + (result.clipped ? ' — CLIPPED at drive 1.0' : '') : '') + '.')
+    : 'Stimulus test failed: ' + (result.error || ''));
 }
 
-// Clamp the Stimulus-test contrast to the display ceiling at the current Bg, in the active metric
-// (fraction_to_metric at full headroom f=1), so it can't silently clip to white. Client-side only —
-// mirrors the experiment-UI Correct button's ceiling. Weber:(1-bg)/bg, Michelson:(1-bg)/(1+bg), Normalized:1.
+// Clamp the test contrast to the highest contrast the light model can show at this azimuth and
+// background (drive 1.0 there), in the rig's metric.
 async function correctTestContrast() {
   const cEl = document.getElementById('test-stim-contrast');
   if (!cEl) return;
   const t = _testInputs();
-  const metric = (rig.devices.display && rig.devices.display.contrast_metric) || 'weber';
-  let ceil, how = metric;
-  if (t.cal !== 'none') {
-    const d = await _testPreview(t);          // measured ceiling at this az and bg
-    if (!d.ok) { log('Contrast cal: ' + (d.error || '?')); return; }
-    ceil = d.ceiling == null ? Infinity : d.ceiling;
-    how = metric + ', measured via ' + d.calibration;
-  } else if (metric === 'weber')   ceil = t.bg > 0 ? (1 - t.bg) / t.bg : Infinity;
-  else if (metric === 'michelson') ceil = (1 - t.bg) / (1 + t.bg);
-  else                             ceil = 1;   // normalized
+  const d = await _testPreview(t);
+  if (!d.ok) { log('Correct: ' + (d.error || '?')); return; }
+  const ceil = d.ceiling == null ? Infinity : d.ceiling;
   const corrected = Math.max(0, Math.min(t.contrast, ceil));
   cEl.value = parseFloat((corrected * 100).toFixed(2));
   updateTestPreview();
   log(`Contrast corrected: ${(t.contrast * 100).toFixed(2)} % → ${(corrected * 100).toFixed(2)} % `
-    + `(max ${isFinite(ceil) ? (ceil * 100).toFixed(1) + ' %' : '∞'} @ bg ${t.bg}, ${how})`);
+    + `(max ${isFinite(ceil) ? (ceil * 100).toFixed(1) + ' %' : '∞'} @ az ${t.az}°, bg ${t.bg}, ${d.metric}`
+    + (d.degenerate ? ', no background light → normalized' : '') + `, ${d.calibration})`);
 }
 
 async function checkWarp() {
@@ -897,54 +879,9 @@ async function loadGeoList() {
     const r = await fetch(SAPI + '/list_geometries');
     geoFiles = await r.json();
   } catch (e) { geoFiles = []; }
-  await loadLumCalList();
+  await loadIntensityCals();
 }
 
-// Saved intensity calibrations, newest first. The one flagged is_latest is what a warp rebuild
-// with --lum-mode empirical would actually pick up (compute_warp_map only ever reads the `latest`
-// symlink), so it is the effective selection, not just a recency marker.
-async function loadLumCalList() {
-  try {
-    const r = await fetch(SAPI + '/list_lum_cals');
-    const j = await r.json();
-    lumCalFiles = Array.isArray(j) ? j : [];
-  } catch (e) { lumCalFiles = []; }
-  try {
-    const j = await (await fetch(SAPI + '/list_contrast_cals')).json();
-    contrastCalFiles = Array.isArray(j) ? j : [];
-  } catch (e) { contrastCalFiles = []; }
-}
-async function refreshLumCalList() {
-  await loadLumCalList();
-  renderDeviceList();
-  log('Intensity cal list reloaded (' + lumCalFiles.length + ' files).');
-}
-// Re-apply a saved cal: repoint `latest` at it and rebuild the warp. No refit — the stored curve
-// is used verbatim, which is the point (it is how you get back to a measurement you trust).
-async function applySavedLumCal() {
-  if (uiBusy) return;
-  const sel = document.getElementById('lum-cal-select');
-  const name = sel && sel.value;
-  if (!name) { log('No saved intensity cal selected'); return; }
-  _lockUI();
-  try {
-    log('Applying saved intensity cal ' + name + '...');
-    const geo = document.getElementById('warp-geometry-select');
-    const r = await fetch(SAPI + '/lum_apply', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({mode: 'empirical', cal_file: name,
-                            geometry: geo ? geo.value : undefined})
-    }).then(x => x.json());
-    (r.steps || []).forEach(s => log('  ' + s));
-    if (r.ok) {
-      if (rig.devices.display) rig.devices.display.luminance_correction = 'empirical';
-      await loadLumCalList();
-      renderDeviceList();
-    }
-    log(r.ok ? ('Applied ' + name + '.') : ('Apply failed: ' + (r.error || '')));
-  } catch (e) { log('Apply error: ' + e); }
-  finally { _unlockUI(); }
-}
 
 async function loadGeometry(name) {
   try {
@@ -1055,375 +992,224 @@ function updateAzimuthHeight(h) {
   refreshDerivedAz();
 }
 
-// ── Intensity (luminance) calibration ──
-// The "Intensity" dropdown chooses what the Intensity Cal button does:
-//   auto/manual  = measure per-azimuth luminance with the PM100D (auto- vs manual-advance),
-//   theoretical  = apply the corrected theoretical model, none = no correction.
-// auto/manual both produce the stored mode 'empirical'; theoretical/none store themselves.
-// The stored mode lives in rig.devices.display.luminance_correction (persisted by Save Rig).
-let lumMethod = 'auto';   // UI-only: which measurement advance style auto/manual maps to
-let lumMeasure = null;    // active measurement session, or null
+// ── Intensity calibration (one file: light along azimuth + light vs drive at chosen azimuths) ──
+// The dropdown lists display_calibration/<rig>/intensity/intensity_cal_*.yaml: measured files, the
+// theoretical mock of the current geometry (straight response, geometry gain — the default) and
+// the none mock. Apply rebuilds + deploys the warp with that file's light model and records it in
+// the rig YAML (devices.display.intensity_calibration). Measure opens the panel below.
+//
+// The panel measures at ONE altitude:
+//   column 1   light at FULL drive at each azimuth row (add/remove rows; measure to the screen edge)
+//   columns 2+ light at each drive level (rows 1.0 .. 0.0) at the azimuth in the column header;
+//              add as many columns as you like, at the azimuths you choose
+// Every patch is drawn RAW (apply_lum false): the meter must see the panel's own response.
+const INT_LEVELS = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05, 0.0];
+const INT_AZ_DEFAULT = [0, 20, 40, 60, 80, 100, -20, -40, -60, -80, -100];
+const LUM_SETTLE_MS = 400;   // SHOW -> on glass ~62 ms + meter integration
+let intMeasure = null;
 
-function lumStoredMode() {
-  return (rig && rig.devices && rig.devices.display &&
-          rig.devices.display.luminance_correction) || 'theoretical';
+async function loadIntensityCals() {
+  try {
+    const geo = document.getElementById('warp-geometry-select');
+    const q = geo && geo.value ? ('?geometry=' + encodeURIComponent(geo.value)) : '';
+    const d = await (await fetch(SAPI + '/intensity_cals' + q)).json();
+    intCals = Array.isArray(d.files) ? d.files : [];
+    intActive = d.active || null;
+  } catch (e) { intCals = []; intActive = null; }
 }
-function lumSelectValue() {
-  const m = lumStoredMode();
-  return m === 'empirical' ? lumMethod : m;   // auto/manual | theoretical | none
+async function refreshIntensityCals() {
+  await loadIntensityCals();
+  renderDeviceList();
+  log('Intensity calibrations reloaded (' + intCals.length + ').');
 }
-function lumStatusText() {
-  const m = lumStoredMode();
-  if (m === 'none') return 'active: none';
-  if (m === 'theoretical') return 'active: theoretical';
-  return 'active: empirical';
+function _intLabel(c) {
+  const src = c.source === 'measured' ? '' : ` (${c.source})`;
+  const rng = (c.lo != null && c.hi != null) ? ` · ${_fmtLux(c.lo)}–${_fmtLux(c.hi)} ${c.unit || ''}` : '';
+  return c.name.replace('.yaml', '').replace('intensity_cal_', '') + src + (c.error ? ' — INVALID' : rng);
 }
-function onLumModeChange(val) {
-  if (uiBusy || !rig.devices.display) return;
-  if (val === 'auto' || val === 'manual') {
-    lumMethod = val;
-    rig.devices.display.luminance_correction = 'empirical';
-  } else {
-    rig.devices.display.luminance_correction = val;   // theoretical | none
-    closeLumPanel();
-  }
-  const s = document.getElementById('lum-status');
-  if (s) s.textContent = lumStatusText();
-}
-
-// Button: auto/manual open the measurement panel; theoretical/none apply + redeploy directly.
-async function applyIntensity() {
+async function applyIntensityCal(name) {
   if (uiBusy) return;
-  const pi = getPiForDevice('display');
-  if (!pi) { log('Display not assigned to a Pi'); return; }
-  const sel = lumSelectValue();
-  if (sel === 'auto' || sel === 'manual') { openLumPanel(sel); return; }
-  if (sel === 'none' &&
-      !confirm('Disable luminance correction (none) and redeploy the warp?')) return;
+  const sel = document.getElementById('int-cal-select');
+  name = name || (sel && sel.value);
+  if (!name) { log('No intensity calibration selected'); return; }
   _lockUI();
   try {
-    log('Applying luminance correction: ' + sel + '...');
+    log('Applying intensity calibration ' + name + ' (rebuild + deploy warp)...');
     const geo = document.getElementById('warp-geometry-select');
-    const r = await fetch(SAPI + '/lum_apply', {
+    const r = await fetch(SAPI + '/intensity_apply', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({mode: sel, geometry: geo ? geo.value : undefined})
-    }).then(x => x.json());
-    (r.steps || []).forEach(s => log('  ' + s));
-    log(r.ok ? ('Applied ' + sel + ' correction.')
-             : ('Intensity apply failed: ' + (r.error || '')));
-  } catch (e) { log('Intensity apply error: ' + e); }
-  finally { _unlockUI(); }
-}
-
-// Azimuth MAGNITUDES; the side is chosen with the panel's checkbox. The fit folds to |az| (the
-// correction is 1D and symmetric about centre), so measuring the second side is not extra
-// resolution — it is a TEST of that symmetry, which nothing in the geometry can verify:
-// lateral_offset_cm=0 makes the MODEL symmetric, but projector yaw is not a parameter at all, and
-// DLP illumination asymmetry (TIR prism / LED placement) and screen mounting are outside it.
-// Readings are keyed by SIGNED azimuth, so flipping the checkbox keeps what you already measured
-// and Fit & Apply submits both sides at once — that is what lets the fit report the L/R spread.
-const LUM_AZ_MAGNITUDES = [0, 20, 40, 60, 80, 100];
-// The meter needs the new patch to actually be on the screen before it integrates. SHOW->flip
-// measured at ~62 ms; a PM100D integrates over ~100-300 ms on top of that.
-const LUM_SETTLE_MS = 400;
-
-function lumAzList(sign) {
-  return LUM_AZ_MAGNITUDES.map(a => (a === 0 ? 0 : a * sign));   // avoid -0 as an object key
-}
-function openLumPanel(method) {
-  const p = document.getElementById('lum-panel');
-  if (!p) return;
-  // Inherit the patch geometry from the Display card's stimulus test so the meter sees the same
-  // shape the experiment will. Contrast/bg/apply_lum deliberately do NOT inherit — the fit needs
-  // max drive on black with the correction OFF, or it would measure the curve it is deriving.
-  const altEl = document.getElementById('test-stim-alt');
-  const sizeEl = document.getElementById('test-stim-size');
-  const alt = altEl ? (parseFloat(altEl.value) || 0) : 0;
-  const size = sizeEl ? (parseFloat(sizeEl.value) || 15) : 15;
-  lumMeasure = {method, sign: 1, azs: lumAzList(1), idx: 0, size, alt, readings: {}};
-  renderLumPanel();
-  showLumPatch();   // light the first patch so the operator sees where to aim
-}
-// Flip which side of centre is being measured. Readings already taken are kept (they are keyed by
-// signed azimuth), so measure one side, flip, measure the other, and Fit & Apply sees both.
-async function lumSetSign(negative) {
-  if (!lumMeasure) return;
-  lumMeasure.sign = negative ? -1 : 1;
-  lumMeasure.azs = lumAzList(lumMeasure.sign);
-  lumMeasure.idx = Math.min(lumMeasure.idx, lumMeasure.azs.length - 1);
-  renderLumPanel();
-  await showLumPatch();
-}
-function closeLumPanel() {
-  lumMeasure = null;
-  const p = document.getElementById('lum-panel');
-  if (p) { p.style.display = 'none'; p.innerHTML = ''; }
-}
-function renderLumPanel() {
-  const p = document.getElementById('lum-panel');
-  if (!p || !lumMeasure) return;
-  const m = lumMeasure;
-  const totalDone = Object.keys(m.readings).length;
-  const sideDone = m.azs.filter(az => az in m.readings).length;
-  const otherDone = totalDone - sideDone;
-  const rows = m.azs.map((az, i) => {
-    const val = (az in m.readings) ? m.readings[az] : '';
-    const hl = (i === m.idx) ? ' style="background:#2d2d2d"' : '';
-    const showBtn = (m.method === 'manual')
-      ? `<button class="btn btn-blue btn-sm" onclick="lumShow(${i})">Show</button>` : '';
-    const mark = (i === m.idx) ? '◀' : ((az in m.readings) ? '✓' : '');
-    return `<tr${hl}>
-      <td style="padding:2px 8px">${az}°</td>
-      <td>${showBtn}</td>
-      <td><button class="btn btn-gray btn-sm" onclick="lumRead(${i})">Read</button></td>
-      <td><input type="number" step="any" style="width:96px" value="${val}"
-                 oninput="lumSetReading(${i}, this.value)"></td>
-      <td style="color:#6f6; width:14px">${mark}</td></tr>`;
-  }).join('');
-  p.style.display = 'block';
-  p.innerHTML = `
-    <div style="font-size:11px; color:#bbb; margin-bottom:4px">
-      Measuring (${m.method}) — aim the PM100D at each white patch, Read (or type), then Fit &amp; Apply.
-      Patch size <input type="number" value="${m.size}" min="1" step="1" style="width:52px"
-        onchange="lumMeasure.size=parseFloat(this.value)||15; showLumPatch()">°
-      &nbsp; Altitude <input type="number" value="${m.alt}" step="any" style="width:52px"
-        onchange="lumMeasure.alt=parseFloat(this.value)||0; showLumPatch()">°
-      <label style="margin-left:10px; cursor:pointer">
-        <input type="checkbox" ${m.sign < 0 ? 'checked' : ''}
-               onchange="lumSetSign(this.checked)"> negative azimuth
-      </label>
-    </div>
-    <table style="font-size:12px; border-collapse:collapse">${rows}</table>
-    <div style="margin-top:6px; display:flex; align-items:center; gap:8px">
-      <button class="btn btn-green btn-sm" onclick="lumFitApply()">Fit &amp; Apply</button>
-      <button class="btn btn-gray btn-sm" onclick="closeLumPanel()">Cancel</button>
-      <span style="font-size:10px; color:#888">${sideDone}/${m.azs.length} this side${
-        otherDone ? ` · ${totalDone} total (both sides → L/R symmetry check)` : ''}</span>
-    </div>`;
-}
-async function showLumPatch() {
-  if (!lumMeasure) return;
-  const pi = getPiForDevice('display');
-  if (!pi) { log('Display not assigned to a Pi'); return; }
-  const az = lumMeasure.azs[lumMeasure.idx];
-  // White square (contrast 1 on a black bg, normalized) = max drive. apply_lum:false renders RAW
-  // drive (no luminance correction) so the meter reads the true delivered luminance the fit needs.
-  await retryProxy(pi.ip, '/api/test_stimulus', {
-    shape: 'square', az_deg: az, alt_deg: lumMeasure.alt, size_deg: lumMeasure.size,
-    contrast: 1, bg_gray: 0, contrast_metric: 'normalized', apply_lum: false,
-  });
-}
-async function lumShow(i) {
-  if (!lumMeasure) return;
-  lumMeasure.idx = i;
-  renderLumPanel();
-  await showLumPatch();
-}
-function lumSetReading(i, val) {
-  if (!lumMeasure) return;
-  const az = lumMeasure.azs[i];
-  if (val === '' || val == null) delete lumMeasure.readings[az];
-  else lumMeasure.readings[az] = parseFloat(val);
-}
-async function lumRead(i) {
-  if (!lumMeasure) return;
-  // The Read button exists on EVERY row, but the projector only ever shows lumMeasure.idx. Reading
-  // a row that is not the one on screen would file the displayed patch's luminance under a
-  // different azimuth — silently, and the fit would have no way to know. Show it first, and give
-  // the patch time to reach the glass before the meter integrates.
-  if (i !== lumMeasure.idx) {
-    lumMeasure.idx = i;
-    renderLumPanel();
-    await showLumPatch();
-    await new Promise(res => setTimeout(res, LUM_SETTLE_MS));
-  }
-  const r = await fetch(SAPI + '/lum_read', {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
-  }).then(x => x.json()).catch(e => ({ok: false, error: String(e)}));
-  if (!r.ok) { log('Meter read failed (' + (r.error || '') + ') — type the value manually'); return; }
-  lumSetReading(i, r.value);
-  log('az ' + lumMeasure.azs[i] + '°: ' + (+r.value).toPrecision(4));
-  if (lumMeasure.method === 'auto') await lumAdvance();
-  else renderLumPanel();
-}
-async function lumAdvance() {
-  if (!lumMeasure) return;
-  const m = lumMeasure;
-  let next = -1;
-  for (let k = 1; k <= m.azs.length; k++) {
-    const j = (m.idx + k) % m.azs.length;
-    if (!(m.azs[j] in m.readings)) { next = j; break; }
-  }
-  if (next === -1) {
-    const other = Object.keys(m.readings).some(az => (parseFloat(az) || 0) * m.sign < 0);
-    log(other
-      ? 'Both sides measured — click Fit & Apply (the fit will report L/R symmetry).'
-      : 'This side measured — Fit & Apply now, or tick "negative azimuth" to check the other side.');
-    renderLumPanel();
-    return;
-  }
-  m.idx = next;
-  renderLumPanel();
-  await showLumPatch();
-}
-async function lumFitApply() {
-  if (!lumMeasure) return;
-  const measurements = Object.keys(lumMeasure.readings).map(az => ({
-    az_deg: parseFloat(az), alt_deg: lumMeasure.alt, reading: lumMeasure.readings[az],
-  }));
-  if (measurements.length < 2) { log('Need at least 2 readings to fit.'); return; }
-  _lockUI();
-  try {
-    log('Fitting ' + measurements.length + ' readings and deploying...');
-    const geo = document.getElementById('warp-geometry-select');
-    const r = await fetch(SAPI + '/lum_apply', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({mode: 'empirical', measurements,
-                            // Conditions the readings were taken under, for the raw record.
-                            patch: {size_deg: lumMeasure.size, alt_deg: lumMeasure.alt},
-                            method: lumMeasure.method,
-                            geometry: geo ? geo.value : undefined})
+      body: JSON.stringify({name, geometry: geo ? geo.value : undefined})
     }).then(x => x.json());
     (r.steps || []).forEach(s => log('  ' + s));
     if (r.ok) {
-      if (rig.devices.display) rig.devices.display.luminance_correction = 'empirical';
+      if (rig.devices.display) {
+        rig.devices.display.intensity_calibration = r.active;
+        delete rig.devices.display.luminance_correction;
+        delete rig.devices.display.contrast_calibration;
+      }
       warpExists = true;
-      log('Empirical luminance correction applied.');
-      closeLumPanel();
-    } else {
-      log('Fit & apply failed: ' + (r.error || ''));
+      try { if (window.parent !== window) window.parent.postMessage({type: 'vrfarm:rig-saved', rig: RIG}, '*'); } catch (e) {}
+      await loadIntensityCals();
+      renderDeviceList();
+      updateTestPreview();
     }
-  } catch (e) { log('Fit & apply error: ' + e); }
+    log(r.ok ? ('Applied ' + name + ' — reinitialize the display if it was not live.') : ('Apply failed: ' + (r.error || '')));
+  } catch (e) { log('Apply error: ' + e); }
   finally { _unlockUI(); }
 }
 
-// ── Contrast calibration: light vs drive level at ONE spot ──
-// Where the along-azimuth cal equalizes brightness across the screen, this measures how the light
-// at one az/alt depends on the drive (1.0 .. 0.0) — including the black floor at 0.0 — so the
-// Experiment tab can express contrast as the MEASURED luminance contrast. The patch is raw
-// (luminance correction off) on a black field; level 0.0 is a black patch, i.e. the floor.
-const CC_LEVELS = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05, 0.0];
-let ccMeasure = null;
-
-// Pick the rig's contrast cal (or none); persisted by Save Rig, which reloads the Experiment tab.
-function selectContrastCal(name) {
-  if (!rig || !rig.devices || !rig.devices.display) return;
-  rig.devices.display.contrast_calibration = name || 'none';
-  updateTestPreview();
-  log('Contrast cal for ' + rig.name + ': ' + (name && name !== 'none' ? name : 'none (drive ratio)')
-      + ' — Save Rig to apply.');
-}
-
-function openContrastPanel() {
+function openIntensityPanel() {
   if (uiBusy) return;
   if (!getPiForDevice('display')) { log('Display not assigned to a Pi'); return; }
+  if (intMeasure) { renderIntPanel(); return; }
   const altEl = document.getElementById('test-stim-alt');
-  ccMeasure = {az: 0, alt: altEl ? (parseFloat(altEl.value) || 0) : 0, size: 15,
-               levels: CC_LEVELS.slice(), idx: 0, readings: {}};
-  renderContrastPanel();
-  showContrastPatch();
+  intMeasure = {
+    alt: altEl ? (parseFloat(altEl.value) || 0) : 0, size: 15, unit: 'lux',
+    azRows: INT_AZ_DEFAULT.map(a => ({az: a, reading: null})),
+    levels: INT_LEVELS.slice(),
+    cols: [{az: 0, readings: {}}],
+    active: {col: 0, row: 0},              // col 0 = column 1 (azimuth); col k>0 = level column k-1
+  };
+  renderIntPanel();
+  showIntPatch();
 }
-function closeContrastPanel() {
-  ccMeasure = null;
-  const p = document.getElementById('contrast-panel');
+function closeIntensityPanel() {
+  intMeasure = null;
+  const p = document.getElementById('int-panel');
   if (p) { p.style.display = 'none'; p.innerHTML = ''; }
 }
-function renderContrastPanel() {
-  const p = document.getElementById('contrast-panel');
-  if (!p || !ccMeasure) return;
-  const m = ccMeasure;
-  const rows = m.levels.map((lv, i) => {
-    const val = (lv in m.readings) ? m.readings[lv] : '';
-    const hl = (i === m.idx) ? ' style="background:#2d2d2d"' : '';
-    const mark = (i === m.idx) ? '◀' : ((lv in m.readings) ? '✓' : '');
-    return `<tr${hl}>
-      <td style="padding:2px 8px">${lv.toFixed(2)}${lv === 0 ? ' (floor)' : ''}</td>
-      <td><button class="btn btn-blue btn-sm" onclick="ccShow(${i})">Show</button></td>
-      <td><button class="btn btn-gray btn-sm" onclick="ccRead(${i})">Read</button></td>
-      <td><input type="number" step="any" style="width:96px" value="${val}"
-                 oninput="ccSetReading(${i}, this.value)"></td>
-      <td style="color:#6f6; width:14px">${mark}</td></tr>`;
-  }).join('');
-  const done = Object.keys(m.readings).length;
-  const hi = m.readings[1], lo = m.readings[0];
-  const ratio = (hi != null && lo != null && lo > 0) ? ` · 1.0/0.0 = ${(hi / lo).toFixed(1)}:1` : '';
+function _intCell(col, row) {
+  const m = intMeasure;
+  if (col === 0) return m.azRows[row] ? m.azRows[row].reading : null;
+  const c = m.cols[col - 1];
+  return c ? c.readings[m.levels[row]] : null;
+}
+function _intSet(col, row, val) {
+  const m = intMeasure;
+  const v = (val === '' || val == null || !isFinite(parseFloat(val))) ? null : parseFloat(val);
+  if (col === 0) { if (m.azRows[row]) m.azRows[row].reading = v; }
+  else {
+    const c = m.cols[col - 1]; if (!c) return;
+    if (v == null) delete c.readings[m.levels[row]]; else c.readings[m.levels[row]] = v;
+  }
+}
+function _intTarget(col, row) {
+  // What the projector shows for a cell: column 1 = drive 1.0 at the row's azimuth; level column
+  // = the row's drive level at the column's azimuth.
+  const m = intMeasure;
+  return col === 0 ? {az: m.azRows[row].az, level: 1.0} : {az: m.cols[col - 1].az, level: m.levels[row]};
+}
+function renderIntPanel() {
+  const p = document.getElementById('int-panel');
+  if (!p || !intMeasure) return;
+  const m = intMeasure, a = m.active;
+  const btns = (col, row) =>
+    `<button class="btn btn-blue btn-sm" style="padding:0 4px" onclick="intShow(${col},${row})" title="Show this patch">▶</button>` +
+    `<button class="btn btn-gray btn-sm" style="padding:0 4px" onclick="intRead(${col},${row})" title="Read the PM100D">R</button>`;
+  const cell = (col, row) => {
+    const v = _intCell(col, row);
+    const on = (a.col === col && a.row === row);
+    return `<td style="padding:1px 3px; ${on ? 'background:#2d3d2d' : ''}">
+      <input type="number" step="any" style="width:70px" value="${v == null ? '' : v}" oninput="_intSet(${col},${row},this.value)">${btns(col, row)}</td>`;
+  };
+  const azRows = m.azRows.map((r, i) => `<tr>
+      <td style="padding:1px 3px"><input type="number" step="1" style="width:52px" value="${r.az}" onchange="intMeasure.azRows[${i}].az=parseFloat(this.value)||0; if(intMeasure.active.col===0&&intMeasure.active.row===${i}) showIntPatch()">°
+        <button class="btn btn-gray btn-sm" style="padding:0 4px" onclick="intMeasure.azRows.splice(${i},1); intMeasure.active={col:0,row:0}; renderIntPanel()" title="Remove this azimuth">×</button></td>
+      ${cell(0, i)}</tr>`).join('');
+  const colHead = m.cols.map((c, k) => `<th style="padding:1px 3px; font-weight:normal">az
+      <input type="number" step="1" style="width:48px" value="${c.az}" onchange="intMeasure.cols[${k}].az=parseFloat(this.value)||0; if(intMeasure.active.col===${k + 1}) showIntPatch()">°
+      <button class="btn btn-gray btn-sm" style="padding:0 4px" onclick="intMeasure.cols.splice(${k},1); intMeasure.active={col:0,row:0}; renderIntPanel()" title="Remove this column">×</button></th>`).join('');
+  const lvRows = m.levels.map((lv, i) => `<tr><td style="padding:1px 6px">${lv.toFixed(2)}${lv === 0 ? ' floor' : ''}</td>${
+      m.cols.map((c, k) => cell(k + 1, i)).join('')}</tr>`).join('');
+  const t = _intTarget(a.col, a.row);
   p.style.display = 'block';
   p.innerHTML = `
     <div style="font-size:11px; color:#bbb; margin-bottom:4px">
-      Contrast cal — aim the meter at the patch, Read (or type) each level from 1.0 down to the black floor, then Save.
-      Az <input type="number" value="${m.az}" step="any" style="width:52px"
-        onchange="ccMeasure.az=parseFloat(this.value)||0; showContrastPatch()">°
-      &nbsp; Alt <input type="number" value="${m.alt}" step="any" style="width:52px"
-        onchange="ccMeasure.alt=parseFloat(this.value)||0; showContrastPatch()">°
-      &nbsp; Size <input type="number" value="${m.size}" min="1" step="1" style="width:52px"
-        onchange="ccMeasure.size=parseFloat(this.value)||15; showContrastPatch()">°
+      Aim the meter at the patch, press R (PM100D) or type the value. Showing: drive ${t.level.toFixed(2)} at az ${t.az}°.
+      &nbsp; Alt <input type="number" value="${m.alt}" step="any" style="width:52px" onchange="intMeasure.alt=parseFloat(this.value)||0; showIntPatch()">° (whole calibration)
+      &nbsp; Size <input type="number" value="${m.size}" min="1" step="1" style="width:48px" onchange="intMeasure.size=parseFloat(this.value)||15; showIntPatch()">°
+      &nbsp; Unit <input type="text" value="${m.unit}" style="width:52px" onchange="intMeasure.unit=this.value||'lux'">
     </div>
-    <table style="font-size:12px; border-collapse:collapse">${rows}</table>
+    <div style="display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap">
+      <div><div style="font-size:11px; color:#9ab">Column 1 — full drive along azimuth</div>
+        <table style="font-size:12px; border-collapse:collapse">${azRows}</table>
+        <button class="btn btn-gray btn-sm" style="margin-top:3px" onclick="intMeasure.azRows.push({az:0,reading:null}); renderIntPanel()">+ azimuth</button></div>
+      <div><div style="font-size:11px; color:#9ab">Level columns — drive 1.0 → 0.0 at the azimuth in each header</div>
+        <table style="font-size:12px; border-collapse:collapse"><tr><th style="font-weight:normal; padding:1px 6px">drive</th>${colHead}</tr>${lvRows}</table>
+        <button class="btn btn-gray btn-sm" style="margin-top:3px" onclick="intMeasure.cols.push({az: (intMeasure.cols.length ? intMeasure.cols[intMeasure.cols.length-1].az + 30 : 0), readings:{}}); renderIntPanel()">+ column</button></div>
+    </div>
     <div style="margin-top:6px; display:flex; align-items:center; gap:8px">
-      <button class="btn btn-green btn-sm" onclick="ccSave()">Save</button>
-      <button class="btn btn-gray btn-sm" onclick="closeContrastPanel()">Cancel</button>
-      <span style="font-size:10px; color:#888">${done}/${m.levels.length} read${ratio}</span>
+      <button class="btn btn-green btn-sm" onclick="intSave(false)">Save</button>
+      <button class="btn btn-blue btn-sm" onclick="intSave(true)">Save &amp; Apply</button>
+      <button class="btn btn-gray btn-sm" onclick="closeIntensityPanel()">Close</button>
+      <span style="font-size:10px; color:#888">${m.azRows.filter(r => r.reading != null).length}/${m.azRows.length} azimuths ·
+        ${m.cols.map(c => Object.keys(c.readings).length + '/' + m.levels.length + ' @ ' + c.az + '°').join(', ') || 'no level column'}</span>
     </div>`;
 }
-async function showContrastPatch() {
-  if (!ccMeasure) return;
+async function showIntPatch() {
+  if (!intMeasure) return;
   const pi = getPiForDevice('display');
   if (!pi) return;
-  const lv = ccMeasure.levels[ccMeasure.idx];
-  // Raw drive `lv` on black: normalized contrast on bg 0 is the drive itself; apply_lum:false so
-  // the meter sees the panel's own response, not the per-azimuth correction.
+  const t = _intTarget(intMeasure.active.col, intMeasure.active.row);
+  // RAW drive on black: contrast = the drive level itself, no light model (apply_lum false).
   await retryProxy(pi.ip, '/api/test_stimulus', {
-    shape: 'square', az_deg: ccMeasure.az, alt_deg: ccMeasure.alt, size_deg: ccMeasure.size,
-    contrast: lv, bg_gray: 0, contrast_metric: 'normalized', apply_lum: false,
+    shape: 'square', az_deg: t.az, alt_deg: intMeasure.alt, size_deg: intMeasure.size,
+    contrast: t.level, bg_gray: 0, contrast_metric: 'normalized', apply_lum: false,
   });
 }
-async function ccShow(i) {
-  if (!ccMeasure) return;
-  ccMeasure.idx = i;
-  renderContrastPanel();
-  await showContrastPatch();
+async function intShow(col, row) {
+  if (!intMeasure) return;
+  intMeasure.active = {col, row};
+  renderIntPanel();
+  await showIntPatch();
 }
-function ccSetReading(i, val) {
-  if (!ccMeasure) return;
-  const lv = ccMeasure.levels[i];
-  if (val === '' || val == null) delete ccMeasure.readings[lv];
-  else ccMeasure.readings[lv] = parseFloat(val);
+function _intNext(col, row) {
+  const m = intMeasure, n = col === 0 ? m.azRows.length : m.levels.length;
+  for (let k = 1; k <= n; k++) {
+    const r = (row + k) % n;
+    if (_intCell(col, r) == null) return r;
+  }
+  return -1;
 }
-async function ccRead(i) {
-  if (!ccMeasure) return;
-  if (i !== ccMeasure.idx) {          // read what is ON SCREEN, never a different row's level
-    ccMeasure.idx = i;
-    renderContrastPanel();
-    await showContrastPatch();
+async function intRead(col, row) {
+  if (!intMeasure) return;
+  const a = intMeasure.active;
+  if (a.col !== col || a.row !== row) {            // read what is ON SCREEN, never another cell
+    intMeasure.active = {col, row};
+    renderIntPanel();
+    await showIntPatch();
     await new Promise(res => setTimeout(res, LUM_SETTLE_MS));
   }
-  const r = await fetch(SAPI + '/lum_read', {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
-  }).then(x => x.json()).catch(e => ({ok: false, error: String(e)}));
-  if (!r.ok) { log('Meter read failed (' + (r.error || '') + ') — type the value manually'); return; }
-  ccSetReading(i, r.value);
-  log('level ' + ccMeasure.levels[i] + ': ' + (+r.value).toPrecision(4));
-  const next = ccMeasure.levels.findIndex(lv => !(lv in ccMeasure.readings));
-  if (next >= 0) { ccMeasure.idx = next; renderContrastPanel(); await showContrastPatch(); }
-  else { renderContrastPanel(); log('All levels read — Save to write the contrast cal.'); }
+  const r = await fetch(SAPI + '/lum_read', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'})
+    .then(x => x.json()).catch(e => ({ok: false, error: String(e)}));
+  if (!r.ok) { log('Meter read failed (' + (r.error || '') + ') — type the value instead'); return; }
+  _intSet(col, row, r.value);
+  const t = _intTarget(col, row);
+  log(`az ${t.az}° drive ${t.level}: ${(+r.value).toPrecision(4)}`);
+  const next = _intNext(col, row);
+  if (next >= 0) { intMeasure.active = {col, row: next}; renderIntPanel(); await showIntPatch(); }
+  else { renderIntPanel(); log('This column is complete.'); }
 }
-async function ccSave() {
-  if (!ccMeasure) return;
-  const measurements = Object.keys(ccMeasure.readings).map(lv => ({
-    level: parseFloat(lv), reading: ccMeasure.readings[lv]}));
-  if (!(1 in ccMeasure.readings) || !(0 in ccMeasure.readings)) {
-    log('Contrast cal needs at least the 1.0 and the 0.0 (floor) readings.'); return;
-  }
-  const r = await fetch(SAPI + '/save_contrast_cal', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({measurements, method: 'manual',
-                          patch: {az_deg: ccMeasure.az, alt_deg: ccMeasure.alt, size_deg: ccMeasure.size}})
-  }).then(x => x.json()).catch(e => ({ok: false, error: String(e)}));
-  if (!r.ok) { log('Contrast cal save failed: ' + (r.error || '')); return; }
-  log('Saved ' + r.name + (isFinite(r.ratio) ? ' (1.0/0.0 = ' + (+r.ratio).toFixed(1) + ':1)' : ''));
-  closeContrastPanel();
-  await loadLumCalList();
+async function intSave(apply) {
+  if (!intMeasure) return;
+  const m = intMeasure;
+  const body = {
+    alt_deg: m.alt, size_deg: m.size, unit: m.unit, method: 'manual',
+    azimuth_sweep: m.azRows.filter(r => r.reading != null).map(r => ({az_deg: r.az, reading: r.reading})),
+    level_sweeps: m.cols.map(c => ({az_deg: c.az, measurements:
+      Object.keys(c.readings).map(lv => ({level: parseFloat(lv), reading: c.readings[lv]}))})),
+  };
+  const r = await fetch(SAPI + '/save_intensity_cal', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)}).then(x => x.json()).catch(e => ({ok: false, error: String(e)}));
+  if (!r.ok) { log('Not saved: ' + (r.error || '?')); return; }
+  const rep = r.report || {};
+  log(`Saved ${r.name}: uniform range ${_fmtLux(rep.lo)}–${_fmtLux(rep.hi)} ${rep.unit || ''}, columns at `
+      + `${(rep.columns || []).join(', ')}°, calibrated to ±${rep.az_cal}°`
+      + (rep.shape_spread != null ? `, column shapes differ by ${(rep.shape_spread * 100).toFixed(1)} %` : '')
+      + (rep.asymmetry_max != null ? `, L/R asymmetry ${(rep.asymmetry_max * 100).toFixed(1)} %` : ''));
+  await loadIntensityCals();
   renderDeviceList();
+  if (apply) await applyIntensityCal(r.name);
 }
 
 // The Calibrate control is a single toggle: green "Calibrate" starts, red "Stop Calib"
@@ -2256,8 +2042,7 @@ function renderDeviceList() {
     </div>`).join('');
 
   el.innerHTML = `<div class="device-tabs">${tabs}</div><div class="device-panels">${panels}</div>`;
-  if (lumMeasure) renderLumPanel();   // re-hydrate an open intensity-cal panel after a re-render
-  if (ccMeasure) renderContrastPanel();
+  if (intMeasure) renderIntPanel();   // re-hydrate an open intensity-cal panel after a re-render
   updateTestPreview();
   // A re-render replaces every button element, and fresh elements are enabled by default — so a
   // re-render DURING a locked operation silently unlocked the UI. renderAll() already guarded
@@ -2532,19 +2317,11 @@ function renderDisplayControls(dev) {
     `<option value="${f}" ${f === geoCurrentName ? 'selected' : ''}>${f.replace('.yaml','')}</option>`
   ).join('');
 
-  // Saved intensity cals, newest first; the in-use one is preselected and marked.
-  const lumCalOptions = lumCalFiles.map(c =>
-    `<option value="${c.name}" ${c.is_latest ? 'selected' : ''}>${
-      c.name.replace('.yaml','')}${c.is_latest ? ' ●' : ''}</option>`
-  ).join('');
-  // Contrast cal in use by this rig (devices.display.contrast_calibration), persisted by Save Rig.
-  const ccActive = (rig.devices.display && rig.devices.display.contrast_calibration) || 'none';
-  const ccOpts = ['<option value="none">none (drive ratio)</option>'].concat(contrastCalFiles.map(c =>
-    `<option value="${c.name}" ${c.name === ccActive ? 'selected' : ''}>${c.name.replace('.yaml','')}` +
-    (c.az_deg != null ? ` @ az ${c.az_deg}°` : '') +
-    (c.ratio != null && isFinite(c.ratio) ? ` · ${(+c.ratio).toFixed(0)}:1` : '') + '</option>'));
-  if (ccActive !== 'none' && !contrastCalFiles.some(c => c.name === ccActive))
-    ccOpts.push(`<option value="${ccActive}" selected>${ccActive} (MISSING)</option>`);
+  // Intensity calibrations: measured first, then the theoretical / none mocks; ● = in use.
+  const intOptions = intCals.map(c =>
+    `<option value="${c.name}" ${c.name === intActive ? 'selected' : ''} ${c.error ? 'disabled' : ''}>${
+      _intLabel(c)}${c.name === intActive ? ' ●' : ''}</option>`).join('');
+  const intCur = intCals.find(c => c.name === intActive);
 
   // Geometry param fields (only shown when loaded)
   let geoFields = '';
@@ -2642,7 +2419,7 @@ function renderDisplayControls(dev) {
         <button class="btn btn-blue btn-sm" onclick="testCheckers()">Test Checkers</button>
         <button class="btn btn-gray btn-sm" onclick="blankDisplay()">Blank</button>
         <div class="device-field">
-          <label>Bg</label>
+          <label title="Background BRIGHTNESS, 0..1 of the intensity calibration's uniform range">Bg</label>
           <input type="number" id="blank-gray-value" value="0.0" min="0" max="1" step="0.01" style="width:60px" oninput="updateTestPreview()">
           <span id="test-bg-lux" style="font-size:10px; color:#9ab" title="Background light at the contrast calibration's spot, from its meter readings"></span>
         </div>
@@ -2662,8 +2439,8 @@ function renderDisplayControls(dev) {
           <input type="number" id="test-stim-size" value="8" step="1" min="1" style="width:56px"></div>
         <div class="device-field"><label>Contrast %</label>
           <input type="number" id="test-stim-contrast" value="50" min="0" step="1" style="width:64px" oninput="updateTestPreview()"></div>
-        <button class="btn btn-gray btn-sm" onclick="correctTestContrast()" title="Clamp the contrast to the highest value showable at the current Bg in the active metric (measured, with a contrast cal)">Correct</button>
-        <span id="test-stim-preview" style="font-size:10px; color:#9ab" title="Stimulus intensity: the 0..1 drive the renderer is given (before its per-azimuth luminance factor), and with a contrast cal the light at this azimuth"></span>
+        <button class="btn btn-gray btn-sm" onclick="correctTestContrast()" title="Clamp the contrast to the highest the light model can show at this azimuth and Bg">Correct</button>
+        <span id="test-stim-preview" style="font-size:10px; color:#9ab" title="Stimulus light (calibration units, uniform across the screen) and the drive it takes at this azimuth"></span>
       </div>
     </div>
 
@@ -2671,46 +2448,20 @@ function renderDisplayControls(dev) {
       <span class="disp-label">INTENSITY</span>
       <div class="device-controls">
         <div class="device-field">
-          <label>Intensity</label>
-          <select id="lum-mode-select" onchange="onLumModeChange(this.value)" style="width:auto">
-            <option value="auto" ${lumSelectValue()==='auto'?'selected':''}>auto (measure)</option>
-            <option value="manual" ${lumSelectValue()==='manual'?'selected':''}>manual (measure)</option>
-            <option value="theoretical" ${lumSelectValue()==='theoretical'?'selected':''}>theoretical</option>
-            <option value="none" ${lumSelectValue()==='none'?'selected':''}>none</option>
+          <label>Calibration</label>
+          <select id="int-cal-select" style="min-width:260px; max-width:380px"
+                  title="Intensity calibrations of this rig. ● = the one the warp is built with. theoretical/none are mocks (drive 0 = 0, drive 1 = 1).">
+            ${intOptions || '<option value="">(none)</option>'}
           </select>
         </div>
-        <button class="btn btn-orange btn-sm" onclick="applyIntensity()">Intensity Cal</button>
-        <span id="lum-status" style="font-size:10px; color:#888">${lumStatusText()}</span>
+        <button class="btn btn-gray btn-sm" onclick="refreshIntensityCals()" title="Reload the list">&#8635;</button>
+        <button class="btn btn-blue btn-sm" onclick="applyIntensityCal()" title="Rebuild + deploy the warp with this calibration's light model and make it the rig's">Apply</button>
+        <button class="btn btn-orange btn-sm" onclick="openIntensityPanel()" title="Measure light along azimuth and light vs drive at chosen azimuths, at one altitude">Measure…</button>
       </div>
-      <div class="device-controls" style="margin-top:6px">
-        <div class="device-field">
-          <label>Saved</label>
-          <select id="lum-cal-select" style="min-width:240px; max-width:320px">
-            ${lumCalOptions || '<option value="">(none saved)</option>'}
-          </select>
-        </div>
-        <button class="btn btn-gray btn-sm" onclick="refreshLumCalList()" title="Reload the saved intensity-cal list">&#8635;</button>
-        <button class="btn btn-blue btn-sm" onclick="applySavedLumCal()"
-                title="Re-apply this saved measurement (no refit) and rebuild the warp"
-                ${lumCalFiles.length ? '' : 'disabled'}>Apply saved</button>
-        ${lumCalFiles.length
-          ? `<span style="font-size:10px; color:#888">${lumCalFiles.length} saved · ● = in use by warp rebuild</span>`
-          : '<span style="font-size:10px; color:#888">no measurements saved yet</span>'}
-      </div>
-      <div id="lum-panel" style="display:none; margin-top:8px"></div>
-      <div class="device-controls" style="margin-top:6px">
-        <button class="btn btn-orange btn-sm" onclick="openContrastPanel()"
-                title="Measure the light at ONE spot for drive levels 1.0 → 0.0 (incl. the black floor). Saved as intensity/contrast_cal_<time>.yaml; the Experiment tab can then express contrast as MEASURED luminance contrast.">Contrast Cal</button>
-        <div class="device-field">
-          <label>Use</label>
-          <select id="contrast-cal-select" onchange="selectContrastCal(this.value)" style="min-width:220px; max-width:320px"
-                  title="Contrast calibration for this rig. With a file, Experiment contrast values are MEASURED luminance contrast (incl. the black floor); none = drive ratio. Saved with Save Rig.">
-            ${ccOpts.join('')}
-          </select>
-        </div>
-        <span style="font-size:10px; color:#888">Save Rig to apply</span>
-      </div>
-      <div id="contrast-panel" style="display:none; margin-top:8px"></div>
+      <div style="font-size:10px; color:#888; margin-top:3px">${intCur
+        ? `in use: ${intCur.name} · uniform range ${_fmtLux(intCur.lo)}–${_fmtLux(intCur.hi)} ${intCur.unit || ''} · level columns at ${(intCur.columns || []).join(', ')}° · Bg / brightness 0–1 spans this range`
+        : 'no calibration applied yet — Apply one (theoretical = the geometry model)'}</div>
+      <div id="int-panel" style="display:none; margin-top:8px"></div>
     </div>
 
     <div class="disp-section">

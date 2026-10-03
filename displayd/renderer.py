@@ -495,7 +495,7 @@ class Renderer:
             az = float(self.stims["stim_az_deg"][t])
             alt = float(self.stims["stim_alt_deg"][t])
             size = float(self.stims["stim_size_deg"][t])
-            frac = float(self.stims["corr_contrast"][t])
+            frac = self._stim_brightness(t)
             k = (round(az, 2), round(alt, 2), round(size, 2), round(frac, 4))
             if k not in seen:
                 seen.add(k)
@@ -508,6 +508,15 @@ class Renderer:
         if skipped:
             line += f"; {skipped} left lazy (RAM budget)"
         self.log(line)
+
+    def _stim_brightness(self, trial: int) -> float:
+        """Stimulus brightness for a trial (0..1 of the uniform range, may exceed 1). NPZs from
+        before the light model carry only corr_contrast, the headroom fraction f over the
+        background: brightness = bg + f*(1-bg) there, which renders those files unchanged."""
+        if "stim_brightness" in self.stims:
+            return float(self.stims["stim_brightness"][trial])
+        bg = float(self.stims["background_gray"][0])
+        return bg + float(self.stims["corr_contrast"][trial]) * (1.0 - bg)
 
     def op_show(self, msg: dict):
         """follower._handle_show with the leader ACK replaced by {"ev":"onset"} up the
@@ -525,7 +534,7 @@ class Renderer:
             return
 
         dev = self.dev
-        corr_contrast = float(self.stims["corr_contrast"][trial])
+        corr_contrast = self._stim_brightness(trial)       # the stimulus BRIGHTNESS (name kept)
         bg_gray = float(self.stims["background_gray"][0])
         shape = str(self.stims["shape"][0]) if "shape" in self.stims else "square"
         duration = float(self.stims["duration_s"][trial]) if "duration_s" in self.stims else 2.0

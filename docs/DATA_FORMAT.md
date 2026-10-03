@@ -70,7 +70,7 @@ It's **idempotent** (a file already at `format_version 2`, or that already has a
 | `adaptive_state` | f4 | P(L3) for adaptive 2.5, else 1 |
 | `stim_az_deg` | f4 | stimulus azimuth (as run) |
 | `contrast` | f4 | raw value in the configured metric (what the UI showed) |
-| `corr_contrast` | f4 | normalized headroom fraction actually rendered |
+| `corr_contrast` | f4 | stimulus **brightness** rendered (0..1 of the intensity calibration's uniform range; may exceed 1). Before the light model (2026-10) it was the normalized headroom fraction |
 | `iti_duration_s` | f4 | **actual** ITI before this trial |
 | `iti_start_t`, `stim_onset_t`, `true_onset_t`, `response_window_t`, `outcome_t`, `first_lick_t` | f8 | event times (Unix s, NTP-synced) |
 | `display_latency_s` | f8 | `true_onset_t − stim_onset_t` (photodiode-measured) |
@@ -101,8 +101,10 @@ Per-trial arrays (length = `n_trials_planned`), plus block arrays:
 | `prestim_s`, `poststim_s` | planned pre/post-stim periods |
 | `iti_planned_s` | planned ITIs (length n+1: leading + between + trailing) |
 | `block_delays`, `block_start_indices` | per-block delay + first-trial index |
+| `stim_brightness`, `stim_lum` | stimulus brightness and requested light (calibration units) |
+| `stim_drive`, `contrast_measured` | drive at the stimulus centre; contrast of light delivered there (after any clipping) |
 
-Scalar params as **group attributes**: `background_gray`, `shape`, `global_delay`, `block_delay_skip_first`, `sync_square_every_n`.
+Scalar params as **group attributes**: `background_gray` (a brightness), `bg_lum` (its light), `intensity_calibration` (file whose light model was used), `light_unit`, `shape`, `global_delay`, `block_delay_skip_first`, `sync_square_every_n`.
 
 > Dropped as redundant with `/trials` (recorded): `trial_idx`, `block_num`, `stim_az_deg`, `contrast`, `corr_contrast`, `bg_gray`, `n_trials`.
 

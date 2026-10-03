@@ -52,7 +52,6 @@ def main() -> int:
     ap.add_argument("warp", nargs="?", default="display_calibration/warp_map.npz")
     ap.add_argument("--bg", type=float, default=0.75)
     ap.add_argument("--bits", type=int, default=6)
-    ap.add_argument("--mode", choices=["empirical", "theoretical", "none"], default="theoretical")
     ap.add_argument("--out", default="display_diagnostics/preview")
     ap.add_argument("--zoom", type=int, default=3, help="magnification for the detail crop")
     a = ap.parse_args()
@@ -67,12 +66,11 @@ def main() -> int:
     dev = Display()
     dev.init({"resolution": [1920, 1080], "panel_bits": a.bits}, {"background_gray": a.bg})
     dev.load_warp(str(warp))
-    dev._warp = {k: dev._warp[k] for k in dev._warp.files} | {"lum_correction_mode": a.mode}
     dev._corr_map = dev._build_corr_map()
     dev._dither = _build_dither_tile(dev._corr_map.shape, dev.panel_bits)
 
     valid = np.asarray(dev._warp["valid_map"], dtype=bool)
-    drive = a.bg * dev._corr_map
+    drive = dev.field_drive(a.bg)
     shift = 8 - a.bits
 
     dithered = (dev._quantize(drive) >> shift) << shift      # what the panel shows, dithered
@@ -83,7 +81,7 @@ def main() -> int:
 
     # ── full frames, native resolution, no resampling ────────────────────────────────
     w = plain.shape[1]
-    parts = [_label_bar(w, f"BEFORE  truncate only  -  {a.bits}-bit panel, mode={a.mode}, bg={a.bg}"),
+    parts = [_label_bar(w, f"BEFORE  truncate only  -  {a.bits}-bit panel, intensity={dev._model.name or 'identity'}, bg={a.bg}"),
              Image.fromarray(_to_rgb(plain)),
              _label_bar(w, "AFTER  8x8 ordered dither before truncation"),
              Image.fromarray(_to_rgb(dithered))]
@@ -151,7 +149,7 @@ def main() -> int:
     ax[0].plot(x, v[m], lw=0.9, color="#c1440e", label="panel, truncate only")
     ax[0].set_ylabel("8-bit code"); ax[0].legend(loc="upper center", fontsize=9)
     ax[0].set_title(f"Luminance-corrected background, mid row  —  {a.bits}-bit panel, "
-                    f"mode={a.mode}, bg={a.bg}")
+                    f"intensity={dev._model.name or 'identity'}, bg={a.bg}")
     ax[1].plot(x, ideal, lw=1.2, color="0.25", label="ideal")
     # Trim k//2 from each end: the boxcar runs off the valid region there and the dip it produces
     # is an artefact of this plot, not of the dither.

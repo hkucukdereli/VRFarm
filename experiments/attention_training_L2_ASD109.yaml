@@ -1,6 +1,6 @@
-last_saved: '2026-09-07'
+last_saved: '2026-10-03'
 stimulus:
-  background_gray: 0.1
+  background_gray: 0
   size_deg: 12
   shape: square
   duration_s: 2
@@ -8,7 +8,7 @@ stimulus:
   go_rule: all
   contrast:
     values:
-    - 1
+    - 0.4
     proportions:
     - 1
   photodiode_sync_enabled: true
@@ -18,20 +18,20 @@ reward:
   amount_mode: count
   amount_count: 1
   pulse_gap_ms: 500
-  level: 2.5
+  level: 2
   reward_delay_s: 0.6
   response_window: 2
-  pav_delay_s: 0.6
+  pav_delay_s: 0.4
   timeout_rule: count
-  max_lick_rate: 0.7
+  max_lick_rate: 1
   timeout_phases:
   - iti
   resp_delay_s: 0.1
 session:
   n_blocks: 1
-  block_size: 140
+  block_size: 150
   block_sequence:
-  - 50
+  - 60
   iti:
   - 8
   - 16
@@ -45,7 +45,7 @@ session:
   global_timeout_phases: []
   grace_period_s: 5
 adaptive:
-  enabled: true
+  enabled: false
   initial_state: 0
   step_up: 0.1
   step_down: 0.1

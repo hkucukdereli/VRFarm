@@ -1,6 +1,6 @@
-last_saved: '2026-08-06'
+last_saved: '2026-10-02'
 stimulus:
-  background_gray: 0.1
+  background_gray: 0
   size_deg: 12
   shape: square
   duration_s: 2
@@ -31,9 +31,9 @@ session:
   n_blocks: 1
   block_size: 75
   block_sequence:
-  - 80
+  - -60
   iti:
-  - 15
+  - 8
   - 30
   prestim_duration: 0
   poststim_duration: 0

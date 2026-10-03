@@ -451,8 +451,27 @@ class Leader:
     def run_session(self):
         print(f"\n=== Session {self.session_id} ===")
 
-        # Generate stimuli
+        # Stimuli: Deploy's plan (generated here only if nothing was deployed)
         self._stims = self._generate_stims()
+        refuse = None
+        if self._stims is None:
+            refuse = "no stimulus plan (Deploy's stimuli.npz missing and generation failed — see above)"
+        else:
+            sess_cfg = self.task.get("session", {})
+            bs = sess_cfg.get("block_size", 25)
+            want = sess_cfg.get("n_blocks", sess_cfg.get("n_trials", 150) // max(bs, 1)) * bs
+            have = int(self._stims["n_trials"][0])
+            if have != want:
+                refuse = (f"stimulus plan has {have} trials but the task asks for {want} — "
+                          f"re-Deploy after changing the task")
+        if refuse:
+            # Never run on the hard-coded fallbacks (8 s ITI, az 0, contrast 0 in the data): end
+            # the session at once, visibly, before any trial or data file is started.
+            print(f"Session REFUSED — {refuse}", flush=True)
+            self.running = False
+            self._publish({"type": "session_end", "n_completed": 0, "n_planned": 0,
+                           "t": time.time(), "end_reason": "no_stimuli", "error": refuse})
+            return
 
         # Start lick streaming
         if "lick_sensor" in self.devices:
@@ -1281,12 +1300,31 @@ class Leader:
     # ── Stim generation ──
 
     def _generate_stims(self):
-        """Generate or load pre-generated stimuli."""
+        """Load the stimuli Deploy generated for this session, or generate them if there are none.
+
+        Deploy writes <data>/<subj>/<subj_date>/<session_id>/stimuli.npz on this Pi, and the SAME
+        file goes to the follower, which draws trial N from it. Generation is randomized (ITIs,
+        within-block order), so regenerating here would make this engine run a different plan from
+        the one the follower draws and the UI shows. Until 2026-10-03 it always regenerated —
+        the ITIs it ran never matched Deploy's — so loading the deployed file is the rule and
+        regeneration only a fallback for a session nobody deployed."""
         try:
             from shared.stim_generator import generate_stimuli
             subj = self.session["subject_id"]
             subj_date = f"{subj}_{self.session['date']}"
-            stim_dir = Path(self.rig["data"]["leader_dir"]) / subj / subj_date / self.session_id
+            stim_dir = Path(self.rig["data"]["leader_dir"]).expanduser() / subj / subj_date / self.session_id
+            # pi_api's /api/generate_stims writes under ~/data; the rig's leader_dir is normally
+            # the same folder, but look in both.
+            for cand in (stim_dir / "stimuli.npz",
+                         Path.home() / "data" / subj / subj_date / self.session_id / "stimuli.npz"):
+                if cand.exists():
+                    with np.load(str(cand)) as z:
+                        stims = {k: z[k] for k in z.files}
+                    cal = str(stims.get("contrast_calibration", ["none"])[0])
+                    print(f"  Stimuli: loaded Deploy's {cand} "
+                          f"({int(stims['n_trials'][0])} trials, contrast cal {cal})")
+                    return stims
+            print(f"  Stimuli: no deployed stimuli.npz for {self.session_id} — generating here")
             stim_dir.mkdir(parents=True, exist_ok=True)
             # Load warp map if available
             warp_map = None

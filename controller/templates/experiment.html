@@ -1494,7 +1494,10 @@ function handleEvent(evt) {
       break;
     case 'session_end':
       document.getElementById('btn-go').textContent = 'GO';  // clear any leftover countdown
-      log(`Session ended (${evt.n_completed}/${evt.n_planned} trials).`);
+      if (evt.end_reason === 'no_stimuli')
+        log('Session NOT started — ' + (evt.error || 'no stimulus plan') + '. Re-Deploy, then GO.', 'critical');
+      else
+        log(`Session ended (${evt.n_completed}/${evt.n_planned} trials).`);
       saveLivePlots();   // persist the plots into the session folder
       setPhase('ended');
       stopClock();

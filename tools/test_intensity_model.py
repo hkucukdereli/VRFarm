@@ -77,6 +77,20 @@ m2 = IntensityModel.from_arrays(m.to_arrays())
 check(close(m2.drive([0, 33, 70], L), m.drive([0, 33, 70], L)), "same drives after to/from arrays")
 check(IntensityModel.from_arrays({}).hi == 1.0, "no int_ arrays -> identity")
 
+print("warp from before the light model (old lum_* arrays only)")
+old = np.load("display_calibration/cheddar/warp_map.npz")
+assert "int_F" not in old.files
+m_old = IntensityModel.from_arrays(old)
+g = np.maximum(old["lum_gain_theoretical"], 0.05); C = g.min() / g
+for b in (0.1, 0.5, 1.0):
+    want = b * np.interp([0, 45, 90, 105], old["lum_az"], C)
+    # 1e-3 drive = a quarter of an 8-bit code: the old code interpolated min(g)/g between the 2°
+    # gain points, the model interpolates g then divides — same curve, ~3e-4 apart at most.
+    check(close(m_old.drive([0, 45, 90, 105], m_old.L_from_b(b)), want, 1e-3),
+          f"legacy warp renders as the old correction (b={b})")
+check(m_old.source == "legacy-theoretical", f"flagged as {m_old.source}")
+check(IntensityModel.from_arrays({"lum_correction_mode": np.array(["none"])}).hi == 1.0, "legacy mode none -> flat")
+
 print("errors are readable")
 for bad, why in [({"azimuth_sweep": [], "level_sweeps": cal["level_sweeps"]}, "column 1"),
                  ({"azimuth_sweep": cal["azimuth_sweep"], "level_sweeps": []}, "no level column"),

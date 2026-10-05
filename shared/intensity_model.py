@@ -199,9 +199,24 @@ class IntensityModel:
 
     @classmethod
     def from_arrays(cls, arrays) -> "IntensityModel":
-        """From warp_map.npz (or any mapping) holding PREFIX-ed arrays; identity if absent."""
+        """From warp_map.npz (or any mapping) holding PREFIX-ed arrays. A warp built before the
+        light model existed is read through its old luminance arrays instead — a mock with the
+        same gain curve (empirical if that mode was baked in, else theoretical; 'none' -> flat) —
+        so an un-rebuilt warp on a Pi renders exactly as it did before. Identity if nothing."""
         keys = arrays.files if hasattr(arrays, "files") else list(arrays.keys())
         if PREFIX + "F" not in keys:
+            mode = str(np.asarray(arrays["lum_correction_mode"]).reshape(-1)[0]) \
+                if "lum_correction_mode" in keys else None
+            if mode == "none":
+                return cls.identity()
+            if mode == "empirical" and "lum_gain_empirical" in keys:
+                m = cls.from_cal(mock_cal("theoretical", arrays["lum_az_empirical"], arrays["lum_gain_empirical"]))
+                m.source, m.name = "legacy-empirical", "legacy warp (empirical gain)"
+                return m
+            if "lum_gain_theoretical" in keys:
+                m = cls.from_cal(mock_cal("theoretical", arrays["lum_az"], arrays["lum_gain_theoretical"]))
+                m.source, m.name = "legacy-theoretical", "legacy warp (theoretical gain)"
+                return m
             return cls.identity()
         g = lambda k: arrays[PREFIX + k]                                       # noqa: E731
         s = lambda k, d="": str(np.asarray(g(k)).reshape(-1)[0]) if PREFIX + k in keys else d  # noqa: E731

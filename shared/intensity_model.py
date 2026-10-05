@@ -5,42 +5,45 @@ drive). numpy only: the renderer runs on the Pi's system python3.
 
 THE CALIBRATION (display_calibration/<rig>/intensity/intensity_cal_<stamp>.yaml, one altitude)
 
-  azimuth_sweep:  [{az_deg, reading}]       column 1: light at FULL drive along azimuth
-  level_sweeps:   [{az_deg, measurements: [{level, reading}, ...]}, ...]
-                                            further columns: light vs drive 1.0..0.0 at an
-                                            azimuth the user chose (one or more columns)
+  level_sweeps: [{az_deg, measurements: [{level, reading}, ...]}, ...]
 
+One COLUMN per azimuth the user chose: the meter reading at each drive level 1.0 .. 0.0 there
+(0.0 is the black floor). Two columns are the minimum, three or more at different azimuths the
+useful case; a column on both sides of centre tests the left/right symmetry the fold assumes.
 Readings are meter values (lux, W, cd/m2 — the `unit` field only labels them). Mock files
-(source: theoretical / none) use the same format with a straight 0 -> 0, 1 -> 1 response, so
-"no measurement yet" runs through the exact same code.
+(source: theoretical / none) use the same format with two levels per column (0 -> 0, 1 -> gain),
+so "no measurement yet" runs through the exact same code.
 
-THE MODEL (symmetric about az 0: every azimuth is folded to |az|)
+THE MODEL — a 2-D lookup table, no parametric form, no shared response shape
 
-  L(az, v) = F(az) + (M(az) - F(az)) * h(v; az)
+  Every column is made monotone in drive and put on the common level grid (the union of all
+  measured levels). Then, FOR EACH DRIVE LEVEL SEPARATELY, the light is interpolated linearly
+  across the columns' |az| (readings at +az and -az are averaged first) and held constant beyond
+  the first and last column:
 
-  M(az)   light at drive 1: the azimuth sweep's shape R(az), scaled at each level-sweep azimuth
-          by that sweep's own drive-1 reading (the two tables are measured minutes apart, so the
-          scale is re-anchored rather than assumed), the scale interpolated in |az|
-  F(az)   black floor: the level sweeps' drive-0 readings, interpolated in |az|
-  h       normalized response, 0 at v=0 and 1 at v=1, from each level sweep; between sweep
-          azimuths the INVERSE responses are interpolated linearly in |az|; beyond the first and
-          last sweep everything is held constant (np.interp)
+      L(az, v)   for az on a 0.5° grid 0..105° (plus the column azimuths), v on the level grid
 
-  Uniform range over the calibrated azimuths (0 .. the azimuth sweep's largest |az|):
-      Lo = max F      (nothing can be darker everywhere)      Hi = min M (nor brighter)
+  Forward: light at (az, v) = interpolate L(az, ·) in v.  Inverse (what the renderer does per
+  pixel): the drive at which L(az, ·) reaches the target light. So each level has its own
+  azimuth curve — the response may differ in shape from azimuth to azimuth — and the only thing
+  assumed between columns is linear interpolation of light.
+
+  Uniform range over the calibrated azimuths (0 .. the largest column |az|):
+      Lo = max_az L(az, 0)   (nothing can be darker everywhere)
+      Hi = min_az L(az, 1)   (nor brighter)
   Brightness b in [0, 1] means L = Lo + b * (Hi - Lo). A stimulus may ask for b > 1 (above the
   uniform ceiling, where the screen can deliver it); each pixel then clips at drive 1.
 
-  With a theoretical mock (F = 0, linear h, M = the geometry gain) drive = b * min(gain)/gain(az),
+  With a theoretical mock (two levels, 0 -> 0 and 1 -> gain(az)) drive = b * min(gain)/gain(az):
   exactly the old multiplicative luminance correction.
 """
 from __future__ import annotations
 
 import numpy as np
 
-AZ_GRID = np.linspace(0.0, 105.0, 211)       # |az| grid the folded curves are stored on
-X_GRID = np.linspace(0.0, 1.0, 513)          # normalized-response grid for the inverse LUTs
+AZ_GRID = np.linspace(0.0, 105.0, 211)       # |az| grid the table is stored on (0.5°, + the column azimuths)
 PREFIX = "int_"                              # array names inside warp_map.npz
+MIN_COLUMNS = 2
 
 
 class CalibrationError(ValueError):
@@ -49,122 +52,119 @@ class CalibrationError(ValueError):
 
 # ── fitting ──────────────────────────────────────────────────────────────────────────────
 
-def _fold(rows, key="az_deg", val="reading"):
-    """[(|az|, mean reading)] sorted by |az| — readings at +az and -az are averaged."""
-    acc = {}
-    for r in rows:
-        a = round(abs(float(r[key])), 6)
-        acc.setdefault(a, []).append(float(r[val]))
-    return sorted((a, float(np.mean(v))) for a, v in acc.items())
+def _column(meas, az):
+    """One level column -> (levels ascending, readings monotone non-decreasing)."""
+    rows = sorted((float(m["level"]), float(m["reading"])) for m in meas
+                  if m.get("reading") not in (None, ""))
+    if len(rows) < 2:
+        raise CalibrationError(f"column at az {az:g}°: needs at least the 1.0 and 0.0 readings")
+    lv = np.array([r[0] for r in rows]); rd = np.array([r[1] for r in rows])
+    if np.any(np.diff(lv) <= 0):
+        raise CalibrationError(f"column at az {az:g}°: a drive level appears twice")
+    if lv[0] > 0.0 or lv[-1] < 1.0:
+        raise CalibrationError(f"column at az {az:g}°: readings at level 0.0 and 1.0 are required")
+    if np.any(lv < 0) or np.any(lv > 1):
+        raise CalibrationError(f"column at az {az:g}°: drive levels must be within 0..1")
+    rd = np.maximum.accumulate(rd)                    # light never drops as drive rises
+    if rd[-1] <= rd[0]:
+        raise CalibrationError(f"column at az {az:g}°: drive 1.0 is not brighter than drive 0.0")
+    return lv, rd
 
 
-def azimuth_asymmetry(rows):
-    """[(|az|, left, right, (right-left)/mean)] for every |az| measured on both sides."""
-    by = {}
-    for r in rows:
-        by.setdefault(float(r["az_deg"]), []).append(float(r["reading"]))
+def _columns(cal):
+    """{signed az: (levels, readings)} with duplicate azimuths averaged on a common level grid.
+    Returns (signed dict, common levels)."""
+    sweeps = cal.get("level_sweeps") or []
+    cols = []
+    for s in sweeps:
+        az = float(s["az_deg"])
+        lv, rd = _column(s.get("measurements") or [], az)
+        cols.append((az, lv, rd))
+    if not cols:
+        raise CalibrationError("no level columns: add columns at two or more azimuths "
+                               "(each with readings at drive 1.0 .. 0.0)")
+    levels = np.unique(np.concatenate([c[1] for c in cols]))
+    signed = {}
+    for az, lv, rd in cols:
+        signed.setdefault(az, []).append(np.interp(levels, lv, rd))
+    return {az: np.mean(v, axis=0) for az, v in signed.items()}, levels
+
+
+def fit(cal: dict) -> dict:
+    """Calibration dict (the YAML) -> model parameters (plain numpy arrays + scalars), the same
+    structure stored in warp_map.npz under PREFIX. Raises CalibrationError with a readable reason.
+    An `azimuth_sweep` key from the earlier format is ignored."""
+    signed, levels = _columns(cal)
+    folded = {}
+    for az, rd in signed.items():
+        folded.setdefault(round(abs(az), 6), []).append(rd)
+    cols_az = np.array(sorted(folded))
+    table = np.array([np.mean(folded[a], axis=0) for a in cols_az])      # K x N
+    if len(cols_az) < MIN_COLUMNS:
+        raise CalibrationError(f"only {len(cols_az)} column azimuth(s); need at least {MIN_COLUMNS} "
+                               f"different |az| (three or more recommended)")
+    # per level: light across azimuth on the 0.5° grid plus the column azimuths themselves (so a
+    # column is reproduced exactly where it was measured), held constant beyond the end columns
+    az_grid = np.union1d(AZ_GRID, cols_az)
+    L = np.column_stack([np.interp(az_grid, cols_az, table[:, j]) for j in range(len(levels))])
+    az_cal = float(cols_az.max())
+    in_cal = az_grid <= az_cal + 1e-9
+    lo, hi = float(L[in_cal, 0].max()), float(L[in_cal, -1].min())
+    if hi <= lo:
+        raise CalibrationError(f"no uniform range: darkest-everywhere {lo:g} >= brightest-everywhere {hi:g}")
+    return {"az_grid": az_grid, "levels": levels, "L": L, "cols_az": cols_az,
+            "lo": lo, "hi": hi, "az_cal": az_cal,
+            "unit": str(cal.get("unit") or "lux"), "source": str(cal.get("source") or "measured"),
+            "name": str(cal.get("name") or "")}
+
+
+def azimuth_asymmetry(cal: dict):
+    """[(|az|, left_top, right_top, (right-left)/mean)] for column azimuths measured on both
+    sides of centre, at full drive."""
+    try:
+        signed, levels = _columns(cal)
+    except CalibrationError:
+        return []
     out = []
-    for a in sorted({abs(k) for k in by} - {0.0}):
-        if a in by and -a in by:
-            left, right = float(np.mean(by[-a])), float(np.mean(by[a]))
+    for a in sorted({abs(k) for k in signed} - {0.0}):
+        if a in signed and -a in signed:
+            left, right = float(signed[-a][-1]), float(signed[a][-1])
             m = (left + right) / 2.0
             if m > 0:
                 out.append((a, left, right, (right - left) / m))
     return out
 
 
-def _response(meas, az):
-    """One level sweep -> (floor, top, levels, normalized response h) with h monotone."""
-    rows = sorted((float(m["level"]), float(m["reading"])) for m in meas)
-    if len(rows) < 2:
-        raise CalibrationError(f"level column at az {az}: needs at least the 1.0 and 0.0 readings")
-    lv = np.array([r[0] for r in rows])
-    rd = np.maximum.accumulate(np.array([r[1] for r in rows]))   # light never drops as drive rises
-    if lv[0] > 0.0 or lv[-1] < 1.0:
-        raise CalibrationError(f"level column at az {az}: readings at level 0.0 and 1.0 are required")
-    floor, top = float(rd[0]), float(rd[-1])
-    if top <= floor:
-        raise CalibrationError(f"level column at az {az}: drive 1.0 is not brighter than drive 0.0")
-    return floor, top, lv, (rd - floor) / (top - floor)
-
-
-def fit(cal: dict) -> dict:
-    """Calibration dict (the YAML) -> model parameters (plain numpy arrays + scalars), the same
-    structure stored in warp_map.npz under PREFIX. Raises CalibrationError with a readable reason."""
-    az_rows = cal.get("azimuth_sweep") or []
-    if not az_rows:
-        raise CalibrationError("column 1 (light along azimuth) has no readings")
-    sweeps = cal.get("level_sweeps") or []
-    if not sweeps:
-        raise CalibrationError("no level column: add at least one azimuth with readings 1.0 .. 0.0")
-
-    folded = _fold(az_rows)
-    az_u = np.array([a for a, _ in folded]); r_u = np.array([r for _, r in folded])
-    if np.any(r_u <= 0):
-        raise CalibrationError("column 1 has a reading <= 0 — every azimuth must show light at drive 1")
-    R = lambda a: np.interp(a, az_u, r_u)                    # noqa: E731  shape of max light
-    az_cal = float(az_u.max())                               # calibrated range is 0 .. az_cal
-
-    per = {}                                                 # |az| -> list of (floor, top, hinv)
-    for s in sweeps:
-        az = abs(float(s["az_deg"]))
-        floor, top, lv, h = _response(s.get("measurements") or [], s["az_deg"])
-        h_strict = h + np.arange(len(h)) * 1e-9              # strictly increasing for the inverse
-        hinv = np.interp(X_GRID, h_strict, lv)
-        per.setdefault(round(az, 6), []).append((floor, top, hinv))
-    sweep_az = np.array(sorted(per))
-    floors = np.array([np.mean([p[0] for p in per[a]]) for a in sweep_az])
-    tops = np.array([np.mean([p[1] for p in per[a]]) for a in sweep_az])
-    hinv = np.array([np.mean([p[2] for p in per[a]], axis=0) for a in sweep_az])
-
-    scale = tops / R(sweep_az)                               # re-anchor column 1 at each sweep
-    M = np.interp(AZ_GRID, sweep_az, scale) * R(AZ_GRID)
-    F = np.interp(AZ_GRID, sweep_az, floors)
-    if np.any(M <= F):
-        bad = AZ_GRID[M <= F][0]
-        raise CalibrationError(f"at |az| {bad:g}° the floor is not below the full-drive light")
-    in_cal = AZ_GRID <= az_cal + 1e-9
-    lo, hi = float(F[in_cal].max()), float(M[in_cal].min())
-    if hi <= lo:
-        raise CalibrationError(f"no uniform range: darkest-everywhere {lo:g} >= brightest-everywhere {hi:g}")
-    return {"az_grid": AZ_GRID.copy(), "F": F, "M": M, "sweep_az": sweep_az, "hinv": hinv,
-            "lo": lo, "hi": hi, "az_cal": az_cal,
-            "unit": str(cal.get("unit") or "lux"), "source": str(cal.get("source") or "measured"),
-            "name": str(cal.get("name") or "")}
-
-
 def fit_report(cal: dict, params: dict) -> dict:
-    """Numbers worth showing after a fit: the uniform range, how much the level columns' shapes
-    differ (0 = one response everywhere; large = the az-interpolation is doing real work), and the
-    left/right asymmetry of column 1."""
-    spread = 0.0
-    if len(params["hinv"]) > 1:
-        v = np.linspace(0, 1, 101)
-        hs = [np.interp(v, h + np.arange(len(h)) * 1e-12, X_GRID) for h in params["hinv"]]
-        spread = float(max(np.max(np.abs(h - hs[0])) for h in hs))
-    asym = azimuth_asymmetry(cal.get("azimuth_sweep") or [])
+    """Numbers worth showing after a fit: the uniform range, how much the columns' normalized
+    response SHAPES differ (0 = the same curve everywhere; the model does not need them to agree,
+    this just says how non-separable the screen is), and the left/right asymmetry."""
+    tab = np.array([np.interp(params["cols_az"], params["az_grid"], params["L"][:, j])
+                    for j in range(len(params["levels"]))]).T          # K x N at the columns
+    norm = (tab - tab[:, :1]) / (tab[:, -1:] - tab[:, :1])
+    spread = float(np.max(np.abs(norm - norm[:1]))) if len(tab) > 1 else 0.0
+    asym = azimuth_asymmetry(cal)
     return {"lo": params["lo"], "hi": params["hi"], "unit": params["unit"],
-            "az_cal": params["az_cal"], "columns": [float(a) for a in params["sweep_az"]],
-            "shape_spread": spread,
-            "asymmetry_max": max((abs(p[3]) for p in asym), default=None)}
+            "az_cal": params["az_cal"], "columns": [float(a) for a in params["cols_az"]],
+            "levels": int(len(params["levels"])), "shape_spread": spread,
+            "asymmetry_max": max((abs(p[3]) for p in asym), default=None),
+            "ignored_azimuth_sweep": bool(cal.get("azimuth_sweep"))}
 
 
 # ── mock calibrations ──────────────────────────────────────────────────────────────────
 
 def mock_cal(source: str, az=None, gain=None, alt_deg: float = 0.0, **extra) -> dict:
-    """A calibration dict with a straight 0 -> 0, 1 -> 1 response and no floor. source="none":
-    flat light (drive = brightness). source="theoretical": column 1 = the geometry model's
-    per-azimuth gain (1.0 at az 0), which reproduces the old theoretical luminance correction."""
+    """A calibration dict with two levels per column — drive 0 -> 0, drive 1 -> gain(az) — and
+    no floor. source="none": flat light (drive = brightness). source="theoretical": the geometry
+    model's per-azimuth gain (1.0 at az 0), which reproduces the old theoretical correction."""
     if source == "none" or az is None:
         az, gain = [0.0, 105.0], [1.0, 1.0]
-    az = [float(a) for a in az]; gain = [float(g) for g in gain]
-    g0 = float(np.interp(0.0, az, gain))
     return {
         "kind": "intensity", "version": 1, "source": source, "unit": "lux (mock)",
         "alt_deg": float(alt_deg),
-        "azimuth_sweep": [{"az_deg": a, "reading": round(g, 6)} for a, g in zip(az, gain)],
-        "level_sweeps": [{"az_deg": 0.0, "measurements": [
-            {"level": 1.0, "reading": round(g0, 6)}, {"level": 0.0, "reading": 0.0}]}],
+        "level_sweeps": [{"az_deg": float(a), "measurements": [
+            {"level": 1.0, "reading": round(float(g), 6)}, {"level": 0.0, "reading": 0.0}]}
+            for a, g in zip(az, gain)],
         **extra,
     }
 
@@ -172,20 +172,21 @@ def mock_cal(source: str, az=None, gain=None, alt_deg: float = 0.0, **extra) -> 
 # ── the model ────────────────────────────────────────────────────────────────────────────
 
 class IntensityModel:
-    """Forward/inverse light model. Every method takes azimuths as scalars or arrays (degrees,
-    sign ignored)."""
+    """Forward/inverse light model over the (|az|, drive) table. Azimuths may be scalars or
+    arrays (degrees, sign ignored)."""
 
     def __init__(self, params: dict):
         self.p = params
         self.az_grid = np.asarray(params["az_grid"], dtype=float)
-        self.F_grid = np.asarray(params["F"], dtype=float)
-        self.M_grid = np.asarray(params["M"], dtype=float)
-        self.sweep_az = np.atleast_1d(np.asarray(params["sweep_az"], dtype=float))
-        self.hinv = np.atleast_2d(np.asarray(params["hinv"], dtype=float))
+        self.levels = np.asarray(params["levels"], dtype=float)
+        self.L = np.asarray(params["L"], dtype=float)                 # (grid, levels)
         self.lo, self.hi = float(params["lo"]), float(params["hi"])
+        self.az_cal = float(params.get("az_cal", self.az_grid[-1]))
         self.unit = str(params.get("unit", "lux"))
         self.source = str(params.get("source", ""))
         self.name = str(params.get("name", ""))
+        # strictly increasing rows for the inverse (flat stretches -> the lowest drive that reaches L)
+        self._Lstrict = self.L + np.arange(self.L.shape[1]) * (1e-9 * max(float(np.abs(self.L).max()), 1e-12))
 
     # construction
     @classmethod
@@ -204,7 +205,7 @@ class IntensityModel:
         same gain curve (empirical if that mode was baked in, else theoretical; 'none' -> flat) —
         so an un-rebuilt warp on a Pi renders exactly as it did before. Identity if nothing."""
         keys = arrays.files if hasattr(arrays, "files") else list(arrays.keys())
-        if PREFIX + "F" not in keys:
+        if PREFIX + "L" not in keys:
             mode = str(np.asarray(arrays["lum_correction_mode"]).reshape(-1)[0]) \
                 if "lum_correction_mode" in keys else None
             if mode == "none":
@@ -219,67 +220,58 @@ class IntensityModel:
                 return m
             return cls.identity()
         g = lambda k: arrays[PREFIX + k]                                       # noqa: E731
-        s = lambda k, d="": str(np.asarray(g(k)).reshape(-1)[0]) if PREFIX + k in keys else d  # noqa: E731
-        return cls({"az_grid": g("az_grid"), "F": g("F"), "M": g("M"), "sweep_az": g("sweep_az"),
-                    "hinv": g("hinv"), "lo": float(np.asarray(g("lo")).reshape(-1)[0]),
-                    "hi": float(np.asarray(g("hi")).reshape(-1)[0]),
-                    "az_cal": float(np.asarray(g("az_cal")).reshape(-1)[0]) if PREFIX + "az_cal" in keys else 105.0,
-                    "unit": s("unit", "lux"), "source": s("source"), "name": s("name")})
+        sc = lambda k: float(np.asarray(g(k)).reshape(-1)[0])                 # noqa: E731
+        st = lambda k, d="": str(np.asarray(g(k)).reshape(-1)[0]) if PREFIX + k in keys else d  # noqa: E731
+        return cls({"az_grid": g("az_grid"), "levels": g("levels"), "L": g("L"), "cols_az": g("cols_az"),
+                    "lo": sc("lo"), "hi": sc("hi"), "az_cal": sc("az_cal") if PREFIX + "az_cal" in keys else 105.0,
+                    "unit": st("unit", "lux"), "source": st("source"), "name": st("name")})
 
     def to_arrays(self) -> dict:
         """PREFIX-ed arrays for np.savez(warp_map.npz, ...)."""
-        p = self.p
-        return {PREFIX + "az_grid": self.az_grid, PREFIX + "F": self.F_grid, PREFIX + "M": self.M_grid,
-                PREFIX + "sweep_az": self.sweep_az, PREFIX + "hinv": self.hinv,
+        return {PREFIX + "az_grid": self.az_grid, PREFIX + "levels": self.levels, PREFIX + "L": self.L,
+                PREFIX + "cols_az": np.asarray(self.p["cols_az"], dtype=float),
                 PREFIX + "lo": np.array([self.lo]), PREFIX + "hi": np.array([self.hi]),
-                PREFIX + "az_cal": np.array([float(p.get("az_cal", 105.0))]),
+                PREFIX + "az_cal": np.array([self.az_cal]),
                 PREFIX + "unit": np.array([self.unit]), PREFIX + "source": np.array([self.source]),
                 PREFIX + "name": np.array([self.name])}
 
     # per-azimuth curves
     def floor(self, az):
-        return np.interp(np.abs(az), self.az_grid, self.F_grid)
+        return np.interp(np.abs(az), self.az_grid, self.L[:, 0])
 
     def max_light(self, az):
-        return np.interp(np.abs(az), self.az_grid, self.M_grid)
-
-    def _inverse_at(self, a, x):
-        """drive for normalized response x at |az| a (arrays of equal shape or broadcastable)."""
-        if len(self.sweep_az) == 1:
-            return np.interp(x, X_GRID, self.hinv[0])
-        a = np.clip(a, self.sweep_az[0], self.sweep_az[-1])
-        k = np.clip(np.searchsorted(self.sweep_az, a, side="right") - 1, 0, len(self.sweep_az) - 2)
-        w = (a - self.sweep_az[k]) / (self.sweep_az[k + 1] - self.sweep_az[k])
-        out = np.zeros(np.shape(x), dtype=float)
-        for j in np.unique(k):
-            sel = (k == j)
-            lo_v = np.interp(np.asarray(x)[sel], X_GRID, self.hinv[j])
-            hi_v = np.interp(np.asarray(x)[sel], X_GRID, self.hinv[j + 1])
-            out[sel] = (1 - w[sel]) * lo_v + w[sel] * hi_v
-        return out
+        return np.interp(np.abs(az), self.az_grid, self.L[:, -1])
 
     # the two directions
+    def _drive_grid(self, L_target: float):
+        """Drive at every grid azimuth that delivers L_target (clipped to the reachable range)."""
+        return np.array([np.interp(L_target, row, self.levels) for row in self._Lstrict])
+
     def drive(self, az, L):
-        """Drive (0..1) that delivers light L at azimuth az; values outside the reachable range clip."""
+        """Drive (0..1) that delivers light L at azimuth az; values outside the reachable range clip.
+        L a scalar (the common case: one background or one stimulus light over many pixels) or an
+        array broadcastable against az."""
         a = np.abs(np.asarray(az, dtype=float))
         L = np.asarray(L, dtype=float)
+        if L.ndim == 0:
+            v = np.interp(a, self.az_grid, self._drive_grid(float(L)))
+            return float(v) if np.ndim(v) == 0 else v
         a, L = np.broadcast_arrays(a, L)
-        Fa, Ma = self.floor(a), self.max_light(a)
-        x = np.clip((L - Fa) / (Ma - Fa), 0.0, 1.0)
-        v = self._inverse_at(a, x)
-        return float(v) if np.ndim(v) == 0 else v
+        out = np.empty(a.shape, dtype=float)
+        for val in np.unique(L):
+            sel = (L == val)
+            out[sel] = np.interp(a[sel], self.az_grid, self._drive_grid(float(val)))
+        return float(out) if out.ndim == 0 else out
 
     def light(self, az, v):
         """Light delivered at azimuth az for drive v (0..1)."""
-        a_arr = np.abs(np.asarray(az, dtype=float)); v_arr = np.clip(np.asarray(v, dtype=float), 0, 1)
-        a_arr, v_arr = np.broadcast_arrays(a_arr, v_arr)
-        out = np.empty(a_arr.shape, dtype=float)
-        for a in np.unique(a_arr):
-            sel = (a_arr == a)
-            curve = self._inverse_at(np.full(X_GRID.shape, a), X_GRID)     # drive at each x
-            curve = curve + np.arange(len(curve)) * 1e-12
-            x = np.interp(v_arr[sel], curve, X_GRID)
-            out[sel] = self.floor(a) + (self.max_light(a) - self.floor(a)) * x
+        a = np.abs(np.asarray(az, dtype=float)); v = np.clip(np.asarray(v, dtype=float), 0, 1)
+        a, v = np.broadcast_arrays(a, v)
+        out = np.empty(a.shape, dtype=float)
+        for val in np.unique(v):
+            sel = (v == val)
+            L_at_v = np.array([np.interp(val, self.levels, row) for row in self.L])   # per grid az
+            out[sel] = np.interp(a[sel], self.az_grid, L_at_v)
         return float(out) if out.ndim == 0 else out
 
     # brightness <-> light

@@ -992,19 +992,18 @@ function updateAzimuthHeight(h) {
   refreshDerivedAz();
 }
 
-// ── Intensity calibration (one file: light along azimuth + light vs drive at chosen azimuths) ──
+// ── Intensity calibration (one file: light vs drive at the azimuths you choose, one altitude) ──
 // The dropdown lists display_calibration/<rig>/intensity/intensity_cal_*.yaml: measured files, the
-// theoretical mock of the current geometry (straight response, geometry gain — the default) and
-// the none mock. Apply rebuilds + deploys the warp with that file's light model and records it in
+// theoretical mock of the current geometry (two-level columns, geometry gain — the default) and
+// the none mock. Apply rebuilds + deploys the warp with that file's light table and records it in
 // the rig YAML (devices.display.intensity_calibration). Measure opens the panel below.
 //
-// The panel measures at ONE altitude:
-//   column 1   light at FULL drive at each azimuth row (add/remove rows; measure to the screen edge)
-//   columns 2+ light at each drive level (rows 1.0 .. 0.0) at the azimuth in the column header;
-//              add as many columns as you like, at the azimuths you choose
+// The panel measures at ONE altitude: one COLUMN per azimuth (its header), light at each drive
+// level (rows 1.0 .. 0.0, 0.0 = the black floor). Two columns are the minimum, three or more out to
+// the screen edge the useful case; columns and levels can be added/removed (1.0 and 0.0 stay).
 // Every patch is drawn RAW (apply_lum false): the meter must see the panel's own response.
 const INT_LEVELS = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05, 0.0];
-const INT_AZ_DEFAULT = [0, 20, 40, 60, 80, 100, -20, -40, -60, -80, -100];
+const INT_COLS_DEFAULT = [0, 40, 80];
 const LUM_SETTLE_MS = 400;   // SHOW -> on glass ~62 ms + meter integration
 let intMeasure = null;
 
@@ -1065,10 +1064,9 @@ function openIntensityPanel() {
   const altEl = document.getElementById('test-stim-alt');
   intMeasure = {
     alt: altEl ? (parseFloat(altEl.value) || 0) : 0, size: 15, unit: 'lux',
-    azRows: INT_AZ_DEFAULT.map(a => ({az: a, reading: null})),
     levels: INT_LEVELS.slice(),
-    cols: [{az: 0, readings: {}}],
-    active: {col: 0, row: 0},              // col 0 = column 1 (azimuth); col k>0 = level column k-1
+    cols: INT_COLS_DEFAULT.map(a => ({az: a, readings: {}})),
+    active: {col: 0, row: 0},              // col = index into cols, row = index into levels
   };
   renderIntPanel();
   showIntPatch();
@@ -1079,25 +1077,49 @@ function closeIntensityPanel() {
   if (p) { p.style.display = 'none'; p.innerHTML = ''; }
 }
 function _intCell(col, row) {
-  const m = intMeasure;
-  if (col === 0) return m.azRows[row] ? m.azRows[row].reading : null;
-  const c = m.cols[col - 1];
-  return c ? c.readings[m.levels[row]] : null;
+  const m = intMeasure, c = m.cols[col];
+  const v = c ? c.readings[m.levels[row]] : null;
+  return v == null ? null : v;
 }
 function _intSet(col, row, val) {
-  const m = intMeasure;
+  const m = intMeasure, c = m.cols[col]; if (!c) return;
   const v = (val === '' || val == null || !isFinite(parseFloat(val))) ? null : parseFloat(val);
-  if (col === 0) { if (m.azRows[row]) m.azRows[row].reading = v; }
-  else {
-    const c = m.cols[col - 1]; if (!c) return;
-    if (v == null) delete c.readings[m.levels[row]]; else c.readings[m.levels[row]] = v;
-  }
+  if (v == null) delete c.readings[m.levels[row]]; else c.readings[m.levels[row]] = v;
 }
 function _intTarget(col, row) {
-  // What the projector shows for a cell: column 1 = drive 1.0 at the row's azimuth; level column
-  // = the row's drive level at the column's azimuth.
+  // What the projector shows for a cell: the row's drive level at the column's azimuth.
+  const m = intMeasure, c = m.cols[col];
+  return {az: c ? c.az : 0, level: m.levels[row] != null ? m.levels[row] : 1.0};
+}
+function _intClampActive() {
   const m = intMeasure;
-  return col === 0 ? {az: m.azRows[row].az, level: 1.0} : {az: m.cols[col - 1].az, level: m.levels[row]};
+  m.active.col = Math.min(m.active.col, Math.max(0, m.cols.length - 1));
+  m.active.row = Math.min(m.active.row, Math.max(0, m.levels.length - 1));
+}
+function intAddColumn() {
+  const m = intMeasure;
+  const last = m.cols.length ? m.cols[m.cols.length - 1].az : -40;
+  m.cols.push({az: Math.min(last + 40, 105), readings: {}});
+  renderIntPanel();
+}
+function intRemoveColumn(k) {
+  intMeasure.cols.splice(k, 1); _intClampActive(); renderIntPanel();
+}
+function intAddLevel() {
+  const el = document.getElementById('int-new-level');
+  const v = el ? parseFloat(el.value) : NaN;
+  if (!isFinite(v) || v <= 0 || v >= 1) { log('A new drive level must lie between 0 and 1 (1.0 and 0.0 are already rows)'); return; }
+  const m = intMeasure;
+  if (m.levels.some(l => Math.abs(l - v) < 1e-6)) { log('Drive ' + v + ' is already a row'); return; }
+  m.levels.push(v); m.levels.sort((x, y) => y - x);
+  renderIntPanel();
+}
+function intRemoveLevel(i) {
+  const m = intMeasure, lv = m.levels[i];
+  if (lv === 1 || lv === 0) { log('Drive 1.0 and 0.0 are required'); return; }
+  m.levels.splice(i, 1);
+  m.cols.forEach(c => { delete c.readings[lv]; });
+  _intClampActive(); renderIntPanel();
 }
 function renderIntPanel() {
   const p = document.getElementById('int-panel');
@@ -1112,16 +1134,15 @@ function renderIntPanel() {
     return `<td style="padding:1px 3px; ${on ? 'background:#2d3d2d' : ''}">
       <input type="number" step="any" style="width:70px" value="${v == null ? '' : v}" oninput="_intSet(${col},${row},this.value)">${btns(col, row)}</td>`;
   };
-  const azRows = m.azRows.map((r, i) => `<tr>
-      <td style="padding:1px 3px"><input type="number" step="1" style="width:52px" value="${r.az}" onchange="intMeasure.azRows[${i}].az=parseFloat(this.value)||0; if(intMeasure.active.col===0&&intMeasure.active.row===${i}) showIntPatch()">°
-        <button class="btn btn-gray btn-sm" style="padding:0 4px" onclick="intMeasure.azRows.splice(${i},1); intMeasure.active={col:0,row:0}; renderIntPanel()" title="Remove this azimuth">×</button></td>
-      ${cell(0, i)}</tr>`).join('');
-  const colHead = m.cols.map((c, k) => `<th style="padding:1px 3px; font-weight:normal">az
-      <input type="number" step="1" style="width:48px" value="${c.az}" onchange="intMeasure.cols[${k}].az=parseFloat(this.value)||0; if(intMeasure.active.col===${k + 1}) showIntPatch()">°
-      <button class="btn btn-gray btn-sm" style="padding:0 4px" onclick="intMeasure.cols.splice(${k},1); intMeasure.active={col:0,row:0}; renderIntPanel()" title="Remove this column">×</button></th>`).join('');
-  const lvRows = m.levels.map((lv, i) => `<tr><td style="padding:1px 6px">${lv.toFixed(2)}${lv === 0 ? ' floor' : ''}</td>${
-      m.cols.map((c, k) => cell(k + 1, i)).join('')}</tr>`).join('');
+  const colHead = m.cols.map((c, k) => `<th style="padding:1px 3px; font-weight:normal; white-space:nowrap">az
+      <input type="number" step="1" style="width:52px" value="${c.az}" onchange="intMeasure.cols[${k}].az=parseFloat(this.value)||0; if(intMeasure.active.col===${k}) showIntPatch(); else renderIntPanel()">°
+      <button class="btn btn-gray btn-sm" style="padding:0 4px" onclick="intRemoveColumn(${k})" title="Remove this column">×</button></th>`).join('');
+  const lvRows = m.levels.map((lv, i) => `<tr><td style="padding:1px 6px; white-space:nowrap">${lv.toFixed(2)}${lv === 0 ? ' floor' : ''}${
+      (lv === 1 || lv === 0) ? '' : ` <button class="btn btn-gray btn-sm" style="padding:0 4px" onclick="intRemoveLevel(${i})" title="Remove this drive level">×</button>`}</td>${
+      m.cols.map((c, k) => cell(k, i)).join('')}</tr>`).join('');
   const t = _intTarget(a.col, a.row);
+  const nAz = new Set(m.cols.map(c => Math.abs(c.az))).size;
+  const done = m.cols.map(c => Object.keys(c.readings).length + '/' + m.levels.length + ' @ ' + c.az + '°').join(', ');
   p.style.display = 'block';
   p.innerHTML = `
     <div style="font-size:11px; color:#bbb; margin-bottom:4px">
@@ -1130,20 +1151,22 @@ function renderIntPanel() {
       &nbsp; Size <input type="number" value="${m.size}" min="1" step="1" style="width:48px" onchange="intMeasure.size=parseFloat(this.value)||15; showIntPatch()">°
       &nbsp; Unit <input type="text" value="${m.unit}" style="width:52px" onchange="intMeasure.unit=this.value||'lux'">
     </div>
-    <div style="display:flex; gap:18px; align-items:flex-start; flex-wrap:wrap">
-      <div><div style="font-size:11px; color:#9ab">Column 1 — full drive along azimuth</div>
-        <table style="font-size:12px; border-collapse:collapse">${azRows}</table>
-        <button class="btn btn-gray btn-sm" style="margin-top:3px" onclick="intMeasure.azRows.push({az:0,reading:null}); renderIntPanel()">+ azimuth</button></div>
-      <div><div style="font-size:11px; color:#9ab">Level columns — drive 1.0 → 0.0 at the azimuth in each header</div>
-        <table style="font-size:12px; border-collapse:collapse"><tr><th style="font-weight:normal; padding:1px 6px">drive</th>${colHead}</tr>${lvRows}</table>
-        <button class="btn btn-gray btn-sm" style="margin-top:3px" onclick="intMeasure.cols.push({az: (intMeasure.cols.length ? intMeasure.cols[intMeasure.cols.length-1].az + 30 : 0), readings:{}}); renderIntPanel()">+ column</button></div>
+    <div style="font-size:11px; color:#9ab; margin-bottom:3px">One column per azimuth (header): light at each drive level, 1.0 → 0.0.
+      Two columns minimum; three or more out to the screen edge recommended, one on the other side of centre checks symmetry.</div>
+    <div style="overflow-x:auto">
+      <table style="font-size:12px; border-collapse:collapse"><tr><th style="font-weight:normal; padding:1px 6px">drive</th>${colHead}</tr>${lvRows}</table>
     </div>
-    <div style="margin-top:6px; display:flex; align-items:center; gap:8px">
+    <div style="margin-top:3px; display:flex; gap:6px; align-items:center; flex-wrap:wrap">
+      <button class="btn btn-gray btn-sm" onclick="intAddColumn()" title="Add a column at another azimuth">+ column</button>
+      <span style="font-size:11px; color:#888; margin-left:8px">level</span>
+      <input type="number" id="int-new-level" step="any" min="0" max="1" placeholder="0.15" style="width:56px">
+      <button class="btn btn-gray btn-sm" onclick="intAddLevel()" title="Add a drive-level row (between 0 and 1)">+ level</button>
+    </div>
+    <div style="margin-top:6px; display:flex; align-items:center; gap:8px; flex-wrap:wrap">
       <button class="btn btn-green btn-sm" onclick="intSave(false)">Save</button>
       <button class="btn btn-blue btn-sm" onclick="intSave(true)">Save &amp; Apply</button>
       <button class="btn btn-gray btn-sm" onclick="closeIntensityPanel()">Close</button>
-      <span style="font-size:10px; color:#888">${m.azRows.filter(r => r.reading != null).length}/${m.azRows.length} azimuths ·
-        ${m.cols.map(c => Object.keys(c.readings).length + '/' + m.levels.length + ' @ ' + c.az + '°').join(', ') || 'no level column'}</span>
+      <span style="font-size:10px; color:#888">${done || 'no column'}${nAz < 2 ? ' · columns at two or more different |az| are needed' : ''}</span>
     </div>`;
 }
 async function showIntPatch() {
@@ -1164,7 +1187,7 @@ async function intShow(col, row) {
   await showIntPatch();
 }
 function _intNext(col, row) {
-  const m = intMeasure, n = col === 0 ? m.azRows.length : m.levels.length;
+  const n = intMeasure.levels.length;
   for (let k = 1; k <= n; k++) {
     const r = (row + k) % n;
     if (_intCell(col, r) == null) return r;
@@ -1195,7 +1218,6 @@ async function intSave(apply) {
   const m = intMeasure;
   const body = {
     alt_deg: m.alt, size_deg: m.size, unit: m.unit, method: 'manual',
-    azimuth_sweep: m.azRows.filter(r => r.reading != null).map(r => ({az_deg: r.az, reading: r.reading})),
     level_sweeps: m.cols.map(c => ({az_deg: c.az, measurements:
       Object.keys(c.readings).map(lv => ({level: parseFloat(lv), reading: c.readings[lv]}))})),
   };
@@ -1204,8 +1226,8 @@ async function intSave(apply) {
   if (!r.ok) { log('Not saved: ' + (r.error || '?')); return; }
   const rep = r.report || {};
   log(`Saved ${r.name}: uniform range ${_fmtLux(rep.lo)}–${_fmtLux(rep.hi)} ${rep.unit || ''}, columns at `
-      + `${(rep.columns || []).join(', ')}°, calibrated to ±${rep.az_cal}°`
-      + (rep.shape_spread != null ? `, column shapes differ by ${(rep.shape_spread * 100).toFixed(1)} %` : '')
+      + `${(rep.columns || []).join(', ')}° (${rep.levels || '?'} levels), calibrated to ±${rep.az_cal}°`
+      + (rep.shape_spread != null ? `, column response shapes differ by ${(rep.shape_spread * 100).toFixed(1)} %` : '')
       + (rep.asymmetry_max != null ? `, L/R asymmetry ${(rep.asymmetry_max * 100).toFixed(1)} %` : ''));
   await loadIntensityCals();
   renderDeviceList();
@@ -2456,10 +2478,10 @@ function renderDisplayControls(dev) {
         </div>
         <button class="btn btn-gray btn-sm" onclick="refreshIntensityCals()" title="Reload the list">&#8635;</button>
         <button class="btn btn-blue btn-sm" onclick="applyIntensityCal()" title="Rebuild + deploy the warp with this calibration's light model and make it the rig's">Apply</button>
-        <button class="btn btn-orange btn-sm" onclick="openIntensityPanel()" title="Measure light along azimuth and light vs drive at chosen azimuths, at one altitude">Measure…</button>
+        <button class="btn btn-orange btn-sm" onclick="openIntensityPanel()" title="Measure light vs drive at the azimuths you choose (3+ columns recommended), at one altitude">Measure…</button>
       </div>
       <div style="font-size:10px; color:#888; margin-top:3px">${intCur
-        ? `in use: ${intCur.name} · uniform range ${_fmtLux(intCur.lo)}–${_fmtLux(intCur.hi)} ${intCur.unit || ''} · level columns at ${(intCur.columns || []).join(', ')}° · Bg / brightness 0–1 spans this range`
+        ? `in use: ${intCur.name} · uniform range ${_fmtLux(intCur.lo)}–${_fmtLux(intCur.hi)} ${intCur.unit || ''} · columns at ${(intCur.columns || []).join(', ')}° · Bg / brightness 0–1 spans this range`
         : 'no calibration applied yet — Apply one (theoretical = the geometry model)'}</div>
       <div id="int-panel" style="display:none; margin-top:8px"></div>
     </div>

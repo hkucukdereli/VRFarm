@@ -609,7 +609,8 @@ def api_reinit_device():
 # ── warp map / intensity calibration ──
 #
 # One intensity calibration per rig (display_calibration/<rig>/intensity/intensity_cal_*.yaml):
-# column 1 = light at full drive along azimuth, level columns = light vs drive at chosen azimuths.
+# one column per user-chosen azimuth = light vs drive 1.0..0.0 there (two minimum, 3+ recommended);
+# the model is a per-level light table interpolated across the columns' azimuths.
 # The rig YAML's devices.display.intensity_calibration names the file whose light model the warp
 # carries; without one the theoretical mock of the current geometry is used (= the old
 # theoretical correction). See display_calibration/intensity_cal.py, shared/intensity_model.py.
@@ -626,6 +627,8 @@ def _ensure_mock_cals(rs: RigState, geo_file: Path) -> str:
     ic = _cal_mod()
     geo = yaml.safe_load(geo_file.read_text())
     az, gain = _cwm().theoretical_luminance_curve(geo)
+    for n in ic.upgrade_mocks(lum_dir(rs)):                 # mocks written in the earlier format
+        rs.log(f"intensity: rewrote mock {n} in the current format")
     ic.write_none(lum_dir(rs))
     return ic.write_theoretical(lum_dir(rs), az, gain, geo_file.name).name
 
@@ -735,14 +738,14 @@ def api_intensity_cals():
 
 @bp.route("/save_intensity_cal", methods=["POST"])
 def api_save_intensity_cal():
-    """{alt_deg, size_deg, unit, method, azimuth_sweep: [{az_deg, reading}],
-        level_sweeps: [{az_deg, measurements: [{level, reading}]}]}
-    -> intensity/intensity_cal_<now>.yaml + a fit report. Nothing is deployed (Apply does that)."""
+    """{alt_deg, size_deg, unit, method, level_sweeps: [{az_deg, measurements: [{level, reading}]}]}
+    -> intensity/intensity_cal_<now>.yaml + a fit report. Nothing is deployed (Apply does that).
+    An `azimuth_sweep` from the earlier panel is ignored."""
     rs: RigState = g.rs
     d = request.json or {}
     try:
         path, report = _cal_mod().save_measured(
-            lum_dir(rs), d.get("alt_deg", 0.0), d.get("azimuth_sweep") or [], d.get("level_sweeps") or [],
+            lum_dir(rs), d.get("alt_deg", 0.0), d.get("level_sweeps") or [],
             size_deg=d.get("size_deg"), method=d.get("method"), unit=d.get("unit") or "lux")
     except (ValueError, KeyError, TypeError) as e:
         return jsonify({"ok": False, "error": str(e)}), 400

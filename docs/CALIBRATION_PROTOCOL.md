@@ -155,19 +155,22 @@ controller (previews, Correct).
 
 | Part | What you measure |
 |---|---|
-| Column 1 — `azimuth_sweep` | light at **full drive** at each azimuth row you choose; measure out to the screen edge (and both sides of centre to check symmetry) |
-| Level columns — `level_sweeps` | light at drive 1.0, 0.9 … 0.1, 0.05, 0.0 at an azimuth you set per column; add as many columns as you want (e.g. 0°, 45°, 85°) |
+| Columns — `level_sweeps` | one column per azimuth you choose: light at drive 1.0, 0.9 … 0.1, 0.05, 0.0 there (0.0 = the black floor). Two columns are the minimum; three or more out to the screen edge (e.g. 0°, 40°, 80°) is the useful case, and a column on the other side of centre checks the left/right symmetry the model assumes |
 
-The model: `L(az, v) = F(az) + (M(az) − F(az)) · h(v; az)`. `M` is column 1's shape re-anchored to
-each level column's drive-1 reading, `F` the level columns' floors, `h` their normalized
-responses; all interpolated in |az| between columns and held constant beyond. The uniform range is
-`max F .. min M` over the calibrated azimuths.
+The model is a table, not a formula. Every column is put on the common level grid, and **for each
+drive level separately** the light is interpolated linearly across the columns' |az| (readings at
++az and −az are averaged) and held constant beyond the last column. So each level has its own
+azimuth curve — the response may differ in shape from the centre to the edge — and the only
+assumption between columns is linear interpolation of light. The renderer inverts the table per
+pixel: the drive at which that azimuth's curve reaches the target light. The uniform range is
+`max L(az, 0) .. min L(az, 1)` over the calibrated azimuths. Azimuth resolution is the number of
+columns, so put one near every azimuth the paradigm uses.
 
-**Mocks.** Without a measurement the rig uses a mock in the same format, with a straight
-response (drive 0 = 0, drive 1 = 1) and no floor: `intensity_cal_<geostamp>_theoretical.yaml`
-(column 1 = the geometry model's cos(incidence) gain — the default, identical to the old
-theoretical correction) or `intensity_cal_none.yaml` (flat — brightness is the drive). Both are
-written automatically for the current geometry.
+**Mocks.** Without a measurement the rig uses a mock in the same format: two levels per column
+(drive 0 = 0, drive 1 = the column's gain), no floor. `intensity_cal_<geostamp>_theoretical.yaml`
+(one column per azimuth sample of the geometry model, gain = its cos(incidence) — the default,
+identical to the old theoretical correction) or `intensity_cal_none.yaml` (flat — brightness is
+the drive). Both are written automatically for the current geometry.
 
 ### Procedure
 
@@ -175,24 +178,27 @@ written automatically for the current geometry.
    (Thorlabs PM100D, or any linear meter) on a stand.
 2. Display card → **INTENSITY → Measure…**. Set **Alt** (used for the whole calibration),
    **Size** (default 15°, overfills the sensor) and **Unit** (a label, e.g. lux).
-3. Column 1: edit/add azimuth rows (defaults 0, ±20 … ±100). For each row press **▶** (the patch
-   lights at full drive, raw) and **R** (PM100D) or type the value. R advances to the next empty row.
-4. Level columns: set each column's azimuth in its header, **+ column** for more. ▶ / R per cell;
-   rows are the drive levels, 0.0 being a black patch (the floor).
-5. **Save** writes the file and logs a fit report (uniform range, how much the column shapes
-   differ, left/right asymmetry). **Save & Apply** also applies it.
+3. Columns: the panel opens with columns at 0°, 40° and 80°; edit the azimuth in a header,
+   **+ column** for more (−40° to check symmetry, 100° if the paradigm goes there), × to remove.
+   Rows are the drive levels 1.0 … 0.0; **+ level** adds one, × removes one (1.0 and 0.0 stay).
+4. For each cell press **▶** (the patch lights at that drive, raw, at the column's azimuth) and
+   **R** (PM100D) or type the value. R advances to the next empty row of the column.
+5. **Save** writes the file and logs a fit report (uniform range, columns, how much the columns'
+   normalized response shapes differ, left/right asymmetry). **Save & Apply** also applies it.
 6. **Apply** (or pick any file in the **Calibration** dropdown, then Apply) rebuilds
-   `warp_map.npz` with that file's light model, deploys it to the Pis, reloads a live display and
+   `warp_map.npz` with that file's light table, deploys it to the Pis, reloads a live display and
    records the choice in the rig YAML (`devices.display.intensity_calibration`, saved at once).
 
 ### What good output looks like
 
-- Column 1 descends toward the edges; the L/R asymmetry is a few percent.
-- Every level column rises monotonically from its floor to its drive-1 reading.
-- Shape spread small (a few %) means one response curve fits the whole screen; large means the
-  interpolation between columns is doing real work — measure a column near each azimuth you use.
-- Check after Apply: TESTS → Blank at a mid brightness and read the meter at a few azimuths;
-  the light should match within a few percent.
+- Column tops (drive 1.0) descend toward the edges; a ±az pair agrees within a few percent.
+- Every column rises monotonically from its floor to its drive-1 reading (a dip is a meter or
+  typing slip — the fit flattens it, but fix the number).
+- The shape spread in the report says how non-separable the screen is: small (a few %) means one
+  response curve would have fit everywhere; large means the per-level curves are doing real work,
+  and the columns had better sit near the azimuths you use.
+- Check after Apply: TESTS → Blank at a mid brightness and read the meter at a few azimuths,
+  between the columns too; the light should match within a few percent.
 
 ### Gray scale & contrast metric
 

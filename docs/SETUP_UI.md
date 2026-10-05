@@ -279,10 +279,11 @@ contrast on light (details: [CALIBRATION_PROTOCOL.md, Part 2](CALIBRATION_PROTOC
   default) and `none` mocks. **Apply** rebuilds and deploys the warp with the selected file and
   makes it the rig's (`devices.display.intensity_calibration`, saved at once). The line below shows
   the uniform range Bg 0..1 spans.
-- **Measure…** opens the measurement panel, at one **Alt** for the whole calibration. Column 1:
-  light at full drive at the azimuth rows you choose (**+ azimuth**). Level columns: light at drive
-  1.0 … 0.0 at the azimuth in each column header (**+ column**). ▶ shows a cell's patch (raw), R
-  reads the Thorlabs PM100D and advances, or type the value. **Save** writes
+- **Measure…** opens the measurement panel, at one **Alt** for the whole calibration. One column
+  per azimuth (0°, 40°, 80° by default; edit the header, **+ column**, × to remove — two columns
+  minimum, three or more out to the screen edge recommended): light at drive 1.0 … 0.0 there
+  (**+ level** / × edit the rows; 1.0 and 0.0 stay). ▶ shows a cell's patch (raw), R reads the
+  Thorlabs PM100D and advances, or type the value. **Save** writes
   `display_calibration/<rig>/intensity/intensity_cal_<stamp>.yaml` and logs a fit report;
   **Save & Apply** also applies it.
 - The TESTS row follows the applied calibration: **Bg** is a brightness, **Contrast %** is contrast

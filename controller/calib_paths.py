@@ -5,8 +5,8 @@ controller/calib_paths.py — where each rig's display calibration lives on the 
     display_calibration/_template/        one template per file kind (geometry/, intensity/)
     display_calibration/<rig>/
         geometry/rig_geometry_<YYYYmmdd_HHMM>.yaml          one file per calibration, never edited
-        intensity/intensity_cal_<stamp>.yaml                 measured: light along azimuth +
-                                                             light vs drive at chosen azimuths
+        intensity/intensity_cal_<stamp>.yaml                 measured: light vs drive at 2+ chosen
+                                                             azimuths (3+ recommended), one altitude
         intensity/intensity_cal_<geostamp>_theoretical.yaml  mock from the geometry (default)
         intensity/intensity_cal_none.yaml                    mock: no correction
         warp_map.npz                                         generated; carries the light model

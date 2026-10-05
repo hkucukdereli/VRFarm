@@ -21,8 +21,8 @@ display_calibration/                          scripts, shared by every rig
 └── <rig>/                                    one folder per rig (created on first use)
     ├── geometry/rig_geometry_<YYYYmmdd_HHMM>.yaml     one file per calibration, never edited
     ├── intensity/
-    │   ├── intensity_cal_<stamp>.yaml                 measured: light along azimuth + light vs
-    │   │                                              drive at chosen azimuths, one altitude
+    │   ├── intensity_cal_<stamp>.yaml                 measured: light vs drive at 2+ chosen
+    │   │                                              azimuths (3+ recommended), one altitude
     │   ├── intensity_cal_<geostamp>_theoretical.yaml  mock from the geometry (the default)
     │   └── intensity_cal_none.yaml                    mock: no correction
     └── warp_map.npz                                   generated; carries the light model (int_*)
@@ -35,11 +35,12 @@ at it; the Geometry Cal tool's Save also lands as a new dated file. None of thes
 On the Pis nothing changed: `~/rig/calibration/` holds `warp_map.npz` + `rig_geometry.yaml`.
 
 **Intensity calibration.** One file per measurement (format: `_template/intensity/intensity_cal_template.yaml`):
-column 1 = light at full drive along azimuth, level columns = light vs drive 1.0..0.0 at azimuths
-you choose, all at one altitude. `shared/intensity_model.py` fits a light model (floor, max light
-and response per azimuth) that the warp carries to the renderer, the Leader and the controller, so
-the background is uniform in light, Bg is a brightness (0..1 of the uniform range) and contrast is
-contrast of light. The rig uses the file named by `devices.display.intensity_calibration`
+one column per azimuth you choose = light vs drive 1.0..0.0 there (two minimum, three or more out
+to the screen edge recommended), all at one altitude. `shared/intensity_model.py` builds a
+per-level light table from it (for each drive level, light interpolated across the columns'
+azimuths — no response shape is shared between azimuths) that the warp carries to the renderer,
+the Leader and the controller, so the background is uniform in light, Bg is a brightness (0..1 of
+the uniform range) and contrast is contrast of light. The rig uses the file named by `devices.display.intensity_calibration`
 (Setup → INTENSITY → Apply). Protocol: `docs/CALIBRATION_PROTOCOL.md`, Part 2.
 
 ## Files

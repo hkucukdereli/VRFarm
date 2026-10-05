@@ -271,8 +271,9 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
 - Calibration files are per rig: `display_calibration/<rig>/geometry/rig_geometry_<stamp>.yaml`
   (the rig YAML's `display.geometry_file` picks one; dated files are never rewritten, an edit saves
   a new one), `display_calibration/<rig>/intensity/intensity_cal_*.yaml` (ONE intensity calibration per
-  measurement: light at full drive along azimuth + light vs drive at user-chosen azimuths, one
-  altitude; plus theoretical/none mocks with a straight 0->0, 1->1 response), and
+  measurement: light vs drive at 2+ user-chosen azimuths (3+ recommended), one altitude — a
+  per-level light table, no response shape shared between azimuths; plus theoretical/none mocks
+  with two levels per column, 0->0, 1->gain), and
   `display_calibration/<rig>/warp_map.npz`, which carries the light model (`shared/intensity_model.py`)
   of the rig's `devices.display.intensity_calibration` (Setup → INTENSITY → Apply). Background /
   Bg is a BRIGHTNESS (0..1 of the uniform light range) and contrast is contrast of light — in the

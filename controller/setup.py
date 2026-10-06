@@ -608,12 +608,9 @@ def api_reinit_device():
 
 # ── warp map / intensity calibration ──
 #
-# One intensity calibration per rig (display_calibration/<rig>/intensity/intensity_cal_*.yaml):
-# one column per user-chosen azimuth = light vs drive 1.0..0.0 there (two minimum, 3+ recommended);
-# the model is a per-level light table interpolated across the columns' azimuths.
-# The rig YAML's devices.display.intensity_calibration names the file whose light model the warp
-# carries; without one the theoretical mock of the current geometry is used (= the old
-# theoretical correction). See display_calibration/intensity_cal.py, shared/intensity_model.py.
+# Intensity calibration files: display_calibration/<rig>/intensity/intensity_cal_*.yaml; the rig
+# YAML's devices.display.intensity_calibration names the one baked into the warp (default: the
+# theoretical mock of the current geometry). See display_calibration/intensity_cal.py.
 
 def _cal_mod():
     if str(TOOLS_DIR) not in sys.path:

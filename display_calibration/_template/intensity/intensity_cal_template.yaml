@@ -1,15 +1,8 @@
 # TEMPLATE — display_calibration/<rig>/intensity/intensity_cal_<YYYYmmdd_HHMM>.yaml
-# One intensity calibration, measured in Setup → Display → INTENSITY → Measure, at ONE altitude:
-#   level_sweeps   one column per azimuth you choose: light vs drive 1.0 .. 0.0 (0.0 = black floor).
-#                  Two columns minimum; three or more (e.g. 0°, 40°, 80°, out to the screen edge)
-#                  is the useful case. A column on the other side of centre checks L/R symmetry.
-# shared/intensity_model.py builds a per-level light table from it: for every drive level the light
-# is interpolated across the columns' |az| (held constant beyond the last column), so each level
-# has its own azimuth curve and no response shape is shared between azimuths. The warp carries the
-# table to the renderer. The rig uses the file named by devices.display.intensity_calibration
-# (Setup → INTENSITY → Apply). Readings are only used as ratios and differences of light; `unit`
-# labels them. Mock files (source: theoretical / none) use this same format with two levels per
-# column (drive 0 -> 0, drive 1 -> gain).
+# Measured in Setup → Display → INTENSITY → Measure, at ONE altitude: one column per azimuth you
+# choose, light vs drive 1.0 .. 0.0 (0.0 = black floor). Two columns minimum, three or more out to
+# the screen edge recommended. The rig uses the file named by devices.display.intensity_calibration.
+# Mock files (source: theoretical / none) use the same format with two levels per column.
 kind: intensity
 version: 1
 source: measured            # measured | theoretical | none

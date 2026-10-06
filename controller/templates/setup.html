@@ -992,16 +992,9 @@ function updateAzimuthHeight(h) {
   refreshDerivedAz();
 }
 
-// ── Intensity calibration (one file: light vs drive at the azimuths you choose, one altitude) ──
-// The dropdown lists display_calibration/<rig>/intensity/intensity_cal_*.yaml: measured files, the
-// theoretical mock of the current geometry (two-level columns, geometry gain — the default) and
-// the none mock. Apply rebuilds + deploys the warp with that file's light table and records it in
-// the rig YAML (devices.display.intensity_calibration). Measure opens the panel below.
-//
-// The panel measures at ONE altitude: one COLUMN per azimuth (its header), light at each drive
-// level (rows 1.0 .. 0.0, 0.0 = the black floor). Two columns are the minimum, three or more out to
-// the screen edge the useful case; columns and levels can be added/removed (1.0 and 0.0 stay).
-// Every patch is drawn RAW (apply_lum false): the meter must see the panel's own response.
+// ── Intensity calibration: display_calibration/<rig>/intensity/intensity_cal_*.yaml ──
+// Apply rebuilds + deploys the warp with the chosen file and records it in the rig YAML. The
+// Measure panel: one column per azimuth, light at each drive level, patches drawn raw (no model).
 const INT_LEVELS = [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05, 0.0];
 const INT_COLS_DEFAULT = [0, 40, 80];
 const LUM_SETTLE_MS = 400;   // SHOW -> on glass ~62 ms + meter integration
@@ -1087,7 +1080,6 @@ function _intSet(col, row, val) {
   if (v == null) delete c.readings[m.levels[row]]; else c.readings[m.levels[row]] = v;
 }
 function _intTarget(col, row) {
-  // What the projector shows for a cell: the row's drive level at the column's azimuth.
   const m = intMeasure, c = m.cols[col];
   return {az: c ? c.az : 0, level: m.levels[row] != null ? m.levels[row] : 1.0};
 }

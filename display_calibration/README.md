@@ -54,7 +54,7 @@ the uniform range) and contrast is contrast of light. The rig uses the file name
 | `validate_calibration_pygame.py` | Renders the finished warp grid on the projector to check it. |
 | `cal_start.sh` / `cal_stop.sh` | Start/stop a tool on mozzarella (survives the SSH session). |
 | `intensity_cal.py` | Intensity calibration files: save (fit-validated), theoretical/none mocks, list, load. |
-| `validate_calibration.py`, `display_test_patches.py` | Legacy offline validation helpers. |
+| `validate_calibration.py` | Legacy offline validation helper (PsychoPy; does not run on the follower). |
 
 ## The two ways to set geometry
 

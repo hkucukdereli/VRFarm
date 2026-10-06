@@ -251,7 +251,6 @@ display_calibration/                 (on the controller; deployed to ~/rig/calib
 ├── compute_warp_map.py             # Ray-traces rig_geometry.yaml → warp_map.npz
 ├── validate_calibration_pygame.py  # On-projector warp validator (pygame; --flip-h/--flip-v)
 ├── validate_calibration.py         # Legacy PsychoPy validator (does not run on the follower)
-├── display_test_patches.py         # Legacy CLI luminance patch stepper (setup-UI flow preferred)
 ├── intensity_cal.py                # intensity calibration files: save / mocks / list / load
 │
 ├── warp_map.npz                    # Generated — used by all experiments

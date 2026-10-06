@@ -35,7 +35,8 @@ stream telemetry**, does not touch the HDF5, and writes only two plain files.
 | Camera encode fps (while recording) | `pi_api /api/status` | 45 / 30 fps |
 | `pi_api` responsive | HTTP probe | critical once down past the [grace period](#pi_api-grace-period); at once during a session |
 
-Every threshold, direction, and **message** is editable in [`config.yaml`](config.yaml).
+Every threshold, direction, and **message** is editable in `~/rig/shepherd/config.yaml` on the leader
+(seeded from [`config_template.yaml`](config_template.yaml)).
 
 ## Two alert levels
 
@@ -113,7 +114,7 @@ The Deploy log shows both numbers, e.g. `pi_api on cheddar was down 4.1 s` and
 
 ## Configuring
 
-Edit [`config.yaml`](config.yaml) and restart shepherd (it reads the file once at
+Edit `~/rig/shepherd/config.yaml` on the leader and restart shepherd (it reads the file once at
 startup). Each metric block:
 ```yaml
 soc_temp_c:

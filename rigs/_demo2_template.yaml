@@ -5,8 +5,7 @@
 # the IPs are loopback, so a stray Deploy/Install can never reach the real rig.
 #
 #   python tools/mock_pi.py          # fake pi_api :5080 + fake leader UDP :5572
-#   python app/app.py                # experiment UI  -> rig = demo
-#   python setup/app.py              # setup UI       -> rig = demo
+#   python controller/app.py         # the controller UI (localhost:5000); load the rig there
 #
 # Device values below mirror the live rig (cheddar) so every card in the setup UI and
 # every panel in the experiment UI renders with realistic content.

@@ -3,7 +3,7 @@
 # Installed to /etc/systemd/system by the setup UI's Install step.
 # Shipped DISABLED: Install runs daemon-reload only — phase 3 enables.
 #
-# WHAT INSTALL MUST SUBSTITUTE (setup/app.py, step 5c):
+# WHAT INSTALL MUST SUBSTITUTE (controller/setup.py, Install step 5c):
 #   <name>   -> the rig FILENAME (the rig's identity; the yaml rides Deploy to
 #               ~/rig/rigs/<name>.yaml).                          [already done]
 #   User=    -> the target Pi's `pis[].user` from the rig yaml when it is not

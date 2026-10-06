@@ -255,7 +255,7 @@ display_diagnostics/preview/
 # (YAML is handled by the rule at the end of this file: only *_template.yaml is tracked.)
 
 # Controller-wide settings (machine-specific: data root, groups, ports), created from the tracked
-# controller/configs/controller.example.yaml. /controller.yaml is where the file lived before
+# controller/configs/controller_template.yaml. /controller.yaml is where the file lived before
 # controller/configs/ — the controller moves it on startup; until then it must stay ignored.
 controller/configs/controller.yaml
 controller/configs/.controller.*.yaml

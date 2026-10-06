@@ -1,41 +1,20 @@
 """
-shared/intensity_model.py — the display's light model, one implementation for the controller
-(previews, Correct), the Leader (stimulus generation) and the follower's renderer (per-pixel
-drive). numpy only: the renderer runs on the Pi's system python3.
+shared/intensity_model.py — the display's light model, shared by the controller (previews,
+Correct), the Leader (stimulus generation) and the follower's renderer (per-pixel drive).
+numpy only: the renderer runs on the Pi's system python3.
 
-THE CALIBRATION (display_calibration/<rig>/intensity/intensity_cal_<stamp>.yaml, one altitude)
+Calibration (display_calibration/<rig>/intensity/intensity_cal_<stamp>.yaml, one altitude):
+    level_sweeps: [{az_deg, measurements: [{level, reading}, ...]}, ...]
+one column per azimuth: the meter reading at each drive level 1.0 .. 0.0 (0.0 = black floor).
+Two columns minimum. Mock files (theoretical / none) have two levels per column (0 -> 0, 1 -> gain).
 
-  level_sweeps: [{az_deg, measurements: [{level, reading}, ...]}, ...]
-
-One COLUMN per azimuth the user chose: the meter reading at each drive level 1.0 .. 0.0 there
-(0.0 is the black floor). Two columns are the minimum, three or more at different azimuths the
-useful case; a column on both sides of centre tests the left/right symmetry the fold assumes.
-Readings are meter values (lux, W, cd/m2 — the `unit` field only labels them). Mock files
-(source: theoretical / none) use the same format with two levels per column (0 -> 0, 1 -> gain),
-so "no measurement yet" runs through the exact same code.
-
-THE MODEL — a 2-D lookup table, no parametric form, no shared response shape
-
-  Every column is made monotone in drive and put on the common level grid (the union of all
-  measured levels). Then, FOR EACH DRIVE LEVEL SEPARATELY, the light is interpolated linearly
-  across the columns' |az| (readings at +az and -az are averaged first) and held constant beyond
-  the first and last column:
-
-      L(az, v)   for az on a 0.5° grid 0..105° (plus the column azimuths), v on the level grid
-
-  Forward: light at (az, v) = interpolate L(az, ·) in v.  Inverse (what the renderer does per
-  pixel): the drive at which L(az, ·) reaches the target light. So each level has its own
-  azimuth curve — the response may differ in shape from azimuth to azimuth — and the only thing
-  assumed between columns is linear interpolation of light.
-
-  Uniform range over the calibrated azimuths (0 .. the largest column |az|):
-      Lo = max_az L(az, 0)   (nothing can be darker everywhere)
-      Hi = min_az L(az, 1)   (nor brighter)
-  Brightness b in [0, 1] means L = Lo + b * (Hi - Lo). A stimulus may ask for b > 1 (above the
-  uniform ceiling, where the screen can deliver it); each pixel then clips at drive 1.
-
-  With a theoretical mock (two levels, 0 -> 0 and 1 -> gain(az)) drive = b * min(gain)/gain(az):
-  exactly the old multiplicative luminance correction.
+Model: a (|az| x level) table L(az, v). Each column is made monotone and put on the common level
+grid; for each level the light is interpolated linearly across the columns' |az| (±az averaged)
+and held constant beyond the end columns. Forward: interpolate L(az, ·) in v. Inverse (the
+renderer, per pixel): the drive at which L(az, ·) reaches the target light. Uniform range
+Lo = max_az L(az, 0), Hi = min_az L(az, 1) over the calibrated azimuths; brightness b in [0, 1]
+means L = Lo + b (Hi - Lo); b > 1 is allowed where the screen can deliver it (pixels clip at 1).
+With a theoretical mock, drive = b * min(gain)/gain(az): the old multiplicative correction.
 """
 from __future__ import annotations
 
@@ -103,8 +82,7 @@ def fit(cal: dict) -> dict:
     if len(cols_az) < MIN_COLUMNS:
         raise CalibrationError(f"only {len(cols_az)} column azimuth(s); need at least {MIN_COLUMNS} "
                                f"different |az| (three or more recommended)")
-    # per level: light across azimuth on the 0.5° grid plus the column azimuths themselves (so a
-    # column is reproduced exactly where it was measured), held constant beyond the end columns
+    # per level: light across |az| on the 0.5° grid + the column azimuths (columns reproduced exactly)
     az_grid = np.union1d(AZ_GRID, cols_az)
     L = np.column_stack([np.interp(az_grid, cols_az, table[:, j]) for j in range(len(levels))])
     az_cal = float(cols_az.max())

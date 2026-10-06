@@ -1,17 +1,13 @@
 """
-display_calibration/intensity_cal.py — the rig's intensity calibration files.
+display_calibration/intensity_cal.py — the rig's intensity calibration files:
 
     display_calibration/<rig>/intensity/
         intensity_cal_<YYYYmmdd_HHMM>.yaml               measured (Setup → INTENSITY → Measure)
         intensity_cal_<geostamp>_theoretical.yaml        mock: geometry gain, straight response
         intensity_cal_none.yaml                          mock: flat, drive = brightness
 
-One file holds everything (format: _template/intensity/intensity_cal_template.yaml): one level
-column per azimuth the user picked — light vs drive 1.0 .. 0.0 there — at one altitude for the
-whole file. Two columns are the minimum, three or more the useful case. shared/intensity_model.py
-turns the columns into the per-level light table the warp map carries to the renderer. The rig
-uses the file named by its rig YAML's devices.display.intensity_calibration (Setup → INTENSITY →
-Apply). An `azimuth_sweep` key from the earlier format is ignored.
+Format: _template/intensity/intensity_cal_template.yaml; model: shared/intensity_model.py. The rig
+uses the file named by devices.display.intensity_calibration. An `azimuth_sweep` key is ignored.
 """
 from __future__ import annotations
 
@@ -123,11 +119,9 @@ def _fits(path: Path) -> bool:
 
 
 def upgrade_mocks(cal_dir) -> list[str]:
-    """Rewrite mock files (source theoretical/none) left in the earlier format — gain along azimuth
-    in `azimuth_sweep` plus one level column — as two-level columns, keeping their azimuth gain,
-    altitude, geometry_file and timestamp. Measured files are never touched (their azimuth column
-    cannot be turned into level columns; one with fewer than two columns stays invalid, and says
-    why). Returns the names rewritten."""
+    """Rewrite mock files (source theoretical/none) left in the earlier single-column format as
+    two-level columns from their `azimuth_sweep` gain. Measured files are never touched. Returns
+    the names rewritten."""
     done = []
     for f in Path(cal_dir).glob(GLOB):
         try:

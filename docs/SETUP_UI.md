@@ -128,7 +128,7 @@ its assigned devices.
 | Button | What it does | When to use it | Risk |
 |---|---|---|---|
 | **Check** | SSH `echo ok` + `GET /api/status` | Any time; ~5 s | none |
-| **Install** | Full first-time provisioning: conda `rig` env pinned to the system Python, apt packages, I²C enable, binding symlinks, pip, all code, `config.txt`/`xorg.conf`, systemd units, time zone `Europe/Vienna` | **Once**, on a fresh Pi | **Minutes; rewrites boot config.** Needs passwordless sudo. Reboot the follower afterwards |
+| **Install** | Full first-time provisioning: conda `rig` env pinned to the system Python, apt packages, I²C enable, binding symlinks, pip, the Teensy toolchain on the photodiode Pi, all code, `config.txt`/`xorg.conf`, systemd units, time zone `Europe/Vienna` | **Once**, on a fresh Pi | **Minutes; rewrites boot config.** Needs passwordless sudo. Reboot the follower afterwards |
 | **Deploy** | Uploads current code, restarts shepherd (leader) and `pi_api`. The restart is timed: the leader's shepherd then waits that long ×1.5 (5–60 s) before reporting pi_api down | After **every** code change | Drops initialized devices |
 | **Restart API** | Asks `pi_api` to self-kill; systemd respawns it. Timed like Deploy | When the API is wedged | Drops initialized devices |
 | **Reboot** | `sudo reboot` | After Install on the follower | Pi offline ~40 s |
@@ -229,6 +229,13 @@ here but consumed by the **display** — they control the red patch the projecto
 **Live** shows a triggered scope (−2 ms to +14 ms); **Test** additionally tells the
 display Pi to start flashing the patch, so you can confirm the whole optical path in one
 click. Filtering now lives on the Teensy, so there are no debounce sliders.
+
+**Teensy firmware** (row under the card, usable before the device is initialized): **Browse** a
+local `.ino` or leave it on the newest repo sketch, tick **Debug** for the serial traces, **Upload**.
+The sketch is compiled and flashed on the Pi that owns the photodiode (named in the row), where the
+Teensy is plugged in; the toolchain is installed there first if missing. A fresh Teensy has to have
+its button pressed once when the compile finishes — the log says so. Details:
+[TEENSY_INSTRUCTIONS.md](TEENSY_INSTRUCTIONS.md).
 
 ### Running Wheel
 

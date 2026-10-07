@@ -243,6 +243,15 @@ def api_install_pi():
         ssh(ssh_prefix, f"{conda_activate} pip install {pkg_str}", timeout=120)
         steps.append(f"Installed Python packages: {pkg_str}")
 
+        # 4b. Teensy toolchain on the Pi that owns the photodiode: the Setup UI compiles and
+        #     flashes the sync-detector sketch THERE (the Teensy is on its USB). Needs internet
+        #     on the Pi; a failure is a warning — Upload retries the install itself.
+        if "photodiode" in devices:
+            try:
+                _install_teensy_toolchain(ssh_prefix, steps)
+            except Exception as e:
+                steps.append(f"WARN: Teensy toolchain not installed ({e}) — Upload will retry")
+
         # 5. Project files (the deploy manifest). Make the ~/rig subdirs first.
         from shared.deploy_manifest import deploy_files
         files_to_deploy = deploy_files(role)
@@ -1058,13 +1067,82 @@ def api_send_geometry():
 
 TEENSY_FQBN = "teensy:avr:teensy40"
 TEENSY_MCU = "TEENSY40"
+ARDUINO_CLI_URL = "https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Linux_ARM64.tar.gz"
+TEENSY_INDEX_URL = "https://www.pjrc.com/teensy/package_teensy_index.json"
+TEENSY_RULES = ROOT / "teensy" / "00-teensy.rules"
+TEENSY_STATUS_CMD = ("test -x ~/bin/arduino-cli && echo CLI; "
+                     "test -d ~/.arduino15/packages/teensy/hardware/avr && echo CORE; "
+                     "command -v teensy_loader_cli >/dev/null && echo LOADER; "
+                     "test -f /etc/udev/rules.d/00-teensy.rules && echo RULES; "
+                     "echo USB:$(lsusb -d 16c0: 2>/dev/null | grep -o 'ID 16c0:[0-9a-f]*' | cut -d: -f2 | tr '\\n' ,)")
+
+
+def _teensy_status(tgt) -> dict:
+    """Toolchain parts present on the Pi + the Teensy's USB product ids (0483 = Serial, 0486 =
+    RawHID as a fresh board enumerates, 0478 = HalfKay bootloader; empty = no Teensy seen)."""
+    out = ssh_merged(tgt, TEENSY_STATUS_CMD, timeout=20)
+    toks = out.split()
+    usb = next((t[4:] for t in toks if t.startswith("USB:")), "")
+    st = {k.lower(): (k in toks) for k in ("CLI", "CORE", "LOADER", "RULES")}
+    st["usb_pids"] = [p for p in usb.split(",") if p]
+    st["serial_mode"] = "0483" in st["usb_pids"]
+    st["toolchain_ok"] = all(st[k] for k in ("cli", "core", "loader", "rules"))
+    return st
+
+
+def _install_teensy_toolchain(tgt, steps, status=None):
+    """Idempotent: whatever is missing of teensy-loader-cli (apt), arduino-cli (~/bin, ARM64 build),
+    the PJRC teensy:avr core (~/.arduino15, via PJRC's board index) and the PJRC udev rules. The
+    Pi downloads these itself (institute WiFi). Install runs this for the Pi that owns the
+    photodiode; Upload runs it too, so a fresh leader flashes without a re-Install."""
+    st = status or _teensy_status(tgt)
+    if st["toolchain_ok"]:
+        steps.append("Teensy toolchain present (arduino-cli + teensy:avr core, teensy_loader_cli, udev rules)")
+        return st
+    if not st["loader"]:
+        ssh(tgt, "sudo apt-get update -qq && sudo apt-get install -y teensy-loader-cli", timeout=300)
+        steps.append("Installed teensy-loader-cli (apt)")
+    if not st["cli"]:
+        ssh(tgt, f"mkdir -p ~/bin && curl -fsSL {ARDUINO_CLI_URL} | tar -xz -C ~/bin arduino-cli && "
+                 "chmod +x ~/bin/arduino-cli", timeout=300)
+        ver = ssh_merged(tgt, "~/bin/arduino-cli version", timeout=20).strip().splitlines()
+        steps.append("Installed ~/bin/" + (ver[-1] if ver else "arduino-cli"))
+    if not st["core"]:
+        ssh(tgt, f"test -f ~/.arduino15/arduino-cli.yaml || ~/bin/arduino-cli config init --additional-urls {TEENSY_INDEX_URL}; "
+                 f"~/bin/arduino-cli core update-index --additional-urls {TEENSY_INDEX_URL} && "
+                 f"~/bin/arduino-cli core install teensy:avr --additional-urls {TEENSY_INDEX_URL}", timeout=1800)
+        core = ssh_merged(tgt, "~/bin/arduino-cli core list 2>/dev/null | grep teensy:avr", timeout=30).split()
+        steps.append(f"Installed Teensy core teensy:avr {core[1] if len(core) > 1 else ''} (PJRC board index)")
+    if not st["rules"]:
+        scp(str(TEENSY_RULES), f"{tgt}:/tmp/00-teensy.rules")
+        ssh(tgt, "sudo cp /tmp/00-teensy.rules /etc/udev/rules.d/00-teensy.rules && "
+                 "sudo udevadm control --reload-rules && sudo udevadm trigger", timeout=30)
+        steps.append("Installed PJRC udev rules (Teensy USB nodes world-writable)")
+    return _teensy_status(tgt)
+
+
+def _photodiode_pi(rs: RigState):
+    return next((pi for pi in rs.pis if "photodiode" in pi.get("devices", [])), None)
+
+
+@bp.route("/teensy_status")
+def api_teensy_status():
+    """Toolchain + Teensy USB mode on the Pi that owns the photodiode (what Upload will meet)."""
+    rs: RigState = g.rs
+    pd_pi = _photodiode_pi(rs)
+    if not pd_pi:
+        return jsonify({"ok": False, "error": "No Pi has the photodiode device"}), 400
+    try:
+        return jsonify({"ok": True, "pi": pd_pi["name"], **_teensy_status(ssh_target(pd_pi))})
+    except Exception as e:
+        return jsonify({"ok": False, "pi": pd_pi["name"], "error": str(e)})
 
 
 @bp.route("/teensy_upload", methods=["POST"])
 def api_teensy_upload():
     """Compile the photodiode Teensy sketch and flash it on the Pi that owns the photodiode."""
     rs: RigState = g.rs
-    pd_pi = next((pi for pi in rs.pis if "photodiode" in pi.get("devices", [])), None)
+    pd_pi = _photodiode_pi(rs)
     if not pd_pi:
         return jsonify({"ok": False, "error": "No Pi has the photodiode device"}), 400
     import re as _re
@@ -1090,6 +1168,12 @@ def api_teensy_upload():
         steps.append(f"DEBUG set to {1 if debug else 0}" if n else
                      "WARNING: no '#define DEBUG' line found — uploading as-is")
         tgt = ssh_target(pd_pi)
+        st = _install_teensy_toolchain(tgt, steps)            # no-op when everything is there
+        if not st["usb_pids"]:
+            raise RuntimeError(f"no Teensy on {pd_pi['name']}'s USB (lsusb shows no 16c0 device)")
+        if not st["serial_mode"]:
+            steps.append(f"Teensy on USB as 16c0:{','.join(st['usb_pids'])} (not Serial) — soft reboot "
+                         "unavailable, the loader waits for the button")
         rdir = f"~/teensy_build/{sketch}"
         ssh(tgt, f"mkdir -p {rdir}")
         with tempfile.NamedTemporaryFile("w", suffix=".ino", delete=False) as f:
@@ -1105,8 +1189,10 @@ def api_teensy_upload():
         mem = [l.strip() for l in out.splitlines() if "FLASH:" in l or "RAM1:" in l]
         steps += ["  " + l for l in mem[:2]] or ["Compiled."]
         out = ssh_merged(tgt, f"teensy_loader_cli --mcu={TEENSY_MCU} -s -w -v {rdir}/out/{sketch}.ino.hex",
-                         timeout=120)
+                         timeout=150)
         steps.append((out.strip().splitlines() or ["Flashed."])[-1])
+        if "Booting" not in out and "Programming" not in out:
+            raise RuntimeError("teensy_loader_cli did not program the board: " + out.strip()[-300:])
         return jsonify({"ok": True, "steps": steps})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e), "steps": steps})

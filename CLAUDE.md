@@ -221,7 +221,10 @@ a real `rsync` >= 3.1 for the Data tab. `rsync_path: null` resolves to **the env
 `rsync_path: /usr/bin/rsync` in `controller/configs/controller.yaml` (Ubuntu's is real rsync,
 3.4.1). Only on macOS is `/usr/bin/rsync` Apple's openrsync, which the Data tab rejects.
 **Leader** (`rig` env): `flask pyyaml numpy scipy h5py smbus2 pigpio lgpio pyserial` + `picamera2`;
-`rsync` from apt on every Pi (the Install step adds it).
+`rsync` from apt on every Pi (the Install step adds it). The Pi that owns the photodiode also gets the
+**Teensy toolchain** (`teensy-loader-cli` apt, `~/bin/arduino-cli`, core `teensy:avr` in `~/.arduino15`,
+PJRC udev rules from `teensy/00-teensy.rules`): the Setup UI compiles + flashes the sync sketch THERE,
+and Upload installs any missing part itself (`docs/TEENSY_INSTRUCTIONS.md`).
 **Follower**: `rig` env for pi_api; **system python3** for displayd/renderer and calib_geo
 (`python3-pygame`, `python3-numpy`, `python3-yaml` from apt — no Flask, and calib_geo's web
 UI is stdlib `http.server` for exactly that reason) plus the Mesa EGL/GLES stack (`libegl1`,

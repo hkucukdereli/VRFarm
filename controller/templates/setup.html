@@ -2624,15 +2624,18 @@ function renderPhotodiodeControls(dev) {
 
 // ── Photodiode: Teensy firmware upload ──────────────────────────────────────
 // Compiles + flashes the sketch over SSH on the Pi that owns the photodiode device
-// (the Teensy is USB-attached there). Rendered OUTSIDE the init-gated fieldset so
-// firmware can be flashed before/without device init. Browse picks a local .ino;
-// with no file chosen the server uses the newest teensy/ sketch in the repo.
+// (the Teensy is USB-attached there); the server installs the toolchain there first if
+// it is missing. Rendered OUTSIDE the init-gated fieldset so firmware can be flashed
+// before/without device init. Browse picks a local .ino; with no file chosen the
+// server uses the newest teensy/ sketch in the repo. A fresh Teensy (RawHID, no serial
+// yet) cannot be soft-rebooted: the loader waits for its button, which /teensy_status
+// tells the user about before the flash starts.
 let teensyInoFile = null;   // {name, text} from Browse
 
 function renderTeensyFirmware() {
   return `
     <div class="device-controls" style="margin-top:6px; align-items:center">
-      <span style="font-size:11px; color:#888">Teensy firmware:</span>
+      <span style="font-size:11px; color:#888">Teensy firmware${(getPiForDevice('photodiode') || {}).name ? ' (flashed on ' + getPiForDevice('photodiode').name + ')' : ''}:</span>
       <button class="btn btn-sm" onclick="document.getElementById('teensy-ino-file').click()">Browse</button>
       <input type="file" id="teensy-ino-file" accept=".ino" style="display:none" onchange="teensyPickIno(this)">
       <span id="teensy-ino-name" style="font-size:11px; color:#888">${teensyInoFile ? teensyInoFile.name : 'newest repo sketch'}</span>
@@ -2640,7 +2643,7 @@ function renderTeensyFirmware() {
         <input type="checkbox" id="teensy-debug" ${teensyDebugChecked ? 'checked' : ''}
                onchange="teensyDebugChecked = this.checked"> Debug</label>
       <button class="btn btn-orange btn-sm" onclick="uploadTeensyFirmware()"
-              title="Patch #define DEBUG, compile with arduino-cli on the photodiode Pi, flash via teensy_loader_cli (soft reboot, no button press)">Upload</button>
+              title="Patch #define DEBUG, compile with arduino-cli on the photodiode Pi, flash via teensy_loader_cli (installs the toolchain there if missing). Soft reboot, no button press — except on a fresh Teensy with no serial yet: press its button when the log says so">Upload</button>
     </div>`;
 }
 let teensyDebugChecked = false;
@@ -2663,6 +2666,17 @@ async function uploadTeensyFirmware() {
   log(`Teensy upload: ${teensyInoFile ? teensyInoFile.name : 'newest repo sketch'} (DEBUG=${debug ? 1 : 0})...`);
   _lockUI();
   try {
+    // What the flash will meet on the photodiode Pi: toolchain there? Teensy seen? serial mode?
+    const st = await fetch(SAPI + '/teensy_status').then(x => x.json()).catch(e => ({ok: false, error: String(e)}));
+    if (st.ok) {
+      log(`  ${st.pi}: toolchain ${st.toolchain_ok ? 'present' : 'MISSING — installing first (several minutes on WiFi)'}; `
+          + `Teensy USB ${st.usb_pids.length ? '16c0:' + st.usb_pids.join(',') : 'NOT FOUND'}`);
+      if (!st.usb_pids.length) { log('Teensy upload failed: no Teensy on ' + st.pi + "'s USB"); return; }
+      if (!st.serial_mode) log('  Teensy is not in Serial mode (fresh board): soft reboot unavailable — '
+                               + 'PRESS THE TEENSY BUTTON ONCE when the compile finishes (the loader waits ~2 min).');
+    } else {
+      log('  (status check failed: ' + (st.error || '') + ' — trying the upload anyway)');
+    }
     const r = await fetch(SAPI + '/teensy_upload', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ino_name: teensyInoFile?.name, ino_text: teensyInoFile?.text, debug})

@@ -1,9 +1,10 @@
 # Teensy Firmware — Photodiode Sync Detector
 
-**Board:** Teensy 4.0 (`teensy:avr:teensy40`), USB-attached to the controller for flashing
-**Last updated:** 2026-08-20
-**Files:** [`teensy/photodiode_sync_v2_0/`](../teensy/photodiode_sync_v2_0/) (current) ·
-[`teensy/photodiode_sync_v1_0/`](../teensy/photodiode_sync_v1_0/) (previous)
+**Board:** Teensy 4.0 (`teensy:avr:teensy40`), USB-attached to the **leader Pi** of its rig, where it
+is also flashed (Setup UI → photodiode card → **Teensy firmware → Upload**)
+**Last updated:** 2026-10-07
+**Files:** [`teensy/photodiode_sync_v2_2/`](../teensy/photodiode_sync_v2_2/) (current) · earlier
+versions alongside · [`teensy/00-teensy.rules`](../teensy/00-teensy.rules) (PJRC udev rules Install puts on the Pi)
 **Related:** [LEADER_WIRING.md](LEADER_WIRING.md) (where `OUT_PIN` lands on the Pi header) ·
 [CALIBRATION_PROTOCOL.md](CALIBRATION_PROTOCOL.md)
 
@@ -31,56 +32,43 @@ drifts. Set `ADAPTIVE 0` in the sketch to fall back to the `v1_0`-style fixed th
 
 ---
 
-## Prerequisites
+## Flashing from the Setup UI (the normal way)
 
-Already installed on the controller — listed here for rebuilding a machine:
+The sketch is compiled and flashed **on the leader Pi that owns the photodiode device** — the Teensy
+hangs off that Pi's USB, one Teensy per rig. In the Setup tab, photodiode card, **Teensy firmware**
+row: **Browse** picks a local `.ino` (with no file chosen the newest `teensy/` sketch in the repo is
+used), **Debug** patches `#define DEBUG`, **Upload** does the rest and logs each step. Nothing on
+the controller is needed.
 
-```bash
-sudo apt install arduino-cli               # or: https://arduino.github.io/arduino-cli
-arduino-cli core install teensy:avr        # Teensy core (1.62.0 as of this writing)
-```
+**Toolchain on the Pi.** Install puts it on the Pi that has the photodiode (step 4b), and Upload
+installs whatever is missing before compiling, so a leader that was installed earlier needs no
+re-Install. The Pi downloads these itself over the institute WiFi:
 
-Non-root uploads need the PJRC udev rules at `/etc/udev/rules.d/00-teensy.rules`
-(from https://www.pjrc.com/teensy/00-teensy.rules) — already installed here. They set the
-Teensy's USB and `ttyACM*` nodes to mode `0666`, so **no `dialout` group membership is
-required**, and they run `stty raw -echo` on the port at plug-in.
+| Part | Where | What for |
+|---|---|---|
+| `teensy-loader-cli` (apt) | `/usr/bin` | flashes the `.hex` over USB (HalfKay bootloader) |
+| `arduino-cli` (ARM64 build) | `~/bin/arduino-cli` | compiles the sketch |
+| Teensy core `teensy:avr` (PJRC board index) | `~/.arduino15` (~650 MB) | board support + compiler |
+| PJRC udev rules | `/etc/udev/rules.d/00-teensy.rules` | Teensy USB and `ttyACM*` nodes mode `0666`, `stty raw -echo` at plug-in, ModemManager kept off the port |
 
----
+**First flash of a fresh Teensy.** A new board enumerates as `16c0:0486 Teensyduino RawHID` with no
+`/dev/ttyACM0`. The loader's soft reboot works through the Serial USB identity, so it cannot reboot
+a RawHID board: the log says so before the compile, and when the compile finishes you **press the
+Teensy's button once**; the loader waits about two minutes. Once our sketch runs the board is
+`16c0:0483 Teensyduino Serial` with `/dev/ttyACM0`, and every later Upload is hands-off.
 
-## Build and upload
-
-```bash
-cd ~/VRFarm
-arduino-cli compile --fqbn teensy:avr:teensy40 teensy/photodiode_sync_v2_0
-arduino-cli upload -p usb1/1-1 --fqbn teensy:avr:teensy40 teensy/photodiode_sync_v2_0
-```
-
-Or as one step:
-
-```bash
-arduino-cli compile -u -p usb1/1-1 --fqbn teensy:avr:teensy40 teensy/photodiode_sync_v2_0
-```
-
-**Confirm the port and FQBN first** — both are machine- and board-specific:
+## Manual build on the Pi (fallback)
 
 ```bash
-arduino-cli board list
+ssh vruser@<leader>
+~/bin/arduino-cli compile --fqbn teensy:avr:teensy40 --output-dir ~/teensy_build/out ~/teensy_build/photodiode_sync_v2_2
+teensy_loader_cli --mcu=TEENSY40 -s -w -v ~/teensy_build/out/photodiode_sync_v2_2.ino.hex
 ```
 
-```
-Port         Protocol Type              Board Name FQBN                Core
-/dev/ttyACM0 serial   Serial Port (USB) Unknown
-usb1/1-1     teensy   Teensy Ports      Teensy 4.0 teensy:avr:teensy40 teensy:avr
-```
-
-- Upload to the **`teensy`-protocol port** (`usb1/1-1`), *not* `/dev/ttyACM0`. The ACM
-  device is the USB-serial endpoint and fails as an upload target.
-- The USB path changes if you replug into a different physical port — re-run `board list`.
-- The FQBN must match the board: `teensy40` for a Teensy 4.0, `teensy41` for a 4.1.
-  Flashing a 4.1 with the 4.0 FQBN mostly works but misconfigures the PSRAM/ethernet pins.
-
-A successful upload prints `Opening Teensy Loader...` and the board re-enumerates on USB
-(verify with `lsusb | grep 16c0` — the device number increments).
+Upload leaves the sketch in `~/teensy_build/<sketch>/` on the Pi, so the paths above exist after
+one Upload. `-s` soft-reboots a Serial-mode board, `-w` waits for the bootloader (button) otherwise.
+`arduino-cli board list` shows the Teensy as a `teensy`-protocol port (e.g. `usb1/1-1`); the
+`/dev/ttyACM0` line is the serial endpoint, not an upload target.
 
 Reference build for `v2_0` on a Teensy 4.0:
 
@@ -129,8 +117,8 @@ Tuning, while running the setup-UI photodiode **Test**:
 
 | Symptom | Fix |
 |---|---|
-| `Failed uploading: no upload port provided` | Use the `teensy` port from `board list`, not `/dev/ttyACM0` |
-| Upload hangs at `Opening Teensy Loader...` | Press the physical button on the Teensy to force program mode |
-| Permission denied on the port | Install the PJRC udev rules (they set mode `0666`), then replug |
+| Upload log: `arduino-cli: No such file` or `teensy_loader_cli: not found` | The toolchain install failed (no internet on the Pi?) — Upload retries it; check the Pi's WiFi |
+| Loader waits, nothing happens | Fresh board (RawHID): press the Teensy's button once; or the udev rules are missing — Upload installs them, then replug the Teensy |
+| `Unable to open /dev/ttyACM0 for reboot request` | pi_api's photodiode holds the port — the loader falls back to waiting for the button; press it |
 | No serial output | Expected in production — `DEBUG` is 0 |
 | Pi sees no sync pulses | Check `OUT_PIN` wiring and that `DEBUG` builds are not still loaded |

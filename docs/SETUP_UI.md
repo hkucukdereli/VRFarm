@@ -233,8 +233,8 @@ click. Filtering now lives on the Teensy, so there are no debounce sliders.
 **Teensy firmware** (row under the card, usable before the device is initialized): **Browse** a
 local `.ino` or leave it on the newest repo sketch, tick **Debug** for the serial traces, **Upload**.
 The sketch is compiled and flashed on the Pi that owns the photodiode (named in the row), where the
-Teensy is plugged in; the toolchain is installed there first if missing. A fresh Teensy has to have
-its button pressed once when the compile finishes — the log says so. Details:
+Teensy is plugged in; the toolchain is installed there first if missing. A fresh Teensy (RawHID) is
+rebooted over HID into its bootloader, so no button press is needed. Details:
 [TEENSY_INSTRUCTIONS.md](TEENSY_INSTRUCTIONS.md).
 
 ### Running Wheel

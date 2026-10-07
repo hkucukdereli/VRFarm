@@ -2628,8 +2628,8 @@ function renderPhotodiodeControls(dev) {
 // it is missing. Rendered OUTSIDE the init-gated fieldset so firmware can be flashed
 // before/without device init. Browse picks a local .ino; with no file chosen the
 // server uses the newest teensy/ sketch in the repo. A fresh Teensy (RawHID, no serial
-// yet) cannot be soft-rebooted: the loader waits for its button, which /teensy_status
-// tells the user about before the flash starts.
+// yet) cannot be soft-rebooted by the loader; the server reboots it over HID first
+// (teensy/teensy_hid_reboot.py) and only falls back to asking for the button.
 let teensyInoFile = null;   // {name, text} from Browse
 
 function renderTeensyFirmware() {
@@ -2643,7 +2643,7 @@ function renderTeensyFirmware() {
         <input type="checkbox" id="teensy-debug" ${teensyDebugChecked ? 'checked' : ''}
                onchange="teensyDebugChecked = this.checked"> Debug</label>
       <button class="btn btn-orange btn-sm" onclick="uploadTeensyFirmware()"
-              title="Patch #define DEBUG, compile with arduino-cli on the photodiode Pi, flash via teensy_loader_cli (installs the toolchain there if missing). Soft reboot, no button press — except on a fresh Teensy with no serial yet: press its button when the log says so">Upload</button>
+              title="Patch #define DEBUG, compile with arduino-cli on the photodiode Pi, flash via teensy_loader_cli (installs the toolchain there if missing). No button press: Serial boards soft-reboot, a fresh RawHID board is rebooted over HID">Upload</button>
     </div>`;
 }
 let teensyDebugChecked = false;
@@ -2672,8 +2672,8 @@ async function uploadTeensyFirmware() {
       log(`  ${st.pi}: toolchain ${st.toolchain_ok ? 'present' : 'MISSING — installing first (several minutes on WiFi)'}; `
           + `Teensy USB ${st.usb_pids.length ? '16c0:' + st.usb_pids.join(',') : 'NOT FOUND'}`);
       if (!st.usb_pids.length) { log('Teensy upload failed: no Teensy on ' + st.pi + "'s USB"); return; }
-      if (!st.serial_mode) log('  Teensy is not in Serial mode (fresh board): soft reboot unavailable — '
-                               + 'PRESS THE TEENSY BUTTON ONCE when the compile finishes (the loader waits ~2 min).');
+      if (!st.serial_mode) log('  Teensy is not in Serial mode (fresh board): it will be rebooted over HID after the '
+                               + 'compile; if the log then asks for it, press the Teensy button once (loader waits ~2 min).');
     } else {
       log('  (status check failed: ' + (st.error || '') + ' — trying the upload anyway)');
     }

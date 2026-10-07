@@ -1070,6 +1070,7 @@ TEENSY_MCU = "TEENSY40"
 ARDUINO_CLI_URL = "https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Linux_ARM64.tar.gz"
 TEENSY_INDEX_URL = "https://www.pjrc.com/teensy/package_teensy_index.json"
 TEENSY_RULES = ROOT / "teensy" / "00-teensy.rules"
+TEENSY_HID_REBOOT = ROOT / "teensy" / "teensy_hid_reboot.py"
 TEENSY_STATUS_CMD = ("test -x ~/bin/arduino-cli && echo CLI; "
                      "test -d ~/.arduino15/packages/teensy/hardware/avr && echo CORE; "
                      "command -v teensy_loader_cli >/dev/null && echo LOADER; "
@@ -1171,9 +1172,6 @@ def api_teensy_upload():
         st = _install_teensy_toolchain(tgt, steps)            # no-op when everything is there
         if not st["usb_pids"]:
             raise RuntimeError(f"no Teensy on {pd_pi['name']}'s USB (lsusb shows no 16c0 device)")
-        if not st["serial_mode"]:
-            steps.append(f"Teensy on USB as 16c0:{','.join(st['usb_pids'])} (not Serial) — soft reboot "
-                         "unavailable, the loader waits for the button")
         rdir = f"~/teensy_build/{sketch}"
         ssh(tgt, f"mkdir -p {rdir}")
         with tempfile.NamedTemporaryFile("w", suffix=".ino", delete=False) as f:
@@ -1188,6 +1186,14 @@ def api_teensy_upload():
                          timeout=240)
         mem = [l.strip() for l in out.splitlines() if "FLASH:" in l or "RAM1:" in l]
         steps += ["  " + l for l in mem[:2]] or ["Compiled."]
+        if not st["serial_mode"]:
+            # A board that is not in Serial USB mode (a fresh one is RawHID) cannot be soft-rebooted
+            # by the loader; the Teensyduino HID reboot request does it. Button as the last resort.
+            scp(str(TEENSY_HID_REBOOT), f"{tgt}:~/teensy_build/teensy_hid_reboot.py")
+            out = ssh_merged(tgt, "python3 ~/teensy_build/teensy_hid_reboot.py", timeout=30)
+            line = (out.strip().splitlines() or ["?"])[-1]
+            steps.append(f"Teensy not in Serial mode (16c0:{','.join(st['usb_pids'])}): {line}"
+                         + ("" if "HalfKay" in out else " — PRESS THE TEENSY BUTTON (the loader waits ~2 min)"))
         out = ssh_merged(tgt, f"teensy_loader_cli --mcu={TEENSY_MCU} -s -w -v {rdir}/out/{sketch}.ino.hex",
                          timeout=150)
         steps.append((out.strip().splitlines() or ["Flashed."])[-1])

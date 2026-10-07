@@ -4,7 +4,8 @@
 is also flashed (Setup UI → photodiode card → **Teensy firmware → Upload**)
 **Last updated:** 2026-10-07
 **Files:** [`teensy/photodiode_sync_v2_2/`](../teensy/photodiode_sync_v2_2/) (current) · earlier
-versions alongside · [`teensy/00-teensy.rules`](../teensy/00-teensy.rules) (PJRC udev rules Install puts on the Pi)
+versions alongside · [`teensy/00-teensy.rules`](../teensy/00-teensy.rules) (PJRC udev rules Install puts on the Pi) ·
+[`teensy/teensy_hid_reboot.py`](../teensy/teensy_hid_reboot.py) (reboots a fresh RawHID board into its bootloader)
 **Related:** [LEADER_WIRING.md](LEADER_WIRING.md) (where `OUT_PIN` lands on the Pi header) ·
 [CALIBRATION_PROTOCOL.md](CALIBRATION_PROTOCOL.md)
 
@@ -52,10 +53,12 @@ re-Install. The Pi downloads these itself over the institute WiFi:
 | PJRC udev rules | `/etc/udev/rules.d/00-teensy.rules` | Teensy USB and `ttyACM*` nodes mode `0666`, `stty raw -echo` at plug-in, ModemManager kept off the port |
 
 **First flash of a fresh Teensy.** A new board enumerates as `16c0:0486 Teensyduino RawHID` with no
-`/dev/ttyACM0`. The loader's soft reboot works through the Serial USB identity, so it cannot reboot
-a RawHID board: the log says so before the compile, and when the compile finishes you **press the
-Teensy's button once**; the loader waits about two minutes. Once our sketch runs the board is
-`16c0:0483 Teensyduino Serial` with `/dev/ttyACM0`, and every later Upload is hands-off.
+`/dev/ttyACM0`. The loader's own soft reboot only speaks to the Serial USB identity, so Upload first
+sends the Teensyduino reboot request over HID ([`teensy/teensy_hid_reboot.py`](../teensy/teensy_hid_reboot.py),
+the same 4-byte feature report the Teensy Loader GUI uses); the board drops into its HalfKay
+bootloader and is programmed with no button press. Only if that fails does the log ask you to
+press the button (the loader then waits about two minutes). Once our sketch runs the board is
+`16c0:0483 Teensyduino Serial` with `/dev/ttyACM0`, and every later Upload soft-reboots it.
 
 ## Manual build on the Pi (fallback)
 
@@ -118,7 +121,7 @@ Tuning, while running the setup-UI photodiode **Test**:
 | Symptom | Fix |
 |---|---|
 | Upload log: `arduino-cli: No such file` or `teensy_loader_cli: not found` | The toolchain install failed (no internet on the Pi?) — Upload retries it; check the Pi's WiFi |
-| Loader waits, nothing happens | Fresh board (RawHID): press the Teensy's button once; or the udev rules are missing — Upload installs them, then replug the Teensy |
+| Loader waits, nothing happens | The HID reboot did not take (log says so): press the Teensy's button once; or the udev rules are missing — Upload installs them, then replug the Teensy |
 | `Unable to open /dev/ttyACM0 for reboot request` | pi_api's photodiode holds the port — the loader falls back to waiting for the button; press it |
 | No serial output | Expected in production — `DEBUG` is 0 |
 | Pi sees no sync pulses | Check `OUT_PIN` wiring and that `DEBUG` builds are not still loaded |

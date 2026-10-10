@@ -49,7 +49,9 @@ devices:
     enabled: true
     gpio: 16
     pulse_every_n_frames: 5
-    serial_port: /dev/ttyACM0
+    # the Teensy's USB serial. Use the by-id name (ls /dev/serial/by-id/ on the leader): ttyACM<n>
+    # is handed out in enumeration order and moved after a reboot.
+    serial_port: /dev/serial/by-id/usb-Teensyduino_USB_Serial_<serial>-if00
     sync_brightness: 1.0
     sync_corner: top-right
     sync_size_px: 150

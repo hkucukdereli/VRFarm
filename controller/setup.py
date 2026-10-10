@@ -1122,6 +1122,18 @@ def _install_teensy_toolchain(tgt, steps, status=None):
     return _teensy_status(tgt)
 
 
+def _default_sketch(rig: str) -> Path:
+    """The sketch Upload flashes when no file is chosen: the newest (by name) sketch folder under
+    teensy/<rig>/ if that rig has its own copies (pins and thresholds differ per rig), else the
+    newest shared teensy/<sketch>/<sketch>.ino."""
+    for base in (ROOT / "teensy" / rig, ROOT / "teensy"):
+        versions = sorted(p for p in base.iterdir() if base.is_dir() and p.is_dir()
+                          and (p / (p.name + ".ino")).exists()) if base.is_dir() else []
+        if versions:
+            return versions[-1] / (versions[-1].name + ".ino")
+    raise RuntimeError("no sketches under teensy/")
+
+
 def _photodiode_pi(rs: RigState):
     return next((pi for pi in rs.pis if "photodiode" in pi.get("devices", [])), None)
 
@@ -1154,14 +1166,10 @@ def api_teensy_upload():
     steps = []
     try:
         if not ino_text:
-            versions = sorted(p for p in (ROOT / "teensy").iterdir()
-                              if p.is_dir() and (p / (p.name + ".ino")).exists())
-            if not versions:
-                raise RuntimeError("no sketches under teensy/")
-            src = versions[-1] / (versions[-1].name + ".ino")
+            src = _default_sketch(rs.name)
             ino_text = src.read_text()
             ino_name = src.name
-            steps.append(f"No file chosen — using repo sketch {ino_name}")
+            steps.append(f"No file chosen — using {src.relative_to(ROOT)}")
         sketch = ino_name[:-4] if ino_name.endswith(".ino") else ino_name
         if not sketch:
             raise RuntimeError("cannot derive sketch name from the filename")

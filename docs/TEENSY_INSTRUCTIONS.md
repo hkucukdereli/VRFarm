@@ -37,9 +37,16 @@ drifts. Set `ADAPTIVE 0` in the sketch to fall back to the `v1_0`-style fixed th
 
 The sketch is compiled and flashed **on the leader Pi that owns the photodiode device** — the Teensy
 hangs off that Pi's USB, one Teensy per rig. In the Setup tab, photodiode card, **Teensy firmware**
-row: **Browse** picks a local `.ino` (with no file chosen the newest `teensy/` sketch in the repo is
-used), **Debug** patches `#define DEBUG`, **Upload** does the rest and logs each step. Nothing on
-the controller is needed.
+row: **Browse** picks a local `.ino`; with no file chosen the server flashes the newest sketch under
+`teensy/<rig>/` when that rig has its own copies, else the newest shared `teensy/` sketch. **Debug**
+patches `#define DEBUG`, **Upload** does the rest and logs each step. Nothing on the controller is
+needed.
+
+**Per-rig copies.** Pins and thresholds differ between rigs, so a rig can carry its own copy of the
+current sketch in `teensy/<rig>/<sketch>/<sketch>.ino` (cheddar: stock A1 / pin 16 / `MIN_PULSE_V`
+0.30; morbier: A0 / pin 3 / 0.15, measured 2026-10-10: flashes 0.34 V above a 0.04 V floor, the
+projector's black-level red segments 0.07 V). When a new sketch version lands in `teensy/`, copy it
+into each rig folder and re-apply that rig's three lines.
 
 **Toolchain on the Pi.** Install puts it on the Pi that has the photodiode (step 4b), and Upload
 installs whatever is missing before compiling, so a leader that was installed earlier needs no

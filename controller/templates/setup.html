@@ -2627,7 +2627,8 @@ function renderPhotodiodeControls(dev) {
 // (the Teensy is USB-attached there); the server installs the toolchain there first if
 // it is missing. Rendered OUTSIDE the init-gated fieldset so firmware can be flashed
 // before/without device init. Browse picks a local .ino; with no file chosen the
-// server uses the newest teensy/ sketch in the repo. A fresh Teensy (RawHID, no serial
+// server uses the newest sketch under teensy/<rig>/ (per-rig pins/thresholds) or, without
+// one, the newest shared teensy/ sketch. A fresh Teensy (RawHID, no serial
 // yet) cannot be soft-rebooted by the loader; the server reboots it over HID first
 // (teensy/teensy_hid_reboot.py) and only falls back to asking for the button.
 let teensyInoFile = null;   // {name, text} from Browse
@@ -2638,7 +2639,7 @@ function renderTeensyFirmware() {
       <span style="font-size:11px; color:#888">Teensy firmware${(getPiForDevice('photodiode') || {}).name ? ' (flashed on ' + getPiForDevice('photodiode').name + ')' : ''}:</span>
       <button class="btn btn-sm" onclick="document.getElementById('teensy-ino-file').click()">Browse</button>
       <input type="file" id="teensy-ino-file" accept=".ino" style="display:none" onchange="teensyPickIno(this)">
-      <span id="teensy-ino-name" style="font-size:11px; color:#888">${teensyInoFile ? teensyInoFile.name : 'newest repo sketch'}</span>
+      <span id="teensy-ino-name" style="font-size:11px; color:#888" title="With no file chosen the server flashes the newest sketch under teensy/${RIG}/ (this rig's pins and thresholds), else the newest shared teensy/ sketch">${teensyInoFile ? teensyInoFile.name : 'newest repo sketch for ' + RIG}</span>
       <label style="font-size:11px; display:flex; align-items:center; gap:3px">
         <input type="checkbox" id="teensy-debug" ${teensyDebugChecked ? 'checked' : ''}
                onchange="teensyDebugChecked = this.checked"> Debug</label>
@@ -2663,7 +2664,7 @@ function teensyPickIno(inp) {
 
 async function uploadTeensyFirmware() {
   const debug = document.getElementById('teensy-debug')?.checked || false;
-  log(`Teensy upload: ${teensyInoFile ? teensyInoFile.name : 'newest repo sketch'} (DEBUG=${debug ? 1 : 0})...`);
+  log(`Teensy upload: ${teensyInoFile ? teensyInoFile.name : 'newest repo sketch for ' + RIG} (DEBUG=${debug ? 1 : 0})...`);
   _lockUI();
   try {
     // What the flash will meet on the photodiode Pi: toolchain there? Teensy seen? serial mode?

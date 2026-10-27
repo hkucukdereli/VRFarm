@@ -28,6 +28,16 @@
   .rigtab .x { color: #888; font-size: 12px; padding: 0 2px; font-weight: 400; }
   .rigtab .x:hover { color: #f44336; }
   .rigtab .info { font-size: 10px; font-weight: 400; color: #888; font-family: monospace; }
+  /* rig identity colour (rigs/<rig>.yaml `color`, set in Network): a swatch dot and a coloured
+     top edge on the tab; the active tab's chrome is tinted towards it */
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--rig, #888); flex: none;
+            box-shadow: 0 0 0 1px rgba(0,0,0,0.45); vertical-align: middle; }
+  .menu .item .swatch { width: 9px; height: 9px; margin-right: 6px; }
+  .rigtab.tinted { border-top: 3px solid var(--rig); }
+  .rigtab.tinted.active { border-color: var(--rig); box-shadow: inset 0 3px 0 var(--rig); }
+  @supports (background: color-mix(in srgb, red 30%, blue)) {
+    .rigtab.tinted.active { background: color-mix(in srgb, var(--rig) 28%, #0f3460); }
+  }
   #loadmenu { position: relative; margin: 0 0 6px 8px; }
   #loadmenu .menu { display: none; position: absolute; top: 28px; left: 0; background: #16213e; border: 1px solid #0f3460; border-radius: 6px;
                     min-width: 220px; z-index: 20; padding: 4px 0; box-shadow: 0 6px 20px rgba(0,0,0,0.5); }

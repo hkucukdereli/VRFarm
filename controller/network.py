@@ -18,7 +18,7 @@ import requests
 from flask import Blueprint, jsonify, request
 
 from shared.config import load_rig, save_rig_atomic, get_leader_pi
-from controller import settings, events
+from controller import settings, events, palette
 from controller.registry import registry
 from controller.ssh import ssh_ok, target as ssh_target
 
@@ -57,6 +57,27 @@ def _all_ips(exclude: str | None = None) -> dict[str, str]:
             if pi.get("ip"):
                 out[pi["ip"]] = name
     return out
+
+
+def _used_colors(exclude: str | None = None) -> list[str]:
+    """The colours every rig file already holds (so Add rig can hand out a free one)."""
+    out = []
+    for name in registry.list_rig_files():
+        if name == exclude:
+            continue
+        col = rig_color(name)
+        if col:
+            out.append(col)
+    return out
+
+
+def rig_color(name: str) -> str | None:
+    """The rig's identity colour ('#rrggbb') straight from its YAML, None if unset/invalid.
+    Read from the file, not the loaded RigState, so a Network-tab edit shows at once."""
+    try:
+        return palette.normalize(load_rig(_rig_file(name)).get("color"))
+    except Exception:
+        return None
 
 
 def _validate_pis(pis, rig_name: str):
@@ -110,6 +131,7 @@ def _rig_row(name: str) -> dict:
         "data": cfg.get("data") or {},
         "devices": sorted((cfg.get("devices") or {}).keys()),
         "slack": bool((cfg.get("slack") or {}).get("enabled")),
+        "color": palette.normalize(cfg.get("color")),
     }
 
 
@@ -142,6 +164,8 @@ def api_create_rig():
     cfg = _template()
     cfg["name"] = name
     cfg["pis"] = pis
+    # Identity colour: the chosen palette colour, else a random one no other rig uses yet.
+    cfg["color"] = palette.normalize(data.get("color")) or palette.pick_unused(_used_colors())
     save_rig_atomic(cfg, path)
     return jsonify({"ok": True, "rig": _rig_row(name)}), 201
 
@@ -164,6 +188,11 @@ def api_edit_rig(name):
     for key in ("data", "network"):
         if isinstance(data.get(key), dict):
             cfg.setdefault(key, {}).update(data[key])
+    if "color" in data:
+        col = palette.normalize(data["color"])
+        if data["color"] not in (None, "") and col is None:
+            return jsonify({"ok": False, "error": "color must be a palette index (0-8) or '#rrggbb'"}), 400
+        cfg["color"] = col
     save_rig_atomic(cfg, path)
     if rs:
         registry.reload_config(name)
@@ -219,6 +248,12 @@ def api_delete_rig(name):
         settings.update(groups=groups)
     _check_cache.pop(name, None)
     return jsonify({"ok": True, "trashed": str(dst.relative_to(settings.ROOT))})
+
+
+@bp.route("/palette")
+def api_palette():
+    """The nine generated rig colours for the drop-down, plus the ones rigs already use."""
+    return jsonify({"palette": palette.PALETTE, "used": _used_colors()})
 
 
 @bp.route("/suggest_ips")

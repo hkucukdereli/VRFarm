@@ -82,7 +82,8 @@ def create_app() -> Flask:
         out = []
         for name in registry.list_rig_files():
             rs = registry.rigs.get(name)
-            out.append({"name": name, "loaded": rs is not None, "phase": rs.phase if rs else None})
+            out.append({"name": name, "loaded": rs is not None, "phase": rs.phase if rs else None,
+                        "color": network.rig_color(name)})
         return jsonify({"rigs": out, "groups": settings.groups()})
 
     @app.route("/api/fleet")

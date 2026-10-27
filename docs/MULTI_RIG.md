@@ -14,7 +14,10 @@ python controller/app.py            # http://localhost:5000  (--port 5055 if mac
 ## The four tabs
 
 - **Network** — the rigs and their Pis. Add a rig (the next free IP pair is suggested:
-  .101/.102, .103/.104, …), edit Pi names / IPs / roles / users / devices, rename or delete a
+  .101/.102, .103/.104, …), edit Pi names / IPs / roles / users / devices, pick the rig's colour
+  (a drop-down of nine generated colours, `controller/palette.py`; Add rig takes a free one at
+  random, stored as `color:` in the rig YAML and painted on the rig's tabs in Setup and
+  Experiment), rename or delete a
   rig (the YAML moves to `rigs/.trash/`), check every Pi over SSH and the REST API, and make
   **groups** ("super rigs"): a group loads all its rigs at once from the Load menu of Setup and
   Experiment and from the Data tab. The architecture diagram is drawn from the rig YAMLs.

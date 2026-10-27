@@ -115,14 +115,22 @@ function badgeFor(rig) {
   return `<span class="badge badge-${s.phase}">${s.phase}</span>${info}`;
 }
 
+// The rig's identity colour (rigs/<rig>.yaml `color`, picked in the Network tab) or null.
+function rigColor(rig) {
+  const r = (rigsInfo.rigs || []).find(x => x.name === rig);
+  return (r && r.color) || null;
+}
+
 function renderRigTabs() {
   const tab = state.tab;
   const host = document.getElementById('rigtabs');
   if (!TABS_WITH_RIGS[tab]) { host.innerHTML = ''; return; }
-  host.innerHTML = state.open[tab].map(rig =>
-    `<span class="rigtab ${state.active[tab] === rig ? 'active' : ''}" onclick="activateRig('${tab}','${rig}')">
-       ${rig} ${badgeFor(rig)} <span class="x" title="Close (unloads the rig when closed in both tabs)" onclick="closeRig('${tab}','${rig}',event)">✕</span>
-     </span>`).join('');
+  host.innerHTML = state.open[tab].map(rig => {
+    const col = rigColor(rig);
+    return `<span class="rigtab ${state.active[tab] === rig ? 'active' : ''} ${col ? 'tinted' : ''}"${col ? ` style="--rig:${col}"` : ''} onclick="activateRig('${tab}','${rig}')">
+       ${col ? '<span class="swatch"></span>' : ''}${rig} ${badgeFor(rig)} <span class="x" title="Close (unloads the rig when closed in both tabs)" onclick="closeRig('${tab}','${rig}',event)">✕</span>
+     </span>`;
+  }).join('');
   document.getElementById('substrip-hint').textContent = state.open[tab].length ? '' :
     (tab === 'setup' ? 'Load a rig or a group to set it up.' : 'Load a rig or a group to run experiments.');
 }
@@ -134,7 +142,7 @@ async function refreshRigs() {
   const groups = Object.entries(rigsInfo.groups || {});
   el.innerHTML =
     '<div class="hdr">Rigs</div>' +
-    (rigsInfo.rigs || []).map(r => `<div class="item" onclick="pickRig('${r.name}')">${r.name}<small>${r.phase || ''}</small></div>`).join('') +
+    (rigsInfo.rigs || []).map(r => `<div class="item" onclick="pickRig('${r.name}')"><span>${r.color ? `<span class="swatch" style="--rig:${r.color}"></span>` : ''}${r.name}</span><small>${r.phase || ''}</small></div>`).join('') +
     (groups.length ? '<div class="hdr">Groups (super rigs)</div>' +
       groups.map(([g, members]) => `<div class="item" onclick="pickGroup('${g}')">★ ${g}<small>${members.length} rigs</small></div>`).join('') : '') +
     '<div class="hdr"><a href="#" onclick="showTab(\'network\'); return false;">manage rigs and groups in Network</a></div>';
@@ -185,6 +193,9 @@ window.addEventListener('message', ev => {
   } else if (m.type === 'vrfarm:open' && m.tab) {
     if (m.rig) openRig(m.tab, m.rig);
     showTab(m.tab);
+  } else if (m.type === 'vrfarm:rigs-changed') {
+    // The Network tab saved a rig (e.g. a new colour): re-read the rig list and repaint the tabs.
+    refreshRigs().then(() => { if (TABS_WITH_RIGS[state.tab]) renderRigTabs(); });
   }
 });
 

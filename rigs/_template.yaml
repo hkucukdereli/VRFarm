@@ -77,6 +77,8 @@ devices:
         label: reward
     reward_type: sucrose
     type: reward
+color: null   # identity colour '#rrggbb' from the Network tab's nine-colour palette (Add rig takes a
+              # free one at random); painted on the rig's tabs in Setup and Experiment
 grace_period_s: 10
 name: _template
 network:

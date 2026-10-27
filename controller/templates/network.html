@@ -26,6 +26,10 @@
   .grp { display: flex; align-items: center; gap: 6px; margin: 3px 0; font-size: 12px; }
   .grp .members { color: #888; flex: 1; }
   #rigs-table td div { padding: 1px 0; }
+  .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 50%; vertical-align: middle; margin-right: 6px;
+            background: var(--rig, transparent); box-shadow: 0 0 0 1px rgba(0,0,0,0.45); }
+  .rigbox.tinted { box-shadow: inset 4px 0 0 var(--rig); }
+  .rigbox.tinted.loaded { box-shadow: inset 4px 0 0 var(--rig), inset 0 -2px 0 #1a73e8; }
 </style>
 </head>
 <body>
@@ -49,6 +53,9 @@
       <div id="drawer-name-row" style="display:flex; gap:8px; align-items:center; margin-bottom:6px">
         <label style="margin:0">Name</label><input type="text" id="d-name" placeholder="gouda" style="width:160px">
         <span class="muted">lowercase letters, digits, - or _</span>
+        <label style="margin:0 0 0 10px">Colour</label>
+        <select id="d-color" style="width:150px" onchange="syncSwatch()" title="Identity colour shown on this rig's tabs in Setup and Experiment"></select>
+        <span class="swatch" id="d-swatch"></span>
       </div>
       <div class="pirow" style="font-size:10px; color:#999"><span>Pi name</span><span>IP</span><span>Role</span><span>User</span><span>Devices</span><span></span></div>
       <div id="d-pis"></div>
@@ -91,6 +98,29 @@
 <script>
 let rigs = [], groups = {}, topo = null;
 let drawer = {mode: null, rig: null};
+let palette = [];          // the nine generated identity colours, from /api/network/palette
+
+// ── rig colour drop-down (the palette, plus the rig's own colour if it is not a palette one) ──
+function fillColorSelect(current) {
+  const sel = document.getElementById('d-color');
+  const used = new Set(rigs.filter(r => r.name !== drawer.rig).map(r => r.color).filter(Boolean));
+  let opts = palette.map(c =>
+    `<option value="${c.hex}" style="color:${c.hex}" ${c.hex === current ? 'selected' : ''}>● ${c.name}${used.has(c.hex) ? ' (used)' : ''}</option>`);
+  if (current && !palette.some(c => c.hex === current))
+    opts.unshift(`<option value="${current}" style="color:${current}" selected>● ${current} (custom)</option>`);
+  sel.innerHTML = opts.join('');
+  syncSwatch();
+}
+function syncSwatch() {
+  const col = document.getElementById('d-color').value;
+  document.getElementById('d-swatch').style.setProperty('--rig', col || 'transparent');
+}
+function freeColor() {
+  const used = new Set(rigs.map(r => r.color).filter(Boolean));
+  const free = palette.filter(c => !used.has(c.hex));
+  const pool = free.length ? free : palette;
+  return pool.length ? pool[Math.floor(Math.random() * pool.length)].hex : '';
+}
 
 function log(msg) {
   const el = document.getElementById('log');
@@ -114,6 +144,7 @@ async function refresh() {
   const d = await api('GET', '/api/network/rigs');
   rigs = d.rigs || []; groups = d.groups || {};
   topo = await api('GET', '/api/network/topology');
+  if (!palette.length) palette = (await api('GET', '/api/network/palette')).palette || [];
   renderTable(); renderGroups(); renderTopo();
 }
 
@@ -121,7 +152,7 @@ function renderTable() {
   const tb = document.querySelector('#rigs-table tbody');
   tb.innerHTML = rigs.map(r => `
     <tr>
-      <td><b>${r.name}</b>${r.error ? `<div style="color:#f88">${r.error}</div>` : ''}</td>
+      <td><span class="swatch" style="--rig:${r.color || 'transparent'}"></span><b>${r.name}</b>${r.error ? `<div style="color:#f88">${r.error}</div>` : ''}</td>
       <td>${(r.pis || []).map(p => `<div>${dotFor(p.check)}${p.name} <span class="muted">${p.role} · ${p.ip}</span></div>`).join('')}</td>
       <td>${r.loaded ? `<span class="badge badge-${r.phase}">${r.phase}</span>` : '<span class="muted">not loaded</span>'}</td>
       <td style="white-space:nowrap">
@@ -183,6 +214,7 @@ async function startCreate() {
   document.getElementById('d-pis').innerHTML =
     piRowHtml({name: '', ip: s.leader, role: 'leader', user: 'vruser', devices: ['lick_sensor', 'reward', 'photodiode', 'camera', 'encoder']}) +
     piRowHtml({name: '', ip: s.follower, role: 'follower', user: 'vruser', devices: ['display']});
+  fillColorSelect(freeColor());
   document.getElementById('drawer').classList.add('open');
   document.getElementById('d-name').oninput = () => {
     const n = document.getElementById('d-name').value.trim();
@@ -200,6 +232,7 @@ function startEdit(name) {
   document.getElementById('d-name').oninput = null;
   document.getElementById('d-error').textContent = '';
   document.getElementById('d-pis').innerHTML = (r.pis || []).map(piRowHtml).join('');
+  fillColorSelect(r.color || freeColor());
   document.getElementById('drawer').classList.add('open');
 }
 function addPiRow() { document.getElementById('d-pis').insertAdjacentHTML('beforeend', piRowHtml({role: 'follower'})); }
@@ -211,13 +244,15 @@ async function suggestIps() {
 function closeDrawer() { document.getElementById('drawer').classList.remove('open'); drawer = {mode: null, rig: null}; }
 async function saveDrawer() {
   const pis = readPiRows();
+  const color = document.getElementById('d-color').value || null;
   const err = document.getElementById('d-error');
   let d;
-  if (drawer.mode === 'create') d = await api('POST', '/api/network/rigs', {name: document.getElementById('d-name').value.trim(), pis});
-  else d = await api('PATCH', `/api/network/rigs/${drawer.rig}`, {pis});
+  if (drawer.mode === 'create') d = await api('POST', '/api/network/rigs', {name: document.getElementById('d-name').value.trim(), pis, color});
+  else d = await api('PATCH', `/api/network/rigs/${drawer.rig}`, {pis, color});
   if (!d.ok) { err.textContent = d.error || 'failed'; return; }
   log((drawer.mode === 'create' ? 'Created rig ' : 'Saved rig ') + d.rig.name);
   closeDrawer(); refresh();
+  if (window.parent !== window) window.parent.postMessage({type: 'vrfarm:rigs-changed'}, '*');
 }
 async function deleteRig(name) {
   if (!confirm(`Delete rig "${name}"?\nIts YAML moves to rigs/.trash/ (recoverable).`)) return;
@@ -258,7 +293,7 @@ function renderTopo() {
   if (!topo) return;
   const el = document.getElementById('topo');
   const rigBoxes = (topo.rigs || []).map(r => `
-    <div class="rigbox ${r.loaded ? 'loaded' : ''}">
+    <div class="rigbox ${r.loaded ? 'loaded' : ''} ${r.color ? 'tinted' : ''}"${r.color ? ` style="--rig:${r.color}"` : ''}>
       <div class="name"><span>${r.name}</span>${r.loaded ? `<span class="badge badge-${r.phase}">${r.phase}</span>` : ''}</div>
       ${(r.pis || []).map(p => `<div class="pinode">${dotFor(p.check)}${p.name} <span class="role">${p.role}</span><div class="muted">${p.ip}${(p.devices || []).length ? ' · ' + p.devices.join(', ') : ''}</div></div>`).join('')}
     </div>`).join('');

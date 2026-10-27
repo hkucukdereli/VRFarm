@@ -46,6 +46,11 @@ os.environ["SDL_HINT_NO_SIGNAL_HANDLERS"] = "1"   # per contract (matches device
 # SDL must leave SIGTERM to Python or displayd's terminate() can't stop us cleanly.
 os.environ["SDL_NO_SIGNAL_HANDLERS"] = "1"
 os.environ.pop("DISPLAY", None)                   # never let SDL wander off to X11
+# The renderer never plays audio. Without this, pygame.init() brings up SDL audio and
+# libpulse's runtime-dir setup can spin forever on a stale ~/.config/pulse/*-runtime.tmp
+# left behind by a power loss (morbier-dlp, 2026-10-19: every bringup hit the 40 s
+# renderer start timeout inside pygame.init()).
+os.environ["SDL_AUDIODRIVER"] = "dummy"
 
 import json
 import select

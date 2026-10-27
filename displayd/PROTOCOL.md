@@ -51,7 +51,9 @@ Repair states: REINIT_DLPC (auto on L1 source-revert), MODESET_KICK, RENDERER_RE
 
 ## Renderer startup contract (hard-fail; each clause is a bench-caught bug)
 
-1. `SDL_HINT_NO_SIGNAL_HANDLERS=1`, `SDL_VIDEODRIVER=kmsdrm`, no DISPLAY.
+1. `SDL_HINT_NO_SIGNAL_HANDLERS=1`, `SDL_VIDEODRIVER=kmsdrm`, `SDL_AUDIODRIVER=dummy`
+   (the renderer never touches audio; a real SDL audio init can hang in libpulse on a
+   stale `~/.config/pulse/*-runtime.tmp` after a power loss), no DISPLAY.
 2. `pygame.display.set_mode((1920,1080), FULLSCREEN|SCALED, vsync=1)`.
 3. Assert `pygame.display.get_driver() == "KMSDRM"` (null-backend fallback is silent).
 4. 30-frame self-test: measured fps within 57.46±1.5 AND mean flip-block >= 8 ms.

@@ -102,7 +102,7 @@ def handle_event(rs: RigState, event: dict) -> None:
         # browser is closed, unless its metric is muted.
         if (event.get("level") == "critical"
                 and event.get("metric") not in _SLACK_MUTED_SHEPHERD_METRICS):
-            rs.notify(f"🔴 {event.get('host', rs.name)} — {event.get('message', 'critical alert')}")
+            rs.notify(f"🔴 {rs.name} — {event.get('host', '?')}: {event.get('message', 'critical alert')}")
     elif typ == "display_abort":
         # The leader ended the session at a trial boundary because the display loop was broken.
         rs.notify(f"🛑 {rs.name} — EXPERIMENT ABORTED at trial "

@@ -19,6 +19,7 @@ Project overview and repo layout are in the [root README](../README.md).
 | Find a button, or work out why one is greyed out | [EXPERIMENT_UI.md](EXPERIMENT_UI.md) |
 | Understand reward levels, timeouts, task YAML fields | [EXPERIMENT_PROTOCOL.md § Task Parameters](EXPERIMENT_PROTOCOL.md#task-parameters) |
 | Load and analyse the data afterwards | [DATA_FORMAT.md](DATA_FORMAT.md) |
+| Add **optogenetic** stimulation to a task, commission the laser line | [OPTOGENETICS.md](OPTOGENETICS.md) |
 
 ## Maintain the rig
 
@@ -39,7 +40,7 @@ Controller  (controller/app.py :5000 — Network / Setup / Experiment / Data tab
   │  UDP  5572 →  START / STOP / REWARD
   │  UDP  5571 ←  trial, lick, reward, stim, sync events
   ▼
-Leader Pi (engine/leader.py) ── trial loop + lick, reward, camera, photodiode, encoder
+Leader Pi (engine/leader.py) ── trial loop + lick, reward, camera, photodiode, encoder, opto
   │  UDP 5575 → SHOW / QUIT
   ▼
 Follower Pi (displayd) ── KMS daemon; renderer child is sole DRM master on the DLP projector
@@ -51,8 +52,8 @@ Follower Pi (displayd) ── KMS daemon; renderer child is sole DRM master on t
 
 - **Rig YAML** (`rigs/*.yaml`) holds hardware facts: pins, I²C addresses, calibration
   tables, Pi roles and IPs, ports. Edited in the setup UI.
-- **Task YAML** (`experiments/*.yaml`) holds the paradigm in four sections — `stimulus`,
-  `reward`, `session`, `adaptive`. Edited in the experiment UI.
+- **Task YAML** (`experiments/*.yaml`) holds the paradigm in five sections — `stimulus`,
+  `reward`, `session`, `adaptive`, `opto`. Edited in the experiment UI.
 - **Machine-specific paths** are never in YAML: the controller data root comes from
   `$VRFARM_DATA_DIR`, else `~/VRFarm/data`.
 - All timestamps are `time.time()` Unix seconds, NTP-synced across all three machines.

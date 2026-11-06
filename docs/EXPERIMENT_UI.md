@@ -106,7 +106,7 @@ with an opto device) and GLOBAL TIMEOUT. Everything here is live-editable and ro
   rig's cap and warns when photodiode sync is off (the laser is then timed from the SHOW command,
   ±25 ms). During the session the EVENTS raster shows the light as a cyan band (dim for the mask
   alone) and the trial table's **Opto** column shows ✓ with the laser onset relative to the true
-  stimulus onset.
+  stimulus onset. Timing model, bench recipe and status: [OPTOGENETICS.md](OPTOGENETICS.md).
 
 This step needs no rig at all — you can open the UI on a laptop and read or edit any task.
 

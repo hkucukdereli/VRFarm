@@ -272,7 +272,8 @@ continuous or pulsed) through the same device code the engine runs — the laser
 confirmation. What the light does in a task (which trials, which windows, the pattern) is set in
 the Experiment tab, whose OPTOGENETICS section appears only when this device is enabled **and**
 assigned to the leader. Initialize claims the pins LOW and reads them back; nothing holds them
-afterwards, so the engine can claim them at GO.
+afterwards, so the engine can claim them at GO. Commissioning recipe and status:
+[OPTOGENETICS.md](OPTOGENETICS.md).
 
 ---
 

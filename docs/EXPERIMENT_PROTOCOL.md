@@ -357,7 +357,8 @@ What fired is recorded per trial in `/opto` (`opto_on`, `opto_onset_t`, `opto_wi
 [DATA_FORMAT.md](DATA_FORMAT.md). The live table's **Opto** column shows ✓ and the laser onset
 relative to the true stimulus onset. The light is off on STOP, abort and session end, and the
 controller drives the pins LOW again at teardown; **the Pi is not an interlock** — see
-[LEADER_WIRING.md](LEADER_WIRING.md).
+[LEADER_WIRING.md](LEADER_WIRING.md). Timing model, bench commissioning recipe and status:
+[OPTOGENETICS.md](OPTOGENETICS.md).
 
 ---
 
@@ -388,12 +389,12 @@ All timestamps are Unix time (`time.time()`) in seconds, NTP-synced.
 | Event | Timestamp source | Precision |
 |---|---|---|
 | Stimulus onset | Follower ack UDP timestamp | ~1ms |
-| True onset | Photodiode-corrected (`true_onset_t`) | ~0.1ms |
+| True onset | Photodiode-corrected (`true_onset_t`). Since 2026-11-06 SHOW is held until a heartbeat flash commanded < 150 ms earlier has landed and photodiode edges < 45 ms after SHOW are ignored — earlier sessions have ~1.2 % mis-locked onsets, see [DATA_FORMAT.md](DATA_FORMAT.md) | ~0.1ms |
 | Lick onset | MPR121 touch status (filter period ~9 ms) polled on Leader at 200 Hz; `devices.lick_sensor.debounce_ms` (rig YAML, default 50) is the release debounce = lick refractory period | ~10ms |
 | Reward delivery | `time.time()` on Leader after GPIO | <1ms |
 | Camera frames | picamera2 callback (`wall_clock_s`) | ~1ms |
 | Sync pulses | lgpio alert tick (CLOCK_MONOTONIC ns), NTP-referenced | ~0.1ms |
-| Opto light on | `gpio_write` on the Leader (`opto_onset_t`, `/opto/opto_window_t`): the `stim_onset` window with onset ≥ 0 fires on the photodiode edge of the first stimulus frame; a lead (onset < 0) is timed from the latency estimate; other anchors from the engine's own stamp | ~1ms (edge-locked); ±25 ms for a lead (display jitter) |
+| Opto light on | `gpio_write` on the Leader (`opto_onset_t`, `/opto/opto_window_t`): the `stim_onset` window with onset ≥ 0 fires on the photodiode edge of the first stimulus frame; a lead (onset < 0) is timed from the latency estimate; other anchors from the engine's own stamp — [OPTOGENETICS.md](OPTOGENETICS.md) | ~1ms (edge-locked); ±25 ms for a lead (display jitter) |
 
 Lick-to-reward is on the same Pi (Leader), so latency is <1ms (no network hop).
 

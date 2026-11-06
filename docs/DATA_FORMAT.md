@@ -80,6 +80,8 @@ It's **idempotent** (a file already at `format_version 2`, or that already has a
 
 `true_onset_t` is the display onset corrected by the photodiode; `stim_onset_t` is when the Leader sent SHOW.
 
+> **Archive caveat — heartbeat mis-locked onsets (sessions recorded before the 2026-11-06 engine).** About 1.2 % of `sync_ok == 1` trials carry a `display_latency_s` below 0.04 s. Those trials anchored on a sub-pulse of a display-heartbeat flash commanded just before SHOW, not on the stimulus, so their `true_onset_t`, `display_latency_s`, `response_window_t` and anything measured from them are early by up to ~90 ms (genuine latencies are 57–118 ms, median 94 ms). Treat `display_latency_s < 0.045` as unconfirmed — use `stim_onset_t + 0.09` or drop the trial. Newer sessions cannot produce them: the engine holds SHOW until a recent heartbeat flash has landed and ignores edges earlier than 45 ms after SHOW (`HB_SETTLE_S`, `SYNC_MIN_LATENCY_S` in `engine/leader.py`; the story is in [OPTOGENETICS.md](OPTOGENETICS.md)).
+
 #### Running-wheel stream — also under `/trials/`, but length = **number of encoder samples**, not per-trial
 The AS5600 wheel encoder is a *continuous* device: it streams for the whole session, so these arrays are far longer than the per-trial columns above (tens of thousands of samples). They share the `/trials` group only because the engine writes them as root datasets and they fall through `consolidate.py`'s group map. They are **not** part of the per-trial `Session.trials` table (different length) — read them from `Session.running` (see Loading) or h5py directly.
 

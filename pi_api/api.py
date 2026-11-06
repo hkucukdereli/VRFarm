@@ -919,6 +919,109 @@ def init_reward():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/init_opto", methods=["POST"])
+def init_opto():
+    """Initialize the optogenetic stimulator: claim every pin output-LOW, read it back, release.
+    Stateless on purpose (the init_reward pattern): nothing holds the lines when the engine
+    claims them at GO."""
+    data = request.json or {}
+    pins = data.get("pins") or {}
+    if "laser" not in pins:
+        return jsonify({"ok": False, "error": "the opto device has no laser pin"}), 400
+    try:
+        import lgpio
+        chip = lgpio.gpiochip_open(int(data.get("gpiochip", 0) or 0))
+        try:
+            results = []
+            for name in ("laser", "mask"):
+                cfg = pins.get(name)
+                if not cfg:
+                    continue
+                gpio = int(cfg.get("gpio") if isinstance(cfg, dict) else cfg)
+                lgpio.gpio_claim_output(chip, gpio, 0)      # claim output, drive LOW
+                level = lgpio.gpio_read(chip, gpio)
+                lgpio.gpio_free(chip, gpio)
+                results.append(f"{name}(GPIO{gpio})={'LOW' if level == 0 else 'HIGH!'}")
+        finally:
+            lgpio.gpiochip_close(chip)
+        return jsonify({"ok": True, "message": ", ".join(results)
+                        + f" · cap {float(data.get('max_on_s', 5.0) or 5.0):g} s/window"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/opto_pulse", methods=["POST"])
+def opto_pulse():
+    """Test pulse from the Setup card: ONE window on the chosen pin (laser | mask) with the posted
+    pattern, through a one-shot OptoStim — the same code path the engine runs — capped at
+    max_on_s. The device closes (pins LOW, released) when the window is over."""
+    _ensure_rig_path()
+    import threading
+    import time
+    from devices.opto import OptoStim
+    data = request.json or {}
+    pin = str(data.get("pin", "laser"))
+    pins = data.get("pins") or {}
+    if pin not in ("laser", "mask") or pin not in pins:
+        return jsonify({"ok": False, "error": f"no '{pin}' pin configured"}), 400
+    if "laser" not in pins:
+        return jsonify({"ok": False, "error": "the opto device has no laser pin"}), 400
+    max_on = float(data.get("max_on_s", 5.0) or 5.0)
+    duration = min(max_on, max(0.002, float(data.get("duration_ms", 100) or 100) / 1000.0))
+    pattern = {"mode": str(data.get("mode", "continuous") or "continuous"),
+               "pulse_hz": float(data.get("pulse_hz", 20) or 20),
+               "pulse_width_ms": float(data.get("pulse_width_ms", 5) or 5)}
+    task = {"enabled": True, "fraction": 1.0, "mask": pin == "mask", "pattern": pattern,
+            "windows": {"trial_start": {"enabled": True, "onset_s": 0.0, "duration_s": duration}}}
+    rig = {"pins": {"laser": pins["laser"]} if pin == "laser" else {"laser": pins["laser"], "mask": pins["mask"]},
+           "gpiochip": data.get("gpiochip", 0), "max_on_s": max_on}
+    try:
+        dev = OptoStim()
+        dev.init(rig_config=rig, task_params=task)
+        dev.arm_trial(0, opto_on=(pin == "laser"))
+        dev.fire_at("trial_start", time.time())
+
+        def _finish():
+            try:
+                time.sleep(duration + 0.1)
+            finally:
+                dev.close()                 # pins LOW + released, even if the sleep raised
+        threading.Thread(target=_finish, daemon=True).start()
+        gpio = pins[pin].get("gpio") if isinstance(pins[pin], dict) else pins[pin]
+        return jsonify({"ok": True, "pin": pin, "gpio": gpio, "duration_ms": duration * 1000,
+                        "mode": pattern["mode"]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/opto_off", methods=["POST"])
+def opto_off():
+    """Drive every opto pin LOW (claim-LOW-release). The controller calls it at session teardown:
+    a SIGKILLed engine leaves a line at its last level, and lgpio drops the claim with it. A pin
+    still claimed by a live process (the engine) is reported, not forced — that process owns it."""
+    data = request.json or {}
+    pins = data.get("pins") or {}
+    try:
+        import lgpio
+        chip = lgpio.gpiochip_open(int(data.get("gpiochip", 0) or 0))
+        done = []
+        try:
+            for name, cfg in pins.items():
+                gpio = int(cfg.get("gpio") if isinstance(cfg, dict) else cfg)
+                try:
+                    lgpio.gpio_claim_output(chip, gpio, 0)
+                    lgpio.gpio_write(chip, gpio, 0)
+                    lgpio.gpio_free(chip, gpio)
+                    done.append(f"{name}(GPIO{gpio}) LOW")
+                except Exception as e:
+                    done.append(f"{name}(GPIO{gpio}) busy: {e}")
+        finally:
+            lgpio.gpiochip_close(chip)
+        return jsonify({"ok": True, "message": ", ".join(done) or "no pins"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/init_photodiode", methods=["POST"])
 def init_photodiode():
     """Initialize the photodiode (leader) and run the UNIVERSAL sync verify: flash the FOLLOWER's

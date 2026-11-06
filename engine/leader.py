@@ -33,6 +33,8 @@ import devices.camera         # noqa: F401
 import devices.photodiode     # noqa: F401
 import devices.calibration_probe  # noqa: F401
 import devices.encoder        # noqa: F401 — running-wheel encoder
+import devices.opto           # noqa: F401 — optogenetic stimulator (laser TTL + masking LED)
+from shared.stim_generator import is_go_trial
 
 
 # ── Per-trial photodiode onset window ──
@@ -47,6 +49,11 @@ SYNC_FLIP_BUDGET_S = 0.05     # SHOW send -> photons: UDP hop + up to one frame 
 SYNC_TIMEOUT_MARGIN_S = 0.03  # jitter headroom
 SYNC_TIMEOUT_MIN_S = 0.10     # never tighter than the historical value
 SYNC_TIMEOUT_MAX_S = 0.30     # and never long enough to crowd reward_delay_s
+# An edge earlier than this after the SHOW send cannot be this stimulus: genuine SHOW->photons
+# latencies start at ~57 ms (40 sessions, 2026-11), while a heartbeat flash commanded just
+# before SHOW lands its sub-pulses 3-40 ms after it — 1.2 % of confirmed trials had anchored
+# their onset (and the response window, and now the laser) on one of those.
+SYNC_MIN_LATENCY_S = 0.045
 
 
 # ── L3 display heartbeat (displayd/PROTOCOL.md "Leader-clocked L3 heartbeats") ──
@@ -64,6 +71,8 @@ HB_CLUSTER_KEEP_S = 2.0       # cluster onsets older than this can never match a
 HB_LOST_N = 3                 # consecutive unconfirmed heartbeats -> alarm
 HB_OK_N = 2                   # consecutive confirmed heartbeats -> recovery
 HB_REALERT_S = 60.0           # re-alert cadence while the alarm persists
+HB_SETTLE_S = 0.15            # hold SHOW until a flash commanded this recently has landed
+                              # (flash latency up to ~0.12 s + its 2-3 sub-pulses)
 # A lost heartbeat means "the loop is broken", not "the projector is dark" — the display and the
 # whole sensor chain (diode -> amp -> Teensy -> TTL -> GPIO16) fail with the SAME signature, and
 # L1/L2 cannot separate them (an EVM barrel pull back-feeds DLPC logic through the Pi header, so
@@ -187,6 +196,8 @@ class Leader:
                 task_params = {"max_lick_rate": self.task.get("reward", {}).get("max_lick_rate", 0.3)}
             elif dev_name == "display":
                 task_params = {"background_gray": self.task.get("stimulus", {}).get("background_gray", 0.0)}
+            elif dev_name == "opto":
+                task_params = self.task.get("opto") or {}      # the whole opto: section
             else:
                 task_params = {}
             dev.init(rig_config=dev_config, task_params=task_params)
@@ -216,17 +227,21 @@ class Leader:
     # ── Go / No-Go classification ──
 
     def _classify_go(self, az_deg: float) -> bool:
-        rule = self.task.get("stimulus", {}).get("go_rule", "left")
-        if rule == "all":
-            return True
-        if rule == "right":
-            return az_deg > 0
-        return az_deg < 0  # default: left = go
+        # ONE rule, shared with the controller and the opto assignment (shared/stim_generator).
+        return is_go_trial(az_deg, self.task.get("stimulus", {}).get("go_rule", "left"))
 
     # ── Actions ──
 
     def _action_show_stim(self):
         self._stim_active = True   # heartbeat scheduler pauses from SHOW until stim off
+        opto = self.devices.get("opto")
+        if opto is not None:
+            # Arm the stimulus edge-lock BEFORE the command goes out: the first photodiode edge
+            # at/after since_t (+ SYNC_MIN_LATENCY_S) fires the stim_onset windows on lgpio's
+            # notify thread, sub-ms after the first stimulus frame; if no edge comes they fire
+            # from the predicted onset instead.
+            since_t = time.time()
+            opto.arm_edge(since_t, since_t + self._opto_fallback_s(opto))
         self._send_follower({"cmd": "SHOW", "trial": self.trial_num})
         t = time.time()
         self._trial_ctx["stim_onset_t"] = t
@@ -234,7 +249,18 @@ class Leader:
                        "trial": self.trial_num, "t": t,
                        "az": self._trial_ctx.get("stim_az", 0)})
 
-    def _action_deliver_reward(self):
+    def _opto_fallback_s(self, opto) -> float:
+        """When the stim_onset windows fire if no photodiode edge confirms the onset: with sync
+        on, a little past the predicted onset (the edge normally wins, and a miss then costs
+        tens of ms, not the whole onset window); with sync off, the predicted onset itself."""
+        lat = opto.latency_estimate()
+        if self._sync_enabled:
+            return min(self._sync_timeout_s, max(lat + 0.02, 0.12))
+        return lat
+
+    def _action_deliver_reward(self, manual: bool = False):
+        """manual = the controller's REWARD command (outside the trial logic): it never anchors
+        an opto reward window — that would light the NEXT trial's window during the ITI."""
         if "reward" in self.devices:
             ms = self.devices["reward"].deliver()
             t = time.time()
@@ -243,6 +269,8 @@ class Leader:
             self._trial_ctx["rewarded"] = True
             self._publish({"type": "reward", "on": True,
                            "t": t, "pulse_ms": ms})
+            if not manual and "opto" in self.devices:
+                self.devices["opto"].fire_at("reward", t)
 
     # ── Lick handling ──
 
@@ -253,6 +281,9 @@ class Leader:
     def _on_sync_pulse(self, evt: dict):
         """Photodiode rising edge: queue for online onset detection, publish to Mac."""
         if evt.get("event") == "sync_pulse":
+            opto = self.devices.get("opto")
+            if opto is not None:
+                opto.on_sync_edge(evt["t"])   # FIRST: the laser's ON edge rides this thread
             try:
                 self._sync_queue.put_nowait(evt["t"])
             except queue.Full:
@@ -284,7 +315,8 @@ class Leader:
                 t = self._sync_queue.get(timeout=remaining)
             except queue.Empty:
                 return None
-            if t >= since_t:
+            # ... and an edge too soon after SHOW is a heartbeat sub-pulse, not the stimulus.
+            if t >= since_t + SYNC_MIN_LATENCY_S:
                 return t
 
     def _compute_sync_timeout(self) -> float:
@@ -311,6 +343,10 @@ class Leader:
                   f"{SYNC_TIMEOUT_MAX_S * 1000:.0f} ms — expect sync_ok=0 on many trials; "
                   f"lower photodiode_sync_every_n", flush=True)
         return timeout
+
+    def _on_opto_event(self, evt: dict):
+        """Opto window on/off from the device's threads -> the controller (raster + table)."""
+        self._publish({**evt, "type": "opto"})
 
     def _on_encoder(self, evt: dict):
         """Running-wheel sample: cache the live speed (for future gating) and publish to the Mac."""
@@ -464,13 +500,21 @@ class Leader:
             if have != want:
                 refuse = (f"stimulus plan has {have} trials but the task asks for {want} — "
                           f"re-Deploy after changing the task")
+            elif (self.task.get("opto") or {}).get("enabled") and "opto_on" not in self._stims:
+                refuse = "the stimulus plan predates the task's opto section — re-Deploy"
+        end_reason = "no_stimuli"
+        if not refuse and (self.task.get("opto") or {}).get("enabled") and "opto" not in self.devices:
+            # Deploy refuses this too; here for a hand-edited task or a rig changed since.
+            refuse = ("the task enables opto but this rig has no opto device on its leader "
+                      "(Setup tab) — add it, or untick Opto in the Experiment tab")
+            end_reason = "no_opto_device"
         if refuse:
             # Never run on the hard-coded fallbacks (8 s ITI, az 0, contrast 0 in the data): end
             # the session at once, visibly, before any trial or data file is started.
             print(f"Session REFUSED — {refuse}", flush=True)
             self.running = False
             self._publish({"type": "session_end", "n_completed": 0, "n_planned": 0,
-                           "t": time.time(), "end_reason": "no_stimuli", "error": refuse})
+                           "t": time.time(), "end_reason": end_reason, "error": refuse})
             return
 
         # Start lick streaming
@@ -484,6 +528,10 @@ class Leader:
         # Start running-wheel encoder streaming
         if "encoder" in self.devices:
             self.devices["encoder"].start_stream(self._on_encoder)
+
+        # Opto events (laser / mask on and off) to the controller's live view
+        if "opto" in self.devices:
+            self.devices["opto"].start_stream(self._on_opto_event)
         self._sync_enabled = (
             "photodiode" in self.devices
             and self.task.get("stimulus", {}).get("photodiode_sync_enabled", False))
@@ -606,6 +654,15 @@ class Leader:
                 break
             self.trial_num = trial_num
 
+            # ── Opto: arm BEFORE the ITI (iti_start is the first anchor). The plan says which
+            # trials are lit (stimuli.npz opto_on, assigned at Deploy); the device fires the
+            # mask on every trial and the laser on those.
+            opto = self.devices.get("opto")
+            if opto is not None:
+                opto_on = (bool(int(self._stims["opto_on"][trial_num]))
+                           if (self._stims is not None and "opto_on" in self._stims) else False)
+                opto.arm_trial(trial_num, opto_on)
+
             # ── Block delay (on block transition) ──
             trial_block = int(self._stims["block_num"][trial_num]) if self._stims else 0
             if trial_block != current_block:
@@ -627,6 +684,8 @@ class Leader:
             iti_start_t = time.time()
             self._publish({"type": "iti_start", "trial": trial_num,
                            "t": iti_start_t, "duration": iti_dur})
+            if opto is not None:
+                opto.fire_at("iti_start", iti_start_t)
 
             iti_actual = self._run_iti(iti_dur)
 
@@ -685,6 +744,8 @@ class Leader:
             self._trial_ctx["trial_start_t"] = trial_start_t
             self._publish({"type": "trial_start", "trial": trial_num,
                            "t": trial_start_t})
+            if opto is not None:
+                opto.fire_at("trial_start", trial_start_t)
 
             # ── Pre-stimulus period (baseline lick collection) ──
             prestim_dur = float(prestim_durs[trial_num]) if prestim_durs is not None else 0
@@ -696,6 +757,27 @@ class Leader:
                 if not self.running:
                     break
                 self._trial_ctx["prestim_lick_count"] = len(self._trial_licks)
+
+            # ── Pre-SHOW guards ── both wait through _wait_for_event, so UDP / heartbeat ticks
+            # continue and their licks still count as pre-stim below.
+            # 1. Heartbeat settle: a flash commanded in the last HB_SETTLE_S lands its sub-pulses
+            #    AFTER the SHOW send and used to be taken for the stimulus onset (1.2 % of
+            #    confirmed trials, 2026-11). Hold the stimulus until it has landed.
+            self._stim_active = True   # from here to stim off the scheduler stays out
+            if self._hb_enabled and self._heartbeats:
+                settle = self._heartbeats[-1]["t_cmd"] + HB_SETTLE_S - time.time()
+                if settle > 0:
+                    self._wait_for_event(settle)
+            # 2. Opto lead: a stim_onset window with a negative onset starts BEFORE the stimulus,
+            #    timed from the predicted onset (SHOW + the latency estimate); when the lead
+            #    exceeds the latency, SHOW itself is held by the difference.
+            if opto is not None:
+                lead = opto.lead_s()
+                if lead > 0:
+                    lat = opto.latency_estimate()
+                    t_show_planned = time.time() + max(0.0, lead - lat)
+                    opto.fire_stim_lead(t_show_planned + lat)
+                    self._wait_for_event(max(0.0, t_show_planned - time.time()))
 
             # Licks so far this trial all belong to the pre-stim phase (list was reset
             # at trial setup; pre-stim is the only phase before the stimulus).
@@ -732,6 +814,8 @@ class Leader:
             self._trial_ctx["onset_source"] = onset_source
             self._trial_ctx["true_onset_t"] = true_onset_t
             self._trial_ctx["display_latency_s"] = true_onset_t - stim_onset_t
+            if opto is not None and onset_source == "photodiode":
+                opto.note_true_onset(stim_onset_t, true_onset_t)   # feeds the lead estimate
 
             # Response-delay phase (default 0.6s) — anchored to TRUE onset so the response window
             # opens resp_delay_s after the mouse actually sees the stim. No reward here: every
@@ -741,6 +825,8 @@ class Leader:
             # ── Response window ──
             rw_start_t = time.time()
             self._trial_ctx["response_window_t"] = rw_start_t
+            if opto is not None:
+                opto.fire_at("response_window", rw_start_t)
             is_go = self._trial_ctx["is_go"]
 
             # Reward rule by level — GO trials only (no-go is never rewarded); all timing is
@@ -827,6 +913,8 @@ class Leader:
                 (_ack_t - stim_onset_t) if _ack_t is not None else float("nan"))
 
             # ── Record trial ──
+            if opto is not None:
+                self._trial_ctx.update(opto.finish_trial())   # what fired, and when
             self._write_trial(stim)
             self._publish_trial_event(stim)
 
@@ -1162,7 +1250,7 @@ class Leader:
             if cmd == "STOP":
                 self.running = False
             elif cmd == "REWARD":
-                self._action_deliver_reward()
+                self._action_deliver_reward(manual=True)
         except BlockingIOError:
             pass
         except json.JSONDecodeError:
@@ -1274,6 +1362,11 @@ class Leader:
         # the response-window opening. NaN (no in-window response) -> no RT.
         fl = ctx.get("first_lick_t", float("nan"))
         rt_ms = round((fl - rw_t) * 1000, 1) if fl == fl else None   # fl != fl only when NaN
+        # Optogenetics: laser onset relative to the true stimulus onset (ms); null when no laser
+        # window fired or no onset is known (never NaN — see onset_ack_latency_s below).
+        _oo = float(ctx.get("opto_onset_t", float("nan")))
+        _to = float(ctx.get("true_onset_t", float("nan")))
+        opto_rel_ms = round((_oo - _to) * 1000, 1) if (_oo == _oo and _to == _to) else None
 
         self._publish({
             "type": "trial",
@@ -1294,6 +1387,8 @@ class Leader:
             "onset_source": ctx.get("onset_source", "command"),
             "level": level,
             "adaptive_state": adaptive_state,
+            "opto": bool(ctx.get("opto_on", 0)),
+            "opto_rel_ms": opto_rel_ms,
             "t": time.time(),
         })
 

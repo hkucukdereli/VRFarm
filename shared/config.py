@@ -137,6 +137,7 @@ def register_session(subject_id: str, session_id: str, session_num: int,
     stim = task_config.get("stimulus", {})
     contrast = stim.get("contrast", {})
     contrast_values = contrast.get("values", [])
+    opto = task_config.get("opto") or {}
 
     db["sessions"].append({
         "session_id": session_id,
@@ -150,6 +151,9 @@ def register_session(subject_id: str, session_id: str, session_num: int,
         "contrast_values": contrast_values,
         "notes": notes,
         "rig": rig,
+        # optogenetics (task opto: section) — what was scheduled, not what fired (that is in the HDF5)
+        "opto_enabled": bool(opto.get("enabled", False)),
+        "opto_fraction": float(opto.get("fraction", 0) or 0) if opto.get("enabled", False) else 0.0,
         "timestamp": datetime.now().isoformat(),
     })
 
@@ -188,3 +192,83 @@ def photodiode_init_payload(cfg: dict) -> dict:
         "sync_size_px": cfg.get("sync_size_px"),
         "sync_brightness": cfg.get("sync_brightness"),
     }
+
+
+# ── Optogenetics (devices/opto.py + task opto: section) ──
+
+def opto_init_payload(cfg: dict) -> dict:
+    """The /api/init_opto payload both UIs send — one builder so the two can't drift (the
+    photodiode_init_payload precedent)."""
+    return {
+        "pins": cfg.get("pins") or {},
+        "gpiochip": cfg.get("gpiochip", 0),
+        "max_on_s": cfg.get("max_on_s", 5.0),
+    }
+
+
+def rig_opto_device(rig: dict) -> Union[dict, None]:
+    """The rig's usable opto device block, or None. 'Usable' is the ENGINE's own test
+    (Leader.init_devices): a devices.opto block of type opto, `enabled` missing-or-true, and listed
+    in the leader Pi's devices. The controller shows the Experiment tab's OPTOGENETICS section and
+    accepts an opto-enabled task exactly when this is not None, so it refuses when the engine would."""
+    devs = (rig or {}).get("devices") or {}
+    cfg = devs.get("opto")
+    if not isinstance(cfg, dict) or not cfg.get("enabled", True):
+        return None
+    if str(cfg.get("type", "opto")) != "opto":
+        return None
+    leader = next((p for p in ((rig or {}).get("pis") or []) if p.get("role") == "leader"), None)
+    if not leader or "opto" not in (leader.get("devices") or []):
+        return None
+    return cfg
+
+
+def validate_opto(task: dict, rig: Union[dict, None]) -> tuple:
+    """(errors, warnings) for the task's opto: section against the rig. Empty errors = runnable.
+    Pure (no Flask, no hardware) — Deploy, the device's init and tools/test_opto.py all use it.
+    rig=None skips the rig checks (device presence, pins, cap)."""
+    errors, warnings = [], []
+    opto = (task or {}).get("opto") or {}
+    if not opto.get("enabled", False):
+        return errors, warnings
+    from devices.opto import opto_spec_errors
+    dev = rig_opto_device(rig) if rig is not None else None
+    if rig is not None and dev is None:
+        errors.append("opto is enabled in the task but this rig has no enabled opto device on its "
+                      "leader (Setup tab: add / enable the Optogenetics device)")
+    try:
+        fraction = float(opto.get("fraction", 0))
+    except (TypeError, ValueError):
+        fraction = -1.0
+    if not 0.0 <= fraction <= 1.0:
+        errors.append("opto.fraction must be between 0 and 1")
+    try:
+        if int(opto.get("min_gap_trials", 0) or 0) < 0:
+            errors.append("opto.min_gap_trials must be >= 0")
+    except (TypeError, ValueError):
+        errors.append("opto.min_gap_trials must be an integer")
+    eligible = str(opto.get("eligible", "all") or "all").strip().lower()
+    go_rule = str(((task or {}).get("stimulus") or {}).get("go_rule", "all") or "all").lower()
+    if eligible not in ("all", "go", "nogo"):
+        errors.append("opto.eligible must be all | go | nogo")
+    elif eligible == "nogo" and go_rule == "all":
+        errors.append("opto.eligible = nogo but stimulus.go_rule = all: every trial is a GO trial")
+    pins = (dev or {}).get("pins") if dev else None
+    max_on = float((dev or {}).get("max_on_s", 5.0) or 5.0)
+    errors += opto_spec_errors(opto, pins, max_on)
+    stim = (task or {}).get("stimulus") or {}
+    if not stim.get("photodiode_sync_enabled", False):
+        warnings.append("opto with photodiode stim sync OFF: the stimulus-onset window is timed "
+                        "from the SHOW command plus the rig's latency estimate (±25 ms); turn "
+                        "the sync on for ms timing")
+    wins = opto.get("windows") or {}
+    so, rw = wins.get("stim_onset") or {}, wins.get("response_window") or {}
+    if so.get("enabled") and rw.get("enabled"):
+        rd = float(((task or {}).get("reward") or {}).get("resp_delay_s", 0.6) or 0)
+        a0, a1 = float(so.get("onset_s", 0)), float(so.get("onset_s", 0)) + float(so.get("duration_s", 0))
+        b0 = rd + float(rw.get("onset_s", 0))
+        b1 = b0 + float(rw.get("duration_s", 0))
+        if a0 < b1 and b0 < a1:
+            warnings.append("the stim_onset and response_window windows overlap (resp_delay_s "
+                            f"{rd:g}): the second one is dropped while the pin is still on")
+    return errors, warnings

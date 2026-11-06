@@ -54,7 +54,7 @@ _running = threading.Event()    # a session is currently playing
 # the UI's go/no-go prediction reads trialTable[i].az, and a mismatch silently disables it.
 TRIALS = [{"trial": i, "block": 0, "iti_s": ITI_S, "prestim_s": 0.3, "poststim_s": 0.5,
            "duration_s": max(0.5, TRIAL_S), "az": 30.0 if (i % 3) else 90.0, "alt": 0.0,
-           "contrast": 0.5, "corr_contrast": 0.5, "level": 1}
+           "contrast": 0.5, "corr_contrast": 0.5, "level": 1, "opto": (i % 4 == 0)}
           for i in range(N)]
 
 
@@ -134,6 +134,9 @@ def play_session(session_id):
             _send(out, {"type": "trial_start", "trial": i})
             t_on = time.time()
             _send(out, {"type": "stim", "on": True, "trial": i, "az": az})
+            if tr.get("opto"):   # optogenetic light leading the stimulus by 100 ms (raster band + table column)
+                _send(out, {"type": "opto", "on": True, "t": t_on - 0.1, "t_off": t_on + 0.4, "pin": "laser",
+                            "trial": i, "anchor": "stim_onset", "source": "pred"})
             # timeout mode → dry trials (no licks) so it mimics the real dry-streak abort
             responded = (not timeout_mode) and (i % 3) != 0 and (i % 4) != 0
             rt = 0.6 + 0.25 + (i % 5) * 0.13                   # within the response window
@@ -148,7 +151,8 @@ def play_session(session_id):
             _send(out, {"type": "trial", "trial_num": i, "stim_az": az, "contrast": tr["contrast"],
                         "outcome": "hit" if responded else "miss", "reward_type": "operant",
                         "rt_ms": round(rt * 1000) if responded else None,
-                        "resp_licks": (1 if responded else 0), "level": 1, "adaptive_state": 1})
+                        "resp_licks": (1 if responded else 0), "level": 1, "adaptive_state": 1,
+                        "opto": bool(tr.get("opto")), "opto_rel_ms": (-100.0 if tr.get("opto") else None)})
             completed += 1
             # Global timeout: abort mid-session after DRY_N dry trials (matches the engine:
             # publish global_timeout, then finalize → session_end).

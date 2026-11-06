@@ -123,9 +123,125 @@ def switch_trial_rule(task_config: dict) -> str | None:
     return rule if (bsize > 1 or _max_duration(sess.get("block_delay", 0)) > 0) else None
 
 
-def build_block_trial_list(task_config: dict) -> list[dict]:
-    """Build ordered list of (trial_idx, block_num, az_deg, contrast)."""
-    rng = np.random.default_rng()
+def is_go_trial(az_deg: float, go_rule) -> bool:
+    """Whether a trial at this azimuth is a GO trial under stimulus.go_rule: 'all' -> every trial,
+    'right' -> az > 0, anything else ('left', the engine's default) -> az < 0. ONE rule for the
+    engine (Leader._classify_go), the controller (registry.event_is_go) and the opto assignment."""
+    rule = str(go_rule or "left").strip().lower()
+    if rule == "all":
+        return True
+    if rule == "right":
+        return float(az_deg) > 0
+    return float(az_deg) < 0
+
+
+def _assign_opto(trials: list[dict], opto_cfg: dict, go_rule, rng) -> None:
+    """Mark the opto trials in place (t["opto"] = True/False) for a trial list in its FINAL order.
+    Per block, per contrast value, among the eligible trials: round(fraction x n) with a carried
+    remainder, so the light is stratified across contrasts and the block total tracks the fraction.
+    min_gap_trials non-opto trials are kept between opto trials (across block boundaries too) by
+    drawing candidates in a random round-robin over the contrast groups; a quota that cannot be met
+    under the gap is reported, not silently widened. Decided HERE, at Deploy, so the trial table
+    shows it and the plan (stimuli.npz opto_on) is the record of what was scheduled."""
+    for t in trials:
+        t["opto"] = False
+    if not opto_cfg or not opto_cfg.get("enabled", False):
+        return
+    fraction = min(1.0, max(0.0, float(opto_cfg.get("fraction", 0.0) or 0.0)))
+    if fraction <= 0 or not trials:
+        return
+    eligible = str(opto_cfg.get("eligible", "all") or "all").strip().lower()
+    gap = max(0, int(opto_cfg.get("min_gap_trials", 0) or 0))
+
+    def ok(t):
+        if eligible == "go":
+            return is_go_trial(t["az_deg"], go_rule)
+        if eligible == "nogo":
+            return not is_go_trial(t["az_deg"], go_rule)
+        return True
+
+    chosen = set()          # positions (list index = time order) already lit
+    short = []              # (block, contrast, wanted, got)
+    blocks = {}
+    for pos, t in enumerate(trials):
+        blocks.setdefault(t["block_num"], []).append(pos)
+    for b in sorted(blocks):
+        groups = {}         # contrast -> candidate positions
+        for pos in blocks[b]:
+            if ok(trials[pos]):
+                groups.setdefault(float(trials[pos]["contrast"]), []).append(pos)
+        carry = 0.0
+        quota = {}
+        for c in sorted(groups):
+            exact = fraction * len(groups[c]) + carry
+            k = int(round(exact))
+            carry = exact - k
+            quota[c] = min(k, len(groups[c]))
+            cand = list(groups[c])
+            rng.shuffle(cand)
+            groups[c] = cand
+        # A greedy draw can paint itself into a corner under the gap rule, so redraw the block
+        # (fresh shuffle) until every quota is met, keeping the best attempt otherwise.
+        best = None
+        for attempt in range(200 if gap else 1):
+            got = {c: 0 for c in groups}
+            picked = set()
+            cand = {c: list(groups[c]) for c in groups}
+            if attempt:
+                for c in cand:
+                    rng.shuffle(cand[c])
+            progress = True
+            while progress:
+                progress = False
+                for c in sorted(cand):            # round-robin: no contrast starves another
+                    if got[c] >= quota[c]:
+                        continue
+                    while cand[c]:
+                        pos = cand[c].pop()
+                        if all(abs(pos - q) > gap for q in chosen | picked):
+                            picked.add(pos)
+                            got[c] += 1
+                            progress = True
+                            break
+            if best is None or sum(got.values()) > sum(best[0].values()):
+                best = (got, picked)
+            if all(got[c] >= quota[c] for c in quota):
+                break
+        got, picked = best
+        chosen |= picked
+        for c in sorted(groups):
+            if got[c] < quota[c]:
+                short.append((b, c, quota[c], got[c]))
+    for pos in chosen:
+        trials[pos]["opto"] = True
+    if short:
+        print("[stim_generator] WARNING: opto min_gap_trials could not be met: " +
+              "; ".join(f"block {b} contrast {c:g}: {g}/{w}" for b, c, w, g in short), flush=True)
+
+
+def opto_summary(task_config: dict, n_opto: int, n: int) -> str:
+    """One line for the Deploy log: how many trials are lit, under which rules, in which windows."""
+    o = task_config.get("opto") or {}
+    if not o.get("enabled", False):
+        return ""
+    wins = o.get("windows") or {}
+    names = [f"{k} {float(w.get('onset_s', 0)):+.2f}s/{float(w.get('duration_s', 0)):g}s"
+             for k, w in wins.items() if isinstance(w, dict) and w.get("enabled")]
+    pat = o.get("pattern") or {}
+    mode = str(pat.get("mode", "continuous"))
+    if mode == "pulsed":
+        mode += f" {pat.get('pulse_hz', 20)} Hz x {pat.get('pulse_width_ms', 5)} ms"
+    return (f"Opto: {n_opto}/{n} trials (fraction {float(o.get('fraction', 0)):g}, eligible "
+            f"{o.get('eligible', 'all')}, min gap {int(o.get('min_gap_trials', 0) or 0)}); "
+            f"windows: {', '.join(names) or 'none'}; {mode}"
+            + ("; mask LED on every trial" if o.get("mask") else ""))
+
+
+def build_block_trial_list(task_config: dict, seed=None) -> list[dict]:
+    """Build the ordered trial list: dicts of trial_idx, block_num, az_deg, alt_deg, contrast and
+    opto (the per-trial light flag, assigned last so it sees the final order). `seed` makes the
+    draw reproducible (tests); Deploy leaves it None, so every Deploy draws a fresh plan."""
+    rng = np.random.default_rng(seed)
 
     sess = task_config["session"]
     stim = task_config["stimulus"]
@@ -192,11 +308,14 @@ def build_block_trial_list(task_config: dict) -> list[dict]:
             t["trial_idx"] = i
             t["block_num"] = 0
 
+    # Opto trials: assigned on the FINAL order (after any shuffle), so the gap rule and the
+    # per-block stratification describe the trials as they will actually run.
+    _assign_opto(trials, task_config.get("opto") or {}, stim.get("go_rule", "left"), rng)
     return trials
 
 
 def generate_stimuli(task_config: dict, warp_map, output_dir: str,
-                     contrast_metric: str = "weber") -> dict:
+                     contrast_metric: str = "weber", seed=None) -> dict:
     """Generate full session stimulus list.
 
     Args:
@@ -214,7 +333,7 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / "stimuli.npz"
 
-    trials = build_block_trial_list(task_config)
+    trials = build_block_trial_list(task_config, seed=seed)
     n = len(trials)
 
     stim_cfg = task_config["stimulus"]
@@ -248,6 +367,9 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
     # visual-angle size per trial — drives the follower's spherical renderer (px_* is
     # kept for logging and the no-warp fallback)
     stim_size_deg = np.full(n, float(stim_cfg.get("size_deg", 10.0)), dtype=np.float32)
+    # optogenetic light on this trial (task opto: section; decided in build_block_trial_list).
+    # int8 so the engine's per-trial slice (every 1-D array of length n) picks it up unchanged.
+    opto_on = np.zeros(n, dtype=np.int8)
 
     n_px_fallback = 0   # trials whose px_x/px_y came from the LINEAR fallback
     n_clipped = 0       # trials asking for more light than drive 1.0 gives at their azimuth
@@ -257,6 +379,7 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
         stim_az_deg[i] = t["az_deg"]
         stim_alt_deg[i] = t["alt_deg"]
         contrast[i] = t["contrast"]
+        opto_on[i] = 1 if t.get("opto") else 0
 
         px_per_deg = proj_res[0] / (2 * 105.0)
 
@@ -302,7 +425,7 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
               f"running real sessions.", flush=True)
 
     # Pre-generate all timing durations
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(seed)
     sess = task_config.get("session", {})
 
     iti_durations = _sample_durations(rng, sess.get("iti", 8.0), n + 1)
@@ -359,6 +482,7 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
         shape=np.array([shape]),
         n_trials=np.array([n]),
         sync_square_every_n=np.array([sync_every_n], dtype=np.int32),
+        opto_on=opto_on,
     )
 
     np.savez(out_path, **arrays)
@@ -383,6 +507,7 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
             "px_x": float(px_x[i]),
             "px_y": float(px_y[i]),
             "px_size": int(px_size[i]),
+            "opto": bool(opto_on[i]),
         })
     yaml_path = output_dir / "trials.yaml"
     with open(yaml_path, "w") as f:
@@ -393,6 +518,9 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
     rule = switch_trial_rule(task_config)
     if rule:
         print(f"  First trial of every block: {rule} contrast")
+    opto_line = opto_summary(task_config, int(opto_on.sum()), n)
+    if opto_line:
+        print("  " + opto_line)
     print(f"  Azimuth range: {stim_az_deg.min():.0f} to {stim_az_deg.max():.0f} deg")
     print(f"  Pixel sizes: {px_size.min()}-{px_size.max()} px")
     print(f"  Stimulus brightness: {stim_brightness.min():.3f}-{stim_brightness.max():.3f} "

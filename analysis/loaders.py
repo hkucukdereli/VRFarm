@@ -13,6 +13,7 @@ DataFrames rather than one table:
       .running     one row / wheel-encoder sample   (continuous, ~tens of thousands of rows)
       .licks       one row / lick                   (long form, in-trial + ITI)
       .pulses      one row / photodiode sync pulse   (long form)
+      .opto_windows one row / optogenetic light window (long form; laser windows)
       .stimulus    one row / planned trial
       .camera      one row / recorded video frame
       .meta        dict of root attributes (task_config parsed from JSON)
@@ -44,7 +45,7 @@ COUNTS_PER_REV = 4096
 # Per-trial columns pulled from the planned /stimulus group into the wide trials table
 # (sliced to the trials that actually ran). Everything else in /stimulus stays in .stimulus.
 _STIM_INTO_TRIALS = ("stim_alt_deg", "px_x", "px_y", "px_size",
-                     "duration_s", "prestim_s", "poststim_s")
+                     "duration_s", "prestim_s", "poststim_s", "opto_planned")
 
 # Root attrs stored as JSON strings by consolidate.py -> parse back to Python objects.
 _JSON_ATTRS = ("task_config", "saved_devices", "skipped_devices")
@@ -137,6 +138,10 @@ class Session:
     def camera(self) -> pd.DataFrame:
         return self._tables["camera"]
 
+    @property
+    def opto_windows(self) -> pd.DataFrame:
+        return self._tables["opto_windows"]
+
     @cached_property
     def meta(self) -> dict:
         with h5py.File(self.h5_path, "r") as f:
@@ -213,6 +218,34 @@ class Session:
                 if "reward_pavlovian" in r:
                     df["pavlovian"] = np.asarray(_to_n(r["reward_pavlovian"][:], n, False), bool)
 
+            # merge /opto (optogenetics device) + collect long-form laser-window rows
+            opto_rows = []
+            if "opto" in f:
+                og = f["opto"]
+                if "opto_on" in og:
+                    df["opto"] = np.asarray(_to_n(og["opto_on"][:], n, 0), bool)
+                if "opto_mask_on" in og:
+                    df["opto_mask"] = np.asarray(_to_n(og["opto_mask_on"][:], n, 0), bool)
+                if "opto_onset_t" in og:
+                    df["opto_onset_t"] = _to_n(og["opto_onset_t"][:], n, np.nan)
+                for name in ("opto_n_windows", "opto_n_dropped"):
+                    if name in og:
+                        df[name] = _to_n(og[name][:], n, 0)
+                anchors = (_to_n([_decode(s) for s in og["opto_window_anchor"][:]], n, "")
+                           if "opto_window_anchor" in og else [""] * n)
+                if "opto_window_anchor" in og:
+                    df["opto_anchors"] = anchors
+                if "opto_window_t" in og:
+                    wt = _vlen_rows(og["opto_window_t"])
+                    for i in range(min(n, len(wt))):
+                        names = anchors[i].split(",") if anchors[i] else []
+                        row = np.asarray(wt[i], float)
+                        for k in range(len(row) // 2):
+                            t_on, t_off = float(row[2 * k]), float(row[2 * k + 1])
+                            opto_rows.append((tnums[i], k, t_on, t_off,
+                                              names[k] if k < len(names) else "",
+                                              t_on - onset[i]))
+
             # merge /lick summaries + collect long-form rows
             lick_rows = []
             if "lick" in f:
@@ -264,6 +297,8 @@ class Session:
                 df["first_pulse_lat_ms"] = (df["first_pulse_t"] - df["stim_onset_t"]) * 1e3
             if "trial_outcome" in df:
                 df["hit"] = df["trial_outcome"] == "hit"
+            if {"opto_onset_t", "true_onset_t"} <= set(df.columns):
+                df["opto_lat_ms"] = (df["opto_onset_t"] - df["true_onset_t"]) * 1e3
 
             # running-wheel stream
             run_df = pd.DataFrame({k: running[k] for k in sorted(running)})
@@ -275,6 +310,8 @@ class Session:
                 "trial_num", "phase", "t", "t_rel_onset_s", "t_rel_window_s"])
             pulses = pd.DataFrame(pulse_rows, columns=[
                 "trial_num", "pulse_idx", "t", "t_rel_onset_ms"])
+            opto_df = pd.DataFrame(opto_rows, columns=[
+                "trial_num", "window_idx", "t_on", "t_off", "anchor", "t_rel_onset_s"])
 
             camera = self._read_camera(f)
 
@@ -285,6 +322,7 @@ class Session:
             "pulses": self._ident(pulses),
             "stimulus": self._ident(stim_df),
             "camera": self._ident(camera),
+            "opto_windows": self._ident(opto_df),
             "_stim_attrs": stim_attrs,
         }
 
@@ -402,6 +440,10 @@ class Dataset:
     @property
     def camera(self) -> pd.DataFrame:
         return self._concat("camera")
+
+    @property
+    def opto_windows(self) -> pd.DataFrame:
+        return self._concat("opto_windows")
 
     @property
     def meta(self) -> pd.DataFrame:

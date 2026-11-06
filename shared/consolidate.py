@@ -38,6 +38,9 @@ for _n in ("lick_times", "iti_lick_times", "iti_lick_count"):
 for _n in ("reward_t", "reward_amount_ul", "reward_pavlovian"):
     _GROUP[_n] = "reward"
 _GROUP["sync_pulses"] = "photodiode"
+for _n in ("opto_on", "opto_mask_on", "opto_onset_t", "opto_n_windows", "opto_n_dropped",
+           "opto_window_t", "opto_window_anchor"):
+    _GROUP[_n] = "opto"          # optogenetics device (devices/opto.py)
 
 # stimuli.npz per-trial arrays -> /stimulus dataset name (renamed for clarity)
 _NPZ_DATASET = {
@@ -48,6 +51,8 @@ _NPZ_DATASET = {
     # light model (shared/intensity_model): what each stimulus was in light, per trial
     "stim_brightness": "stim_brightness", "stim_lum": "stim_lum", "stim_drive": "stim_drive",
     "contrast_measured": "contrast_measured",
+    # which trials the Deploy scheduled for opto light (what FIRED is in /opto, when saved)
+    "opto_on": "opto_planned",
 }
 # stimuli.npz scalars -> /stimulus group attrs
 _NPZ_ATTR = ("background_gray", "global_delay", "shape",

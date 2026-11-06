@@ -30,6 +30,7 @@ _COMMON = [
     ("devices/display.py", "devices/display.py"),
     ("devices/calibration_probe.py", "devices/calibration_probe.py"),
     ("devices/encoder.py", "devices/encoder.py"),
+    ("devices/opto.py", "devices/opto.py"),               # optogenetic stimulator
     # Pi API
     ("pi_api/api.py", "pi_api/api.py"),
 ]

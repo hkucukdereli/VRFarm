@@ -47,7 +47,7 @@ all the conditioning — the leader just timestamps the resulting clean edges.
 | **GND**         | ↔ Leader GND                  | Common ground is essential — tie Teensy GND to a Pi GND pin. |
 | USB             | power                          | Bench supply or a Pi USB port. |
 
-Firmware: [`teensy/photodiode_sync_v2_0/`](../teensy/photodiode_sync_v2_0/) — build, flash
+Firmware: [`teensy/photodiode_sync_v2_2/`](../teensy/photodiode_sync_v2_2/) — build, flash
 and tuning instructions in **[TEENSY_INSTRUCTIONS.md](TEENSY_INSTRUCTIONS.md)**. It is a
 Schmitt trigger plus the same two filters the old on-Pi model used (`STEADY_US = 150` glitch
 reject, `HOLDOFF_US = 5000` → one pulse per frame). Since v2_0 the two thresholds are

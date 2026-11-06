@@ -41,6 +41,7 @@ devices:
     type: encoder
     wheel_diameter_cm: 14.4
   lick_sensor:
+    debounce_ms: 50    # lick refractory: MPR121 release debounce, ms (0 = off); rounded to the sensor's filter period
     electrode: 4
     enabled: true
     i2c_address: '0x5A'

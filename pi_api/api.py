@@ -766,12 +766,13 @@ def shutdown_display():
 def init_lick():
     """Initialize lick sensor (MPR121 I2C)."""
     _ensure_rig_path()
-    from devices.lick_sensor import LickSensor
+    from devices.lick_sensor import LickSensor, DEFAULT_DEBOUNCE_MS
     data = request.json or {}
     rig_cfg = {
         "i2c_address": data.get("i2c_address", "0x5A"),
         "electrode": data.get("electrode", 4),
         "i2c_bus": data.get("i2c_bus", 1),
+        "debounce_ms": data.get("debounce_ms", DEFAULT_DEBOUNCE_MS),   # lick refractory (MPR121 release debounce)
     }
     _release_one("lick_sensor")   # free any prior instance so this (re)init can re-claim the bus
     try:

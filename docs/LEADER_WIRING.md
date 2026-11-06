@@ -19,7 +19,7 @@ hardware not yet wired (no device class yet, so nothing is in the rig YAML for t
 | Reward valve  | Main solenoid   | OUT   | **23**   | 16   | `devices.reward.pins.main.gpio`      | Active-high pulse; gate of a FET/driver, not the valve supply. Boots LOW. |
 | Reward valve  | Home solenoid   | OUT   | **24**   | 18   | `devices.reward.pins.home.gpio`      | Second valve line, same driver pattern. Boots LOW. |
 | Photodiode    | Sync pulse (Teensy) | IN | **16**  | 36   | `devices.photodiode.gpio`            | Clean 3.3 V square pulse from the **Teensy** (below) — one rising edge per sync frame. No on-Pi filtering. |
-| Lick sensor   | MPR121 SDA/SCL  | I²C-1 | **2 / 3**| 3/5  | `devices.lick_sensor.i2c_address` `0x5A` | Touch electrode 4 on the MPR121, not a Pi GPIO. Shares the bus (below). |
+| Lick sensor   | MPR121 SDA/SCL  | I²C-1 | **2 / 3**| 3/5  | `devices.lick_sensor.i2c_address` `0x5A` | Touch electrode 4 on the MPR121, not a Pi GPIO. Shares the bus (below). `debounce_ms` (default 50) is the MPR121 release debounce = lick refractory period. |
 | Wheel encoder | AS5600 SDA/SCL  | I²C-1 | **2 / 3**| 3/5  | `devices.encoder.i2c_address` `0x36` | Magnetic angle sensor on the running wheel. Same bus as the lick sensor (below). |
 | Camera        | CSI ribbon      | CSI   | —        | CSI  | `devices.camera`                     | Flat ribbon to the CSI connector, not the GPIO header. |
 

@@ -2506,9 +2506,11 @@ function renderDisplayControls(dev) {
 
 function renderLickControls(dev) {
   const addr = dev.i2c_address || '0x5A';
-  const electrode = dev.electrode || 4;
+  const electrode = dev.electrode ?? 4;
+  const debounce = dev.debounce_ms ?? 50;
   const ds = deviceState.lick_sensor || {};
   const monitoring = ds.monitoring;
+  setTimeout(_updateLickDebounceHint, 0);   // the card is in the DOM once this render returns
 
   return `
     <div class="device-controls">
@@ -2522,12 +2524,31 @@ function renderLickControls(dev) {
         <input type="number" value="${electrode}" min="0" max="11" style="width:45px"
                onchange="rig.devices.lick_sensor.electrode = parseInt(this.value)">
       </div>
+      <div class="device-field" title="Lick refractory period = the MPR121's release debounce: after a touch the spout must read released for this long before the next lick can count (0 = off). Rounded to the sensor's filter period; the hint shows the effective value, the init log what the chip measured. Save Rig, then Reinit; Deploy ships it to the session engine.">
+        <label>Debounce (ms)</label>
+        <input type="number" value="${debounce}" min="0" max="1000" step="1" style="width:50px"
+               onchange="rig.devices.lick_sensor.debounce_ms = Math.max(0, parseInt(this.value) || 0); _updateLickDebounceHint()">
+        <span id="lick-debounce-hint" class="muted"></span>
+      </div>
       ${monitoring
         ? `<button class="btn btn-red btn-sm" onclick="stopLickMonitor()">Stop</button>`
         : `<button class="btn btn-blue btn-sm" onclick="startLickMonitor()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
       ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">Last lick: <span id="last-lick-time">--</span></span>` : ''}
     </div>
     ${monitoring ? `<canvas id="lick-canvas" class="lick-canvas" width="400" height="60"></canvas>` : ''}`;
+}
+
+// The effective debounce (rounded to the MPR121 filter period), from the controller's copy of
+// the driver's register model — the init log carries the value the chip actually measured.
+async function _updateLickDebounceHint() {
+  const el = document.getElementById('lick-debounce-hint');
+  if (!el) return;
+  const ms = ((rig && rig.devices && rig.devices.lick_sensor) || {}).debounce_ms ?? 50;
+  try {
+    const d = await (await fetch(SAPI + '/lick_debounce?ms=' + encodeURIComponent(ms))).json();
+    el.textContent = d.dr ? `\u2248 ${Math.round(d.effective_ms)} ms (${d.dr} \u00d7 ${d.period_ms.toFixed(1)} ms)` : 'off';
+    el.title = d.text || '';
+  } catch (e) { el.textContent = ''; }
 }
 
 function renderEncoderControls(dev) {

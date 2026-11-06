@@ -25,6 +25,7 @@ import yaml
 from flask import Blueprint, Response, g, jsonify, request
 
 from shared.config import save_rig_atomic, photodiode_init_payload
+from devices.lick_sensor import DEFAULT_DEBOUNCE_MS, debounce_registers, describe_debounce
 from shared.mjpeg_relay import relay
 from controller import settings, calib_paths
 from controller.registry import registry, RigState
@@ -541,7 +542,8 @@ def _init_one_device(rs: RigState, dev_name, devices, post):
         return post("/api/init_camera", {}, "Camera", 15)
     if dev_name == "lick_sensor":
         return post("/api/init_lick",
-                    {"i2c_address": cfg.get("i2c_address", "0x5A"), "electrode": cfg.get("electrode", 4)},
+                    {"i2c_address": cfg.get("i2c_address", "0x5A"), "electrode": cfg.get("electrode", 4),
+                     "debounce_ms": cfg.get("debounce_ms", DEFAULT_DEBOUNCE_MS)},
                     "Lick sensor", 10)
     if dev_name == "reward":
         return post("/api/init_reward", {"pins": cfg.get("pins", {"main": {"gpio": 18}})}, "Reward", 10)
@@ -613,6 +615,15 @@ def api_reinit_device():
     steps = []
     ok, _msg = _init_one_device(rs, dev_name, devices, _mk_post(ip, rs.api_port, steps))
     return jsonify({"ok": ok, "device": dev_name, "steps": steps})
+
+
+@bp.route("/lick_debounce")
+def api_lick_debounce():
+    """What the MPR121 will do with a requested lick debounce (the Lick card's live hint): the
+    modelled register choice from devices/lick_sensor.py; the init log has the measured one."""
+    d = debounce_registers(request.args.get("ms", DEFAULT_DEBOUNCE_MS))
+    d["text"] = describe_debounce(d)
+    return jsonify(d)
 
 
 # ── warp map / intensity calibration ──

@@ -220,6 +220,13 @@ Set the I²C address (`0x5A`) and the electrode channel, press **Live**, and tou
 spout — ticks appear on the 30-second raster and *Last lick* updates. If nothing
 registers, confirm the electrode number matches the wiring before suspecting the sensor.
 
+**Debounce (ms)** is the lick refractory period: the MPR121's *release* debounce, so after a
+touch the spout must read released for this long before the next lick can count (default 50,
+0 = off). Touch detection itself is not delayed. The value is rounded to the sensor's filter
+period — the hint next to the field shows the effective value, and the init log reports what
+the chip actually measured. It lives in the rig YAML (`devices.lick_sensor.debounce_ms`):
+**Save Rig**, then **Reinit** to apply it here, and **Deploy** ships it to the session engine.
+
 ### Photodiode
 
 ![Photodiode card](images/setup-11-photodiode.png)

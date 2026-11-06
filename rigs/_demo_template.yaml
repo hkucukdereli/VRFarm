@@ -53,6 +53,7 @@ devices:
     type: encoder
     wheel_diameter_cm: 14.4
   lick_sensor:
+    debounce_ms: 50
     electrode: 4
     enabled: true
     i2c_address: '0x5A'

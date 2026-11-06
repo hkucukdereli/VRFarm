@@ -75,8 +75,8 @@ deployed state, so you always need a fresh **Deploy** before GO.
 ![Task parameter form](images/exp-02-task-params.png)
 
 Pick a task from `experiments/` and press **Load Experiment**. The parameter form appears,
-grouped into STIMULUS, REWARD, TIMEOUT, TRIAL STRUCTURE, ADAPTIVE and GLOBAL TIMEOUT.
-Everything here is live-editable and round-trips to YAML:
+grouped into STIMULUS, REWARD, TIMEOUT, TRIAL STRUCTURE, ADAPTIVE, OPTOGENETICS (only on a rig
+with an opto device) and GLOBAL TIMEOUT. Everything here is live-editable and round-trips to YAML:
 
 - **Save** overwrites the same file; **Save As** creates a new one and selects it.
 - **N trials** is computed (`N blocks × Block size`) and read-only.
@@ -95,6 +95,18 @@ Everything here is live-editable and round-trips to YAML:
   calibration's name.
 - Level `2.5` forces Adaptive on and locks the checkbox; Amount `Count` swaps the value
   field to a pulse count and enables **Gap (ms)**.
+- **OPTOGENETICS** appears only when the loaded rig has a usable opto device (enabled and on the
+  leader — Setup tab); its fields are greyed out until **Enabled** is ticked, each window row
+  until its own box is, Hz / Width unless the pattern is pulsed, Mask LED unless the rig's device
+  has a mask pin. **Trials lit (%)** draws the lit trials at Deploy (stratified per contrast within
+  each block; the trial table gets an `opto` flag), the five window rows pick WHEN the light is on
+  relative to trial events (a negative onset is only possible for Stim onset), and the pattern is
+  continuous or pulsed. On a rig without the device the section is hidden and the task is saved
+  with opto **disabled**, so what you see is what runs. Deploy refuses windows longer than the
+  rig's cap and warns when photodiode sync is off (the laser is then timed from the SHOW command,
+  ±25 ms). During the session the EVENTS raster shows the light as a cyan band (dim for the mask
+  alone) and the trial table's **Opto** column shows ✓ with the laser onset relative to the true
+  stimulus onset.
 
 This step needs no rig at all — you can open the UI on a laptop and read or edit any task.
 

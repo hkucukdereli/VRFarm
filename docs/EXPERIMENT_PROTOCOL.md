@@ -259,9 +259,10 @@ Pi; the **Auto purge** switch does that right after each verified sync. Details:
 
 ## Task Parameters
 
-A task YAML has four sections. Values below are the current defaults from
-`experiments/_template.yaml` (the only task file in git); the code that reads them is
-`engine/leader.py`, `shared/stim_generator.py`, and `devices/reward.py`.
+A task YAML has five sections (`stimulus`, `reward`, `session`, `adaptive`, `opto`). Values
+below are the current defaults from `experiments/_template.yaml` (the only task file in git);
+the code that reads them is `engine/leader.py`, `shared/stim_generator.py`, `devices/reward.py`
+and `devices/opto.py`.
 
 ### `stimulus:` — what to show
 
@@ -329,6 +330,35 @@ minus the window start.
 | `step_up` | Add to the state after a licked trial. |
 | `step_down` | Subtract after an unlicked trial. State is clamped to [0, 1]. |
 
+### `opto:` — optogenetic stimulation
+
+Needs a `devices.opto` block in the rig YAML (laser TTL + optional masking LED on leader GPIOs,
+`max_on_s` cap) that is enabled and listed on the leader; the Experiment tab shows the section
+only then, and Deploy refuses an opto-enabled task on any other rig. **Which** trials are lit is
+drawn at Deploy (`shared/stim_generator.py`: stratified per contrast within each block, written to
+`stimuli.npz` `opto_on` and the trial table's `opto`); **when** and **what** the light is comes
+from the windows and the pattern below (`devices/opto.py`).
+
+| Param | Default | Meaning |
+|---|---|---|
+| `enabled` | false | Fire the light in this task. |
+| `fraction` | 0.3 | Fraction of trials with light (per contrast value within each block, with a carried remainder). |
+| `eligible` | `all` | `all` \| `go` \| `nogo` — which trials may be lit (`stimulus.go_rule` decides go/no-go). |
+| `min_gap_trials` | 1 | At least this many unlit trials between lit ones (0 = none; across block boundaries too). |
+| `windows.<anchor>` | — | One window per anchor: `iti_start`, `trial_start` (= pre-stim start), `stim_onset`, `response_window`, `reward`; each `{enabled, onset_s, duration_s}`. On a lit trial **every enabled window fires**. `onset_s` is signed seconds from the anchor; a **negative onset is only possible for `stim_onset`** (the light leads the stimulus, timed from the measured display latency, ±25 ms) and is capped at 1 s; `onset_s ≥ 0` on `stim_onset` is **locked to the photodiode edge** of the first stimulus frame (~1 ms) — turn `stimulus.photodiode_sync_enabled` on for opto sessions. `duration_s` must be ≤ the rig's `max_on_s`. A window requested while that pin is still on is dropped and counted (`opto_n_dropped`). |
+| `pattern.mode` | `continuous` | `continuous` (one window = one pulse) or `pulsed`. One pattern for every window, mask included. |
+| `pattern.pulse_hz` | 20 | pulsed: pulse rate, ≤ 100 Hz (edges are Python-timed `gpio_write`s, ~0.1–1 ms). |
+| `pattern.pulse_width_ms` | 5 | pulsed: ≥ 2 ms and shorter than the period. |
+| `mask` | true | Flash the masking LED on **every** trial with the same windows and pattern (needs `devices.opto.pins.mask`). |
+| `power_mw`, `wavelength_nm` | 0, 473 | Metadata only — the power is set on the driver; both travel with `task_config` into the HDF5. |
+
+What fired is recorded per trial in `/opto` (`opto_on`, `opto_onset_t`, `opto_window_t`,
+`opto_window_anchor` with the source `edge` / `pred` / `fallback` / `anchor`) — see
+[DATA_FORMAT.md](DATA_FORMAT.md). The live table's **Opto** column shows ✓ and the laser onset
+relative to the true stimulus onset. The light is off on STOP, abort and session end, and the
+controller drives the pins LOW again at teardown; **the Pi is not an interlock** — see
+[LEADER_WIRING.md](LEADER_WIRING.md).
+
 ---
 
 ## Data Output
@@ -346,7 +376,7 @@ raw video — built on the Leader at Transfer by merging the run-time sidecars
 
 The file groups per-trial data under `/trials`, the plan under `/stimulus`, and each saved
 device under `/lick`, `/reward`, `/photodiode`, `/camera`; the full task YAML is stored in
-the root `task_config` attribute. **See [`docs/DATA_FORMAT.md`](DATA_FORMAT.md)** for the
+the root `task_config` attribute (and `/opto` when the optogenetics device was saved). **See [`docs/DATA_FORMAT.md`](DATA_FORMAT.md)** for the
 complete layout, the loader helpers (`analysis/loaders.py`), and the subject-index format.
 
 All timestamps are Unix time (`time.time()`) in seconds, NTP-synced.
@@ -363,6 +393,7 @@ All timestamps are Unix time (`time.time()`) in seconds, NTP-synced.
 | Reward delivery | `time.time()` on Leader after GPIO | <1ms |
 | Camera frames | picamera2 callback (`wall_clock_s`) | ~1ms |
 | Sync pulses | lgpio alert tick (CLOCK_MONOTONIC ns), NTP-referenced | ~0.1ms |
+| Opto light on | `gpio_write` on the Leader (`opto_onset_t`, `/opto/opto_window_t`): the `stim_onset` window with onset ≥ 0 fires on the photodiode edge of the first stimulus frame; a lead (onset < 0) is timed from the latency estimate; other anchors from the engine's own stamp | ~1ms (edge-locked); ±25 ms for a lead (display jitter) |
 
 Lick-to-reward is on the same Pi (Leader), so latency is <1ms (no network hop).
 

@@ -46,6 +46,20 @@ devices:
     enabled: true
     i2c_address: '0x5A'
     type: lick_sensor
+  opto:                      # optogenetic stimulator: laser/LED driver TTL + optional masking LED
+    enabled: false           # off until a laser is wired; the Experiment tab shows its section only then
+    gpiochip: 0
+    max_on_s: 5.0            # hard cap per light window (s) — the device and Deploy refuse longer
+    pins:
+      laser:
+        gpio: 17             # driver TTL/enable input; boot-LOW pin (9-27)
+        label: laser TTL
+      mask:                  # optional: masking LED flashed on EVERY trial; delete the key if none
+        gpio: 27
+        label: masking LED
+    show_latency_s: 0.09     # SHOW->photons seed for leads (the engine refines it per session)
+    source: ''               # free text: laser model / wavelength / fibre
+    type: opto
   photodiode:
     enabled: true
     gpio: 16

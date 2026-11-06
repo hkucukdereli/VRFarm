@@ -143,7 +143,8 @@ A Pi showing *"SSH FAIL, API OK"* still works for everything except Install.
 
 Press **Initialize** (in the Devices header) once all Pis are green. It initializes each
 enabled device on its assigned Pi in a fixed order — display first, then lick sensor,
-reward, camera, photodiode, encoder, calibration probe — and reports each in the Log.
+reward, camera, photodiode, encoder, calibration probe, optogenetics — and reports each in
+the Log.
 
 ![Device tabs](images/setup-06-device-tabs.png)
 
@@ -258,6 +259,20 @@ rate, then **Live** and spin the wheel.
 A single GPIO that **latches** high or low — a TTL marker for aligning an external
 recording to a calibration session. It is driven automatically by the geometry
 calibration; the button is for testing.
+
+### Optogenetics
+
+A laser (or LED driver) TTL on a leader GPIO plus an optional **masking LED** on a second
+GPIO, both **boot-LOW** pins (17 / 27 by default — see
+[LEADER_WIRING.md](LEADER_WIRING.md)); a blank Mask GPIO means no masking LED. **Max on** is a
+hard cap per light window that the device and Deploy both enforce; **Show latency** seeds the
+SHOW→photons estimate that times a laser leading the stimulus (the engine refines it from the
+photodiode during the session). **Test laser** / **Test mask** fire one window (length,
+continuous or pulsed) through the same device code the engine runs — the laser test asks for
+confirmation. What the light does in a task (which trials, which windows, the pattern) is set in
+the Experiment tab, whose OPTOGENETICS section appears only when this device is enabled **and**
+assigned to the leader. Initialize claims the pins LOW and reads them back; nothing holds them
+afterwards, so the engine can claim them at GO.
 
 ---
 

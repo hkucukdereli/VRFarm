@@ -19,6 +19,8 @@ hardware not yet wired (no device class yet, so nothing is in the rig YAML for t
 | Reward valve  | Main solenoid   | OUT   | **23**   | 16   | `devices.reward.pins.main.gpio`      | Active-high pulse; gate of a FET/driver, not the valve supply. Boots LOW. |
 | Reward valve  | Home solenoid   | OUT   | **24**   | 18   | `devices.reward.pins.home.gpio`      | Second valve line, same driver pattern. Boots LOW. |
 | Photodiode    | Sync pulse (Teensy) | IN | **16**  | 36   | `devices.photodiode.gpio`            | Clean 3.3 V square pulse from the **Teensy** (below) — one rising edge per sync frame. No on-Pi filtering. |
+| Optogenetics  | Laser TTL       | OUT   | **17**   | 11   | `devices.opto.pins.laser.gpio`       | Active-high light window to the laser / LED driver's TTL (enable) input (`devices/opto.py`); boots LOW; `gpio_write` edges, ~0.1–1 ms (never `tx_pulse`). **The Pi is not an interlock**: a SIGKILLed engine leaves the line at its last level — use the driver's max-on-time or a one-shot on this line, and a pull-down at the driver input. `max_on_s` in the rig YAML caps every window. |
+| Optogenetics  | Masking LED     | OUT   | **27**   | 13   | `devices.opto.pins.mask.gpio`        | Optional; flashed on **every** trial with the laser's timing so the mouse cannot tell lit trials by the light. Drive through a transistor. Boots LOW. |
 | Lick sensor   | MPR121 SDA/SCL  | I²C-1 | **2 / 3**| 3/5  | `devices.lick_sensor.i2c_address` `0x5A` | Touch electrode 4 on the MPR121, not a Pi GPIO. Shares the bus (below). `debounce_ms` (default 50) is the MPR121 release debounce = lick refractory period. |
 | Wheel encoder | AS5600 SDA/SCL  | I²C-1 | **2 / 3**| 3/5  | `devices.encoder.i2c_address` `0x36` | Magnetic angle sensor on the running wheel. Same bus as the lick sensor (below). |
 | Camera        | CSI ribbon      | CSI   | —        | CSI  | `devices.camera`                     | Flat ribbon to the CSI connector, not the GPIO header. |
@@ -78,16 +80,17 @@ four nets on to the second. This works only because the addresses differ:
 
 ## Future expansion (reserved on paper)
 
-Planned headroom: **+3 general-purpose TTL inputs** and **+3 TTL outputs**. Pins are chosen
+Planned headroom: **+3 general-purpose TTL inputs** and **+1 TTL output** (GPIO17 and 27 went
+to the optogenetics laser / mask above). Pins are chosen
 below by the [selection rules](#gpio-selection-rules); they are **not** in the rig YAML
 yet (no `ttl_in` / `ttl_out` device class exists — add one modeled on `photodiode.py` for
 inputs and a latched-output helper for outputs, then register the pins).
 
 | Line       | Dir | BCM GPIO | Phys | Boot state | Why this pin |
 |------------|-----|----------|------|------------|--------------|
-| TTL out 1  | OUT | **17**   | 11   | LOW        | Boot-low; freed when reward moved to 23/24. Reward-cluster neighbour, GND at phys 14. |
+| ~~TTL out 1~~ | OUT | **17** | 11   | LOW        | **Taken: optogenetics laser TTL** (Currently wired). |
 | TTL out 2  | OUT | **18**   | 12   | LOW        | Boot-low; also freed by the reward move. |
-| TTL out 3  | OUT | **27**   | 13   | LOW        | Boot-low; completes the phys 11–13 output cluster beside GND phys 14. |
+| ~~TTL out 3~~ | OUT | **27** | 13   | LOW        | **Taken: optogenetics masking LED** (Currently wired). |
 | TTL in 1   | IN  | **19**   | 35   | LOW        | Contiguous input block at the header end; GND at phys 39. |
 | TTL in 2   | IN  | **20**   | 38   | LOW        | Same block. |
 | TTL in 3   | IN  | **21**   | 40   | LOW        | Same block; GND at phys 39 adjacent. |

@@ -44,9 +44,9 @@ into the env, so a version mismatch breaks `import picamera2`. Create with
 │   ├── cheddar.yaml                   <- rig hardware config (pins, cal, ports, roles) — YAML, one per rig
 │   └── _template.yaml                 <- new-rig template (Network tab -> Add rig); '_' files are not rigs
 ├── experiments/
-│   └── *.yaml                         <- task/paradigm configs (stimulus/reward/session/adaptive)
+│   └── *.yaml                         <- task/paradigm configs (stimulus/reward/session/adaptive/opto)
 ├── devices/                           <- one file per device type (base.py = Device, DEVICE_REGISTRY)
-│   ├── lick_sensor.py  reward.py  camera.py  photodiode.py  encoder.py  display.py
+│   ├── lick_sensor.py  reward.py  camera.py  photodiode.py  encoder.py  display.py  opto.py
 ├── engine/
 │   └── leader.py                      <- Leader Pi main process (imperative trial loop)
 ├── displayd/                          <- KMS display daemon (owns the projector)
@@ -298,6 +298,17 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
   channels scanned). The driver measures that period at init and re-picks the registers if the chip
   disagrees with the model; the init log / session log prints the effective value. Changing it needs
   Save Rig + Reinit (Setup) and a Deploy (sessions).
+- **Optogenetics** (`devices/opto.py`, task `opto:` section, 2026-11-06): laser TTL + optional masking
+  LED on leader GPIOs (17 / 27), windows anchored to trial events; the `stim_onset` window is locked to
+  the photodiode edge on lgpio's notify thread (~1 ms), so turn photodiode sync on for opto sessions.
+  The Experiment tab shows the OPTOGENETICS section only for a rig whose `devices.opto` is enabled and
+  on the leader (`shared/config.rig_opto_device`, the engine's own test); Deploy refuses anything else.
+  **Never time a pulse with `lgpio.tx_pulse`**: it is a phase-locked PWM engine (the first edge waits
+  for the next cycle-grid boundary — up to a whole cycle late) — `gpio_write` at absolute deadlines.
+  Found on the way: the engine now holds SHOW until a heartbeat flash commanded < 150 ms earlier has
+  landed and ignores edges < 45 ms after SHOW (`SYNC_MIN_LATENCY_S`); before that, 1.2 % of
+  photodiode-confirmed trials had anchored on a heartbeat sub-pulse (`display_latency_s` < 40 ms in
+  the archive marks them).
 - Leader is on a small SD card — reclaim with `conda clean -a -y` / `pip cache purge`.
 - Pis are firewall-gated off the institute WiFi. To install packages, run a proxy on the
   Controller (`python -m proxy --hostname 192.168.10.1 --port 8899`) and set

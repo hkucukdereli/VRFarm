@@ -58,4 +58,25 @@ adaptive:
   initial_state: 0.0
   step_up: 0.2
   step_down: 0.2
+
+# ── Optogenetics (needs an opto device on the rig's leader — the Experiment tab shows this
+#    section only then; devices/opto.py) ──
+opto:
+  enabled: false
+  fraction: 0.3            # fraction of trials with light; stratified per contrast within each block
+  eligible: all            # all | go | nogo — which trials may be lit
+  min_gap_trials: 1        # at least N unlit trials between lit ones (0 = none)
+  windows:                 # on a lit trial EVERY enabled window fires; onset_s is signed (s)
+    stim_onset: {enabled: true, onset_s: -0.1, duration_s: 1.5}      # < 0 = the light leads the stimulus
+    iti_start: {enabled: false, onset_s: 2.0, duration_s: 1.0}
+    trial_start: {enabled: false, onset_s: 0.0, duration_s: 1.0}     # = pre-stim start
+    response_window: {enabled: false, onset_s: 0.0, duration_s: 1.0}
+    reward: {enabled: false, onset_s: 0.0, duration_s: 0.5}          # only when a reward fires
+  pattern:
+    mode: continuous       # continuous | pulsed (one pattern for every window; the mask too)
+    pulse_hz: 20           # pulsed only, <= 100
+    pulse_width_ms: 5      # pulsed only; >= 2 and < 1000 / pulse_hz
+  mask: true               # masking LED on EVERY trial (needs devices.opto.pins.mask in the rig)
+  power_mw: 0              # metadata only — power at the fibre tip, set on the driver
+  wavelength_nm: 473       # metadata only
     

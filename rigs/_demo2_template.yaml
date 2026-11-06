@@ -58,6 +58,20 @@ devices:
     enabled: true
     i2c_address: '0x5A'
     type: lick_sensor
+  opto:
+    enabled: false
+    gpiochip: 0
+    max_on_s: 5.0
+    pins:
+      laser:
+        gpio: 17
+        label: laser TTL
+      mask:
+        gpio: 27
+        label: masking LED
+    show_latency_s: 0.09
+    source: ''
+    type: opto
   photodiode:
     enabled: true
     gpio: 16
@@ -101,6 +115,7 @@ pis:
   - camera
   - encoder
   - calibration_probe
+  - opto
   ip: 127.0.0.1
   name: mock2-leader
   role: leader

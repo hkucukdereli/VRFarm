@@ -47,6 +47,7 @@ It's **idempotent** (a file already at `format_version 2`, or that already has a
 ├─ /lick/                (only if lick_sensor was saved)
 ├─ /reward/              (only if reward was saved)
 ├─ /photodiode/          (only if photodiode was saved)
+├─ /opto/                (only if the optogenetics device was saved)
 └─ /camera/              (only if the camera was saved)
 ```
 
@@ -103,6 +104,7 @@ Per-trial arrays (length = `n_trials_planned`), plus block arrays:
 | `block_delays`, `block_start_indices` | per-block delay + first-trial index |
 | `stim_brightness`, `stim_lum` | stimulus brightness and requested light (calibration units) |
 | `stim_drive`, `contrast_measured` | drive at the stimulus centre; contrast of light delivered there (after any clipping) |
+| `opto_planned` | 1 = the Deploy scheduled optogenetic light on this trial (kept even when the opto device was not saved) |
 
 Scalar params as **group attributes**: `background_gray` (a brightness), `bg_lum` (its light), `intensity_calibration` (file whose light model was used), `light_unit`, `shape`, `global_delay`, `block_delay_skip_first`, `sync_square_every_n`.
 
@@ -114,6 +116,7 @@ Scalar params as **group attributes**: `background_gray` (a brightness), `bg_lum
 | `/lick/` | `lick_times` (vlen f8, in-trial), `iti_lick_times` (vlen f8), `iti_lick_count` (i4) |
 | `/reward/` | `reward_t` (f8), `reward_amount_ul` (f4, commanded µL), `reward_pavlovian` (i1, 1 = Pav-delay rescue) |
 | `/photodiode/` | `sync_pulses` (vlen f8 — rising-edge times) |
+| `/opto/` | `opto_on` (i1, laser windows fired = a lit trial), `opto_mask_on` (i1, masking LED fired), `opto_onset_t` (f8, first laser ON edge, NaN if none), `opto_n_windows` (i2), `opto_n_dropped` (i2, windows skipped because the pin was still on), `opto_window_t` (vlen f8 — `[on, off, …]` per laser window: actual on, planned off; a window not yet started at the trial record carries its planned on), `opto_window_anchor` (str — `anchor:source,…`; source `edge` = photodiode-locked, `pred` = lead from the latency estimate, `fallback` = no edge came, `anchor` = other anchors). `analysis/loaders.py` adds `opto`, `opto_mask`, `opto_lat_ms` (laser − true onset) to `.trials` and a long `.opto_windows` table |
 
 Unchecked (skipped) devices → their group is simply **absent** (see `skipped_devices`). Core `/trials` data is always written. The running-wheel **encoder has no group of its own** — its per-trial and continuous data live under `/trials` (above).
 

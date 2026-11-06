@@ -130,7 +130,7 @@ def handle_event(rs: RigState, event: dict) -> None:
         rs.session_end_seen = True
         # A run cut short by a dark projector must never page as a clean ✅ finish; the
         # display_abort branch already sent the reason.
-        if event.get("end_reason") == "no_stimuli":
+        if event.get("end_reason") in ("no_stimuli", "no_opto_device"):
             rs.notify(f"❌ {rs.name} — session NOT started: {event.get('error', 'no stimulus plan')} "
                       f"({rs.session_id})")
         elif event.get("end_reason") != "display_fault":

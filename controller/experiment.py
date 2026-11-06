@@ -22,6 +22,7 @@ from flask import Blueprint, Response, g, jsonify, request
 
 from shared.config import (load_task, save_task, make_session_id, register_session,
                            get_subject_history, photodiode_init_payload)
+from shared.config import validate_opto, rig_opto_device, opto_init_payload
 from shared.mjpeg_relay import relay
 from controller import settings
 from controller.registry import registry, RigState
@@ -202,6 +203,18 @@ def teardown_session(rs: RigState, reason: str) -> bool:
         for t in threads:
             t.join(timeout=16)
 
+        # Opto lines LOW whatever state the engine died in: a SIGKILLed engine (pi_api's 10 s
+        # escalation) leaves a pin at its last level. A pin a live engine still owns is reported
+        # busy, not forced.
+        opto_cfg = rig_opto_device(rig)
+        if opto_cfg and leader:
+            try:
+                requests.post(f"http://{leader['ip']}:{api_port}/api/opto_off",
+                              json={"pins": opto_cfg.get("pins") or {},
+                                    "gpiochip": opto_cfg.get("gpiochip", 0)}, timeout=5)
+            except Exception:
+                pass
+
         _save_session_logs(rs)
         rs.logger.info(f"STOP({reason}) session={rs.session_id} trials={len(rs.trials)}")
         if reason == "manual" and not rs.session_end_seen:
@@ -298,6 +311,11 @@ def load_rig():
                     }, timeout=10)
                     if not r.json().get("ok"):
                         init_errors.append(r.json().get("error", "Encoder failed — check I2C 0x36 / magnet"))
+                elif dev_name == "opto":
+                    r = requests.post(f"http://{ip}:{api_port}/api/init_opto",
+                                      json=opto_init_payload(dev_cfg), timeout=10)
+                    if not r.json().get("ok"):
+                        init_errors.append(r.json().get("error", "Opto failed — check the GPIO pins"))
             except requests.exceptions.Timeout:
                 init_errors.append(f"{dev_name}: timed out waiting for response")
             except requests.exceptions.ConnectionError:
@@ -456,6 +474,13 @@ def deploy():
         return jsonify({"error": "session is running"}), 409
     if not rs.try_busy("deploy"):
         return jsonify({"error": f"rig is busy ({rs.busy_kind})"}), 409
+    # Optogenetics: the one server-side task check. An opto-enabled task needs an enabled opto
+    # device on this rig's leader, windows within the rig's cap and a sane pattern — refused
+    # BEFORE anything is uploaded (the engine would refuse at START otherwise).
+    opto_errors, opto_warnings = validate_opto(task, rig)
+    if opto_errors:
+        rs.release_busy()
+        return jsonify({"ok": False, "error": "Opto: " + "; ".join(opto_errors), "steps": []}), 400
 
     api_port = rs.api_port
     leader = rs.leader()
@@ -565,6 +590,12 @@ def deploy():
                     raise ValueError(f"Expected list, got {type(table).__name__}")
                 rs.trial_table = table
                 steps.append(f"Trial table: {len(table)} trials")
+                if (task.get("opto") or {}).get("enabled"):
+                    from shared.stim_generator import opto_summary
+                    n_opto = sum(1 for row in table if isinstance(row, dict) and row.get("opto"))
+                    steps.append(opto_summary(task, n_opto, len(table)))
+                    for w in opto_warnings:
+                        steps.append("Opto WARNING: " + w)
             except Exception as e:
                 print(f"Trial table download failed: {e}")
                 rs.trial_table = []
@@ -747,7 +778,8 @@ def _go(rs: RigState):
             return jsonify({"ok": False, "error": f"Failed to start follower on {fpi['name']}: {e}", "steps": steps})
 
     # Leader engine. Behavioral devices the user chose NOT to save -> --no-save.
-    skip_save = [d for d in ("lick_sensor", "reward", "photodiode", "encoder") if not save.get(d, True)]
+    skip_save = [d for d in ("lick_sensor", "reward", "photodiode", "encoder", "opto")
+                 if not save.get(d, True)]
     leader_args = [
         "--rig", f"/home/vruser/rig/rigs/{rig_filename}",
         "--task", f"/home/vruser/rig/experiments/{task_filename}",

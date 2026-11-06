@@ -210,11 +210,9 @@ class RigState:
 def event_is_go(rs: RigState, event: dict) -> bool:
     """Whether a trial event is a GO trial (should lick), per the task go_rule + stim azimuth.
     Mirrors the engine (_classify_go) and the UI (_isGo): all->go, right->az>0, else az<0."""
+    from shared.stim_generator import is_go_trial     # the one rule, shared with the engine
     rule = ((rs.task_config or {}).get("stimulus") or {}).get("go_rule", "left")
-    if rule == "all":
-        return True
-    az = event.get("stim_az", 0) or 0
-    return az > 0 if rule == "right" else az < 0
+    return is_go_trial(event.get("stim_az", 0) or 0, rule)
 
 
 def session_metrics(rs: RigState, trials: list):

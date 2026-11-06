@@ -283,6 +283,75 @@
           <div><label>Step down</label><input type="number" id="p-adaptive_step_down" step="0.05" min="0" class="task-param"></div>
         </div>
 
+
+        <!-- Optogenetics: shown only when the loaded rig has a usable opto device (enabled, on the
+             leader — the engine's own test); every field greyed out unless Enabled. -->
+        <div id="opto-section" style="display:none;">
+          <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">OPTOGENETICS <span id="opto-section-hint" style="font-weight:400; text-transform:none; letter-spacing:0;"></span></h3>
+          <div style="display:grid; grid-template-columns:auto 1fr 1fr 1fr; gap:0 8px; align-items:end;">
+            <div style="display:flex; align-items:flex-end; padding-bottom:6px;">
+              <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:#aaa; cursor:pointer;" title="Fire the light in this task. Which trials are lit is drawn at Deploy (see the trial table's Opto column).">
+                <input type="checkbox" id="p-opto_enabled" class="task-param" onchange="_updateOptoGate()"> Enabled
+              </label>
+            </div>
+            <div><label>Trials lit (%)</label><input type="number" id="p-opto_fraction" min="0" max="100" step="1" class="task-param opto-field" title="Fraction of trials with light, stratified per contrast within each block (drawn at Deploy)"></div>
+            <div><label>Eligible</label><select id="p-opto_eligible" class="task-param opto-field" title="Which trials may be lit"><option value="all">all</option><option value="go">go</option><option value="nogo">no-go</option></select></div>
+            <div><label>Min gap (trials)</label><input type="number" id="p-opto_min_gap" min="0" step="1" class="task-param opto-field" title="At least this many unlit trials between lit ones (0 = none)"></div>
+          </div>
+          <div style="display:grid; grid-template-columns:auto 1fr 1fr; gap:0 8px; align-items:end;" title="On a lit trial EVERY enabled window fires; the masking LED fires them on every trial">
+            <div style="display:flex; align-items:flex-end; padding-bottom:6px;">
+              <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:#aaa; cursor:pointer;" title="Light anchored to light during the ITI (a control: light without a stimulus)">
+                <input type="checkbox" id="p-opto_w_iti_start" class="task-param opto-field" onchange="_updateOptoGate()"> ITI start
+              </label>
+            </div>
+            <div><label>Onset (s)</label><input type="text" inputmode="decimal" id="p-opto_on_iti_start" class="task-param opto-field" title="seconds from the anchor; must be >= 0 for this anchor"></div>
+            <div><label>Duration (s)</label><input type="number" id="p-opto_dur_iti_start" min="0.01" step="0.1" class="task-param opto-field" title="light-on time (capped by the rig's Max on)"></div>
+            <div style="display:flex; align-items:flex-end; padding-bottom:6px;">
+              <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:#aaa; cursor:pointer;" title="Light anchored to pre-stim start (= stimulus onset when Pre-stim is 0)">
+                <input type="checkbox" id="p-opto_w_trial_start" class="task-param opto-field" onchange="_updateOptoGate()"> Trial start
+              </label>
+            </div>
+            <div><label>Onset (s)</label><input type="text" inputmode="decimal" id="p-opto_on_trial_start" class="task-param opto-field" title="seconds from the anchor; must be >= 0 for this anchor"></div>
+            <div><label>Duration (s)</label><input type="number" id="p-opto_dur_trial_start" min="0.01" step="0.1" class="task-param opto-field" title="light-on time (capped by the rig's Max on)"></div>
+            <div style="display:flex; align-items:flex-end; padding-bottom:6px;">
+              <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:#aaa; cursor:pointer;" title="Light anchored to the stimulus onset: negative = the light LEADS the stimulus (timed from the measured display latency); 0 or positive = locked to the photodiode edge of the first stimulus frame">
+                <input type="checkbox" id="p-opto_w_stim_onset" class="task-param opto-field" onchange="_updateOptoGate()"> Stim onset
+              </label>
+            </div>
+            <div><label>Onset (s)</label><input type="text" inputmode="decimal" id="p-opto_on_stim_onset" class="task-param opto-field" title="seconds from the anchor; negative = before the stimulus"></div>
+            <div><label>Duration (s)</label><input type="number" id="p-opto_dur_stim_onset" min="0.01" step="0.1" class="task-param opto-field" title="light-on time (capped by the rig's Max on)"></div>
+            <div style="display:flex; align-items:flex-end; padding-bottom:6px;">
+              <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:#aaa; cursor:pointer;" title="Light anchored to the response-window start (Resp delay after the true onset)">
+                <input type="checkbox" id="p-opto_w_response_window" class="task-param opto-field" onchange="_updateOptoGate()"> Resp window
+              </label>
+            </div>
+            <div><label>Onset (s)</label><input type="text" inputmode="decimal" id="p-opto_on_response_window" class="task-param opto-field" title="seconds from the anchor; must be >= 0 for this anchor"></div>
+            <div><label>Duration (s)</label><input type="number" id="p-opto_dur_response_window" min="0.01" step="0.1" class="task-param opto-field" title="light-on time (capped by the rig's Max on)"></div>
+            <div style="display:flex; align-items:flex-end; padding-bottom:6px;">
+              <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:#aaa; cursor:pointer;" title="Light anchored to the trial's reward delivery (only on rewarded trials)">
+                <input type="checkbox" id="p-opto_w_reward" class="task-param opto-field" onchange="_updateOptoGate()"> Reward
+              </label>
+            </div>
+            <div><label>Onset (s)</label><input type="text" inputmode="decimal" id="p-opto_on_reward" class="task-param opto-field" title="seconds from the anchor; must be >= 0 for this anchor"></div>
+            <div><label>Duration (s)</label><input type="number" id="p-opto_dur_reward" min="0.01" step="0.1" class="task-param opto-field" title="light-on time (capped by the rig's Max on)"></div>
+          </div>
+          <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0 8px; align-items:end;">
+            <div><label>Pattern</label><select id="p-opto_mode" class="task-param opto-field" onchange="_updateOptoGate()" title="One pattern for every window (and the mask)"><option value="continuous">continuous</option><option value="pulsed">pulsed</option></select></div>
+            <div><label>Pulse (Hz)</label><input type="number" id="p-opto_hz" min="1" max="100" step="1" class="task-param opto-field" title="pulsed only, <= 100 Hz (Python-timed edges)"></div>
+            <div><label>Width (ms)</label><input type="number" id="p-opto_width" min="2" step="1" class="task-param opto-field" title="pulsed only: >= 2 ms and shorter than the period"></div>
+            <div style="display:flex; align-items:flex-end; padding-bottom:6px;">
+              <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:#aaa; cursor:pointer;">
+                <input type="checkbox" id="p-opto_mask" class="task-param opto-field"> Mask LED
+              </label>
+            </div>
+          </div>
+          <div style="display:grid; grid-template-columns:1fr 1fr 2fr; gap:0 8px;">
+            <div><label>Power (mW)</label><input type="number" id="p-opto_power" min="0" step="0.1" class="task-param opto-field" title="metadata only: power at the fibre tip, set on the driver"></div>
+            <div><label>Wavelength (nm)</label><input type="number" id="p-opto_wavelength" min="0" step="1" class="task-param opto-field" title="metadata only"></div>
+            <div></div>
+          </div>
+        </div>
+
         <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">GLOBAL TIMEOUT</h3>
         <div style="display:grid; grid-template-columns:1fr auto; gap:0 8px; align-items:end;">
           <div><label title="Abort the session (as if STOP) when the mouse produces no licks in the checked phases for this many consecutive trials. 0 = off.">Num of trials</label><input type="number" id="p-global_timeout_trials" min="0" step="1" class="task-param" title="0 disables the global timeout"></div>
@@ -423,6 +492,9 @@
           <label style="margin:0; display:inline-flex; align-items:center; gap:3px; cursor:pointer; color:#ffc107;">
             <input type="checkbox" id="cb-respwin" checked> Resp win
           </label>
+          <label style="margin:0; display:none; align-items:center; gap:3px; cursor:pointer; color:#00bcd4;" title="optogenetic light windows (laser bright, mask-only dim)">
+            <input type="checkbox" id="cb-opto" checked> Opto
+          </label>
         </div>
         <span class="info" id="raster-info"></span>
       </div>
@@ -464,7 +536,7 @@
       <div style="max-height: 200px; overflow-y: auto;">
         <table class="trial-table">
           <thead><tr>
-            <th>#</th><th>Az</th><th>Contrast</th><th>Level</th><th>Adaptive</th><th>Type</th><th>Outcome</th><th>RT (ms)</th><th title="licks within the response window">Licks</th>
+            <th>#</th><th>Az</th><th>Contrast</th><th>Level</th><th>Adaptive</th><th>Type</th><th>Outcome</th><th>RT (ms)</th><th title="licks within the response window">Licks</th><th title="optogenetic light on this trial: laser onset relative to the true stimulus onset">Opto</th>
           </tr></thead>
           <tbody id="trial-tbody"></tbody>
         </table>
@@ -512,6 +584,7 @@ let lickEvents = [], lickOffset = null;  // lickOffset is the shared Pi→browse
 let _offsetSamples = [];  // collect first N offsets, use median
 let photodiodeEvents = [];
 let rewardEvents = [];
+let optoEvents = [];     // optogenetic light windows [{t_on, t_off, pin, trial, anchor}] — drawn as bands
 let timeoutEvents = [];  // over-lick phase restarts (iti/prestim/poststim) — purple markers
 let runEvents = [];      // running-wheel {t, speed_cms, distance_cm} for the RUNNING trace panel
 let rasterLive = false, rasterAnimFrame = null;
@@ -784,6 +857,106 @@ function populateTaskFields(t) {
   document.getElementById('p-adaptive_step_up').value = adp.step_up ?? 0.2;
   document.getElementById('p-adaptive_step_down').value = adp.step_down ?? 0.2;
   onLevelChange();   // L2.5 forces Adaptive on/locked
+
+  // Optogenetics (the section is hidden when the rig has no opto device; see _updateOptoGate)
+  const opto = t.opto || {};
+  document.getElementById('p-opto_enabled').checked = !!opto.enabled;
+  document.getElementById('p-opto_fraction').value = Math.round((opto.fraction ?? 0.3) * 1000) / 10;
+  document.getElementById('p-opto_eligible').value = opto.eligible || 'all';
+  document.getElementById('p-opto_min_gap').value = opto.min_gap_trials ?? 1;
+  const wins = opto.windows || {};
+  for (const a of OPTO_ANCHORS) {
+    const w = wins[a] || {};
+    document.getElementById('p-opto_w_' + a).checked = !!w.enabled;
+    document.getElementById('p-opto_on_' + a).value = w.onset_s ?? (a === 'stim_onset' ? -0.1 : 0);
+    document.getElementById('p-opto_dur_' + a).value = w.duration_s ?? 1;
+  }
+  const pat = opto.pattern || {};
+  document.getElementById('p-opto_mode').value = pat.mode || 'continuous';
+  document.getElementById('p-opto_hz').value = pat.pulse_hz ?? 20;
+  document.getElementById('p-opto_width').value = pat.pulse_width_ms ?? 5;
+  document.getElementById('p-opto_mask').checked = opto.mask ?? true;
+  document.getElementById('p-opto_power').value = opto.power_mw ?? 0;
+  document.getElementById('p-opto_wavelength').value = opto.wavelength_nm ?? 473;
+  _updateOptoGate();
+}
+
+// ── Optogenetics ── The section exists only for a rig with a USABLE opto device: devices.opto
+// enabled (missing = on, the engine's reading) and listed on the leader Pi — exactly when the
+// engine would construct the device. Without one the section is hidden and the task's opto block
+// is saved with enabled: false, so what you see is what runs. Inside, everything is greyed out
+// until Enabled is ticked; each window row until its own box is; Hz / width unless pulsed; Mask
+// unless the rig's device has a mask pin.
+const OPTO_ANCHORS = ['iti_start', 'trial_start', 'stim_onset', 'response_window', 'reward'];
+function _rigOptoDevice() {
+  const rig = config && config.rig;
+  if (!rig) return null;
+  const dev = (rig.devices || {}).opto;
+  if (!dev || dev.enabled === false || (dev.type && dev.type !== 'opto')) return null;
+  const leader = (rig.pis || []).find(p => p.role === 'leader');
+  if (!leader || !(leader.devices || []).includes('opto')) return null;
+  return dev;
+}
+function _optoAvailable() { return !!_rigOptoDevice(); }
+function _setGate(el, on) { if (!el) return; el.disabled = !on; el.style.opacity = on ? '1' : '0.4'; }
+function _updateOptoGate() {
+  const dev = _rigOptoDevice();
+  const sec = document.getElementById('opto-section');
+  if (!sec) return;
+  sec.style.display = dev ? '' : 'none';
+  if (!dev) return;
+  const on = document.getElementById('p-opto_enabled').checked;
+  for (const el of sec.querySelectorAll('.opto-field')) _setGate(el, on);
+  for (const el of sec.querySelectorAll('label')) {
+    if (!el.querySelector('#p-opto_enabled')) el.style.opacity = on ? '1' : '0.4';
+  }
+  for (const a of OPTO_ANCHORS) {
+    const w = on && document.getElementById('p-opto_w_' + a).checked;
+    _setGate(document.getElementById('p-opto_on_' + a), w);
+    _setGate(document.getElementById('p-opto_dur_' + a), w);
+  }
+  const pulsed = on && document.getElementById('p-opto_mode').value === 'pulsed';
+  _setGate(document.getElementById('p-opto_hz'), pulsed);
+  _setGate(document.getElementById('p-opto_width'), pulsed);
+  const hasMask = !!((dev.pins || {}).mask);
+  const mk = document.getElementById('p-opto_mask');
+  _setGate(mk, on && hasMask);
+  mk.parentElement.style.opacity = (on && hasMask) ? '1' : '0.4';
+  mk.parentElement.title = hasMask ? 'Masking LED flashed on EVERY trial with the laser\'s timing'
+                                   : 'no mask pin on this rig\'s opto device (Setup tab)';
+  const laserGpio = ((dev.pins || {}).laser || {}).gpio ?? '?';
+  document.getElementById('opto-section-hint').textContent =
+      `· ${dev.source || 'laser'} on GPIO ${laserGpio}` +
+      (hasMask ? `, mask GPIO ${dev.pins.mask.gpio}` : ', no mask LED') +
+      ` · max ${dev.max_on_s ?? 5} s per window`;
+}
+// The task's opto: block from the form. Omitted (left untouched) when the task has no opto block
+// AND the rig has no opto device, so the 40-odd existing tasks are not rewritten on a plain rig.
+function _collectOpto() {
+  const prev = (config && config.task && config.task.opto) || null;
+  const avail = _optoAvailable();
+  if (!avail && !prev) return null;
+  const pw = (prev && prev.windows) || {};
+  const windows = {};
+  for (const a of OPTO_ANCHORS) {
+    windows[a] = {enabled: document.getElementById('p-opto_w_' + a).checked,
+                  onset_s: _numField('p-opto_on_' + a, (pw[a] || {}).onset_s ?? 0),
+                  duration_s: _numField('p-opto_dur_' + a, (pw[a] || {}).duration_s ?? 1)};
+  }
+  const pp = (prev && prev.pattern) || {};
+  return {
+    enabled: avail && document.getElementById('p-opto_enabled').checked,   // hidden section => off
+    fraction: Math.min(1, Math.max(0, _numField('p-opto_fraction', ((prev && prev.fraction) ?? 0.3) * 100) / 100)),
+    eligible: document.getElementById('p-opto_eligible').value || 'all',
+    min_gap_trials: Math.max(0, Math.round(_numField('p-opto_min_gap', (prev && prev.min_gap_trials) ?? 1))),
+    windows,
+    pattern: {mode: document.getElementById('p-opto_mode').value || 'continuous',
+              pulse_hz: _numField('p-opto_hz', pp.pulse_hz ?? 20),
+              pulse_width_ms: _numField('p-opto_width', pp.pulse_width_ms ?? 5)},
+    mask: document.getElementById('p-opto_mask').checked,
+    power_mw: _numField('p-opto_power', (prev && prev.power_mw) ?? 0),
+    wavelength_nm: _numField('p-opto_wavelength', (prev && prev.wavelength_nm) ?? 473),
+  };
 }
 
 function collectTaskFields() {
@@ -862,6 +1035,8 @@ function collectTaskFields() {
       step_down: _numField('p-adaptive_step_down', 0.2),
     },
   };
+  const _opto = _collectOpto();
+  if (_opto) _fields.opto = _opto;
   // Keep the JS-side task copy current so nothing goes stale between saves — specifically the
   // Amount dual-key (volume/count), whose inactive value is read back from config.task. Every
   // other field is read straight from the DOM, so this makes the whole form save losslessly.
@@ -945,7 +1120,8 @@ function renderSaveDevices() {
   if (!host) return;
   const devs = (config && config.rig && config.rig.devices) || {};
   const DATA_DEVICES = [['camera', 'Camera'], ['lick_sensor', 'Lick'],
-                        ['reward', 'Reward'], ['photodiode', 'Photodiode'], ['encoder', 'Run']];
+                        ['reward', 'Reward'], ['photodiode', 'Photodiode'], ['encoder', 'Run'],
+                        ['opto', 'Opto']];
   host.innerHTML = DATA_DEVICES
     .filter(([name]) => devs[name] && devs[name].enabled)
     .map(([name, label]) =>
@@ -978,6 +1154,10 @@ function updateDevicePanels() {
   // Running-speed panel only when the rig has an encoder
   const runPanel = document.getElementById('panel-raster-run');
   if (runPanel) runPanel.style.display = (devs['encoder'] && devs['encoder'].enabled) ? '' : 'none';
+  // Opto raster trace and the task's OPTOGENETICS section: only with a usable opto device
+  const optoLbl = document.getElementById('cb-opto')?.parentElement;
+  if (optoLbl) optoLbl.style.display = _optoAvailable() ? 'inline-flex' : 'none';
+  _updateOptoGate();
   refreshContrastMetric();
 }
 
@@ -1217,7 +1397,7 @@ async function startSession() {
   const btn = document.getElementById('btn-go');
   btn.textContent = 'Starting...';
   log('Starting session...');
-  lickEvents = []; photodiodeEvents = []; rewardEvents = []; stimEvents = []; timeoutEvents = []; runEvents = []; rtHits = []; hitRateSeries = []; slideHitSeries = []; faSeries = []; dprimeSeries = []; _goRespHist = []; _goN = _goHit = _nogoN = _nogoFA = 0; psthBins = []; psthNStim = 0; psthRaster = [];
+  lickEvents = []; photodiodeEvents = []; rewardEvents = []; optoEvents = []; stimEvents = []; timeoutEvents = []; runEvents = []; rtHits = []; hitRateSeries = []; slideHitSeries = []; faSeries = []; dprimeSeries = []; _goRespHist = []; _goN = _goHit = _nogoN = _nogoFA = 0; psthBins = []; psthNStim = 0; psthRaster = [];
   lickOffset = null;
   currentTrialNum = 0;
   sessionStartTime = null;
@@ -1357,6 +1537,22 @@ function handleEvent(evt) {
       if (rasterLive) { rewardEvents.push({t: evt.t, duration_ms: evt.pulse_ms || 0}); updateRasterInfo(); }
       predReward = null;   // real reward fired — drop its prediction
       break;
+    case 'opto':
+      // Light window on/off from the leader's opto device: ON carries the planned t_off (a band
+      // into the future), OFF pins the band's real end.
+      if (rasterLive) {
+        if (evt.on) {
+          optoEvents.push({t_on: evt.t, t_off: evt.t_off || (evt.t + 0.5), pin: evt.pin || 'laser',
+                           trial: evt.trial, anchor: evt.anchor});
+        } else {
+          for (let i = optoEvents.length - 1; i >= 0; i--) {
+            const o = optoEvents[i];
+            if (o.pin === (evt.pin || 'laser') && o.trial === evt.trial && o.anchor === evt.anchor) { o.t_off = evt.t; break; }
+          }
+        }
+        if (optoEvents.length > 2000) optoEvents.splice(0, optoEvents.length - 2000);
+      }
+      break;
     case 'stim':
       if (evt.on) {
         const dur = trialTable[evt.trial] ? trialTable[evt.trial].duration_s : 2.0;
@@ -1494,7 +1690,7 @@ function handleEvent(evt) {
       break;
     case 'session_end':
       document.getElementById('btn-go').textContent = 'GO';  // clear any leftover countdown
-      if (evt.end_reason === 'no_stimuli')
+      if (evt.end_reason === 'no_stimuli' || evt.end_reason === 'no_opto_device')
         log('Session NOT started — ' + (evt.error || 'no stimulus plan') + '. Re-Deploy, then GO.', 'critical');
       else
         log(`Session ended (${evt.n_completed}/${evt.n_planned} trials).`);
@@ -1751,7 +1947,7 @@ function toggleLive() {
 async function startLive() {
   // Clear only the RASTER + PSTH arrays (they show recent data). The cumulative performance/RT/
   // reward series are trial-driven and must SURVIVE a Live restart — reset them only per session.
-  lickEvents = []; rewardEvents = []; photodiodeEvents = []; stimEvents = []; timeoutEvents = []; runEvents = []; psthBins = []; psthNStim = 0;
+  lickEvents = []; rewardEvents = []; optoEvents = []; photodiodeEvents = []; stimEvents = []; timeoutEvents = []; runEvents = []; psthBins = []; psthNStim = 0;
   lickOffset = null;
   _offsetSamples = [];
   // Flush server-side event queue so we only see new events
@@ -1790,6 +1986,7 @@ async function stopLive() {
 function drawUnifiedRaster() {
   drawRaster('canvas-raster', {
     stimCb: 'cb-stim-events', respWinCb: 'cb-respwin', showPredicted: true,
+    bandsCb: 'cb-opto', bands: optoEvents,
     traces: [
       {cb: 'cb-lick', events: lickEvents, color: '#4caf50'},
       {cb: 'cb-reward', events: rewardEvents, color: '#2196f3'},
@@ -1891,6 +2088,17 @@ function drawRaster(canvasId, opts) {
       const x1 = Math.max(0, xForAge(now - stim.rw_on));
       const x2 = Math.min(w, xForAge(now - stim.rw_off));
       if (x2 > x1) ctx.fillRect(x1, 0, x2 - x1, plotH / 3);
+    }
+  }
+
+  // Optogenetic light — bottom 1/3 bands: laser bright cyan, mask-only dim.
+  if (opts.bands && opts.bandsCb && document.getElementById(opts.bandsCb)?.checked) {
+    for (const o of opts.bands) {
+      const x1 = Math.max(0, xForAge(now - o.t_on));
+      const x2 = Math.min(w, xForAge(now - o.t_off));
+      if (x2 <= x1) continue;
+      ctx.fillStyle = o.pin === 'laser' ? 'rgba(0,188,212,0.6)' : 'rgba(0,188,212,0.18)';
+      ctx.fillRect(x1, plotH * 2 / 3, x2 - x1, plotH / 3);
     }
   }
 
@@ -2166,6 +2374,17 @@ function setPrediction(i, stimOnset) {
 
 // ── Trial table ──
 
+// Opto column: ✓ plus the laser onset relative to the true stimulus onset; – on an unlit trial;
+// blank for an engine that does not report it.
+function _optoCell(evt) {
+  if (evt.opto === true) {
+    if (evt.opto_rel_ms == null || !isFinite(evt.opto_rel_ms)) return '✓';
+    const r = +evt.opto_rel_ms;
+    return `✓ ${r > 0 ? '+' : ''}${r.toFixed(0)} ms`;
+  }
+  return evt.opto === false ? '–' : '';
+}
+
 function addTrialRow(evt) {
   const tbody = document.getElementById('trial-tbody');
   const outCls = evt.outcome === 'hit' ? 'outcome-hit' : 'outcome-miss';
@@ -2183,7 +2402,8 @@ function addTrialRow(evt) {
     `<td style="${typeCls}">${evt.reward_type || '--'}</td>` +
     `<td class="${outCls}">${evt.outcome}</td>` +
     `<td>${rt}</td>` +
-    `<td>${evt.resp_licks ?? '--'}</td></tr>`);
+    `<td>${evt.resp_licks ?? '--'}</td>` +
+    `<td style="color:#00bcd4">${_optoCell(evt)}</td></tr>`);
   // Performance series (per trial). responded = licked in the response window (outcome 'hit').
   // go = should lick (hit/miss); nogo = should withhold (nogo + responded = FALSE ALARM).
   if (evt.outcome === 'hit' || evt.outcome === 'miss') {

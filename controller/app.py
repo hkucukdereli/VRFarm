@@ -114,6 +114,7 @@ def create_app() -> Flask:
         import devices.lick_sensor, devices.reward, devices.camera          # noqa: F401,E401
         import devices.photodiode, devices.display                         # noqa: F401,E401
         import devices.calibration_probe, devices.encoder                  # noqa: F401,E401
+        import devices.opto                                                # noqa: F401,E401
         schemas = {}
         for name, cls in DEVICE_REGISTRY.items():
             schemas[name] = {

@@ -2095,6 +2095,7 @@ function renderDeviceCard(name, dev, pisReady) {
     else if (name === 'photodiode') controlsHtml = renderPhotodiodeControls(dev);
     else if (name === 'reward') controlsHtml = renderRewardControls(dev);
     else if (name === 'calibration_probe') controlsHtml = renderProbeControls(dev);
+    else if (name === 'opto') controlsHtml = renderOptoControls(dev);
     else if (name === 'encoder') controlsHtml = renderEncoderControls(dev);
   }
 
@@ -2779,6 +2780,102 @@ function renderRewardControls(dev) {
       <button class="btn btn-red btn-sm" onclick="removeCalRow()">- Row</button>
       <button class="btn btn-orange btn-sm" onclick="applyCalibration()">Save Calibration</button>
     </div>`;
+}
+
+// ── Optogenetics card ── rig keys only: pins.laser.gpio (the driver's TTL / enable input),
+// pins.mask.gpio (optional masking LED), max_on_s (hard per-window cap), show_latency_s
+// (SHOW->photons seed that times a laser leading the stimulus) and source (free text). WHAT the
+// light does in a task (which trials, which windows, the pattern) is set in the Experiment tab,
+// whose OPTOGENETICS section appears only when this device is enabled and on the leader. The
+// tests fire ONE window through the same device code the engine runs (pi_api /api/opto_pulse).
+function renderOptoControls(dev) {
+  if (!dev.pins) dev.pins = {laser: {gpio: 17, label: 'laser TTL'}};   // a freshly added device
+  const pins = dev.pins;
+  const laser = (pins.laser || {}).gpio ?? 17;
+  const mask = (pins.mask || {}).gpio ?? '';
+  const ds = deviceState.opto || {};
+  const canTest = ds.initialized === true;
+  return `
+    <div class="device-controls">
+      <div class="device-field" title="BCM GPIO driving the laser / LED driver's TTL (enable) input — a boot-LOW pin (9-27); 17 is the reserved TTL-out pin">
+        <label>Laser GPIO</label>
+        <input type="number" value="${laser}" min="0" max="27" style="width:45px"
+               onchange="setOptoPin('laser', this.value)">
+      </div>
+      <div class="device-field" title="BCM GPIO of the masking LED, flashed on EVERY trial with the laser's timing so the mouse cannot tell lit trials by the light. Blank = no masking LED.">
+        <label>Mask GPIO</label>
+        <input type="number" value="${mask}" min="0" max="27" style="width:45px" placeholder="—"
+               onchange="setOptoPin('mask', this.value)">
+      </div>
+      <div class="device-field" title="Hard cap on any single light window (s): the device refuses longer windows at init and Deploy refuses them in the task">
+        <label>Max on (s)</label>
+        <input type="number" value="${dev.max_on_s ?? 5}" min="0.01" step="0.5" style="width:55px"
+               onchange="rig.devices.opto.max_on_s = parseFloat(this.value)">
+      </div>
+      <div class="device-field" title="SHOW->photons latency seed (s) used to time a laser that LEADS the stimulus; the engine refines it from confirmed onsets during the session (fleet median 0.09)">
+        <label>Show latency (s)</label>
+        <input type="number" value="${dev.show_latency_s ?? 0.09}" min="0" max="0.5" step="0.005" style="width:60px"
+               onchange="rig.devices.opto.show_latency_s = parseFloat(this.value)">
+      </div>
+      <div class="device-field" title="Free text for the record: laser model / wavelength / fibre">
+        <label>Source</label>
+        <input type="text" value="${(dev.source || '').replace(/"/g, '&quot;')}" style="width:130px"
+               onchange="rig.devices.opto.source = this.value">
+      </div>
+    </div>
+    <div class="device-controls" style="margin-top:4px">
+      <div class="device-field">
+        <label>Test</label>
+        <input type="number" id="opto-test-ms" value="100" min="2" step="10" style="width:55px" title="window length (ms), capped at Max on">
+        <label>ms</label>
+      </div>
+      <div class="device-field">
+        <select id="opto-test-mode" onchange="_optoTestMode()"><option value="continuous">continuous</option><option value="pulsed">pulsed</option></select>
+      </div>
+      <div class="device-field">
+        <input type="number" id="opto-test-hz" value="20" min="1" max="100" style="width:45px" disabled><label>Hz</label>
+      </div>
+      <div class="device-field">
+        <input type="number" id="opto-test-width" value="5" min="2" style="width:45px" disabled><label>ms</label>
+      </div>
+      <button class="btn btn-orange btn-sm" onclick="optoTestPulse('laser')" ${canTest ? '' : 'disabled'}
+              title="Fires the LASER line — asks for confirmation">Test laser</button>
+      <button class="btn btn-blue btn-sm" onclick="optoTestPulse('mask')" ${canTest && mask !== '' ? '' : 'disabled'}>Test mask</button>
+    </div>`;
+}
+
+function _optoTestMode() {
+  const pulsed = document.getElementById('opto-test-mode').value === 'pulsed';
+  document.getElementById('opto-test-hz').disabled = !pulsed;
+  document.getElementById('opto-test-width').disabled = !pulsed;
+}
+
+// Set an opto pin's GPIO in the rig state (Save Rig persists it). A blank mask = no masking LED.
+function setOptoPin(name, value) {
+  const dev = rig.devices.opto = rig.devices.opto || {type: 'opto', enabled: true};
+  dev.pins = dev.pins || {};
+  const v = parseInt(value);
+  if (!isFinite(v)) { if (name === 'mask') delete dev.pins.mask; renderDeviceList(); return; }
+  dev.pins[name] = Object.assign(dev.pins[name] || {label: name === 'laser' ? 'laser TTL' : 'masking LED'}, {gpio: v});
+  if (name === 'mask') renderDeviceList();   // the Test mask button follows the pin
+}
+
+async function optoTestPulse(pin) {
+  const pi = getPiForDevice('opto');
+  if (!pi) { log('Opto not assigned to a Pi'); return; }
+  const dev = rig.devices.opto || {};
+  const ms = Math.max(2, parseFloat(document.getElementById('opto-test-ms')?.value) || 100);
+  const mode = document.getElementById('opto-test-mode')?.value || 'continuous';
+  const hz = parseFloat(document.getElementById('opto-test-hz')?.value) || 20;
+  const width = parseFloat(document.getElementById('opto-test-width')?.value) || 5;
+  const gpio = ((dev.pins || {})[pin] || {}).gpio;
+  if (pin === 'laser' && !confirm(`Fire the LASER line (GPIO ${gpio}) for ${ms} ms?`)) return;
+  log(`Opto test: ${pin} GPIO ${gpio}, ${ms} ms ${mode}${mode === 'pulsed' ? ` ${hz} Hz × ${width} ms` : ''}...`);
+  const result = await proxyPi(pi.ip, '/api/opto_pulse', {
+    pin, pins: dev.pins || {}, gpiochip: dev.gpiochip ?? 0, max_on_s: dev.max_on_s ?? 5,
+    duration_ms: ms, mode, pulse_hz: hz, pulse_width_ms: width});
+  log(result.ok ? `Opto ${pin} window sent (GPIO ${result.gpio}, ${(+result.duration_ms).toFixed(0)} ms).`
+                : 'Opto test failed: ' + (result.error || ''));
 }
 
 function renderProbeControls(dev) {

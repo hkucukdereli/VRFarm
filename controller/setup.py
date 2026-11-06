@@ -24,7 +24,7 @@ import requests
 import yaml
 from flask import Blueprint, Response, g, jsonify, request
 
-from shared.config import save_rig_atomic, photodiode_init_payload
+from shared.config import save_rig_atomic, photodiode_init_payload, opto_init_payload
 from devices.lick_sensor import DEFAULT_DEBOUNCE_MS, debounce_registers, describe_debounce
 from shared.mjpeg_relay import relay
 from controller import settings, calib_paths
@@ -153,7 +153,7 @@ def api_install_pi():
     conda_activate = ("source ~/miniforge3/etc/profile.d/conda.sh && "
                       "conda activate rig && ")
     needs_camera = "camera" in devices
-    needs_gpio = any(d in devices for d in ["reward", "photodiode", "calibration_probe"])
+    needs_gpio = any(d in devices for d in ["reward", "photodiode", "calibration_probe", "opto"])
     needs_i2c = any(d in devices for d in ["lick_sensor", "encoder", "display"])
 
     try:
@@ -235,6 +235,7 @@ def api_install_pi():
             "camera": ["h5py", "pillow", "simplejpeg", "piexif", "av"],
             "photodiode": ["pyserial"],
             "display": [],
+            "opto": [],            # lgpio comes with needs_gpio (apt python3-lgpio + env symlink)
         }
         for dev in devices:
             packages.update(device_packages.get(dev, []))
@@ -518,7 +519,8 @@ def camera_feed():
 
 
 # Device init order (display first so the screen is up before the rest).
-_INIT_ORDER = ["display", "lick_sensor", "reward", "camera", "photodiode", "encoder", "calibration_probe"]
+_INIT_ORDER = ["display", "lick_sensor", "reward", "camera", "photodiode", "encoder", "calibration_probe",
+               "opto"]
 
 
 def _display_init_cfg(devices: dict) -> dict:
@@ -563,6 +565,8 @@ def _init_one_device(rs: RigState, dev_name, devices, post):
         }, "Encoder", 10)
     if dev_name == "calibration_probe":
         return post("/api/init_calibration_probe", {"gpio": cfg.get("gpio", 22)}, "Calibration probe", 10)
+    if dev_name == "opto":
+        return post("/api/init_opto", opto_init_payload(cfg), "Opto", 10)
     return False, f"no init handler for '{dev_name}'"
 
 

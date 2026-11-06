@@ -98,6 +98,31 @@ def stimulus_for(model, contrast, bg_brightness, az_deg, metric="weber"):
             "clipped": L_s > top * (1 + 1e-9), "degenerate": model.degenerate(L_b, metric)}
 
 
+def _max_duration(cfg) -> float:
+    """The largest value a duration config can produce (mirrors _sample_durations: scalar, [v],
+    or [min, max]; anything else is 0)."""
+    if isinstance(cfg, (list, tuple)):
+        vals = [float(v) for v in cfg if isinstance(v, (int, float))]
+        return max(vals) if vals and len(cfg) <= 2 else 0.0
+    return float(cfg) if isinstance(cfg, (int, float)) else 0.0
+
+
+def switch_trial_rule(task_config: dict) -> str | None:
+    """'lowest' | 'highest' when the first trial of EVERY block (the first one included) is pinned
+    to that contrast, else None. Read from stimulus.switch_trial_contrast (absent / null /
+    'random' = None). The rule is only in force while blocks exist as such — block_size > 1 or
+    a block_delay > 0 — and never with randomize_blocks, which dissolves the blocks. The
+    Experiment tab greys its drop-down out under this SAME test and saves 'random' then, so the
+    YAML never promises what the generated list will not do."""
+    sess = task_config.get("session", {}) or {}
+    stim = task_config.get("stimulus", {}) or {}
+    rule = str(stim.get("switch_trial_contrast") or "random").strip().lower()
+    if rule not in ("lowest", "highest") or sess.get("randomize_blocks", False):
+        return None
+    bsize = int(sess.get("block_size", 25))
+    return rule if (bsize > 1 or _max_duration(sess.get("block_delay", 0)) > 0) else None
+
+
 def build_block_trial_list(task_config: dict) -> list[dict]:
     """Build ordered list of (trial_idx, block_num, az_deg, contrast)."""
     rng = np.random.default_rng()
@@ -115,6 +140,10 @@ def build_block_trial_list(task_config: dict) -> list[dict]:
     contrast_probs = [float(x) for x in contrast_cfg["proportions"]]
     s = sum(contrast_probs)
     contrast_probs = [p / s for p in contrast_probs]
+
+    # First trial of every block pinned to the lowest / highest contrast (switch-trial probe).
+    rule = switch_trial_rule(task_config)
+    pinned = (min(contrast_vals) if rule == "lowest" else max(contrast_vals)) if rule else None
 
     trials = []
     trial_idx = 0
@@ -136,17 +165,12 @@ def build_block_trial_list(task_config: dict) -> list[dict]:
             block_contrasts.extend([c] * n)
         rng.shuffle(block_contrasts)
 
-        # Switch trial: first trial of each NEW block gets lowest contrast
-        switch_rule = stim.get("switch_trial_contrast")
-        if (switch_rule == "lowest" and block_num > 0
-                and len(contrast_vals) > 1
-                and not sess.get("randomize_blocks", False)):
-            lowest = min(contrast_vals)
-            try:
-                idx = block_contrasts.index(lowest)
-                block_contrasts[0], block_contrasts[idx] = block_contrasts[idx], block_contrasts[0]
-            except ValueError:
-                pass
+        # Pinned first trial: SWAP the pinned contrast into position 0 (every block, block 0
+        # included), so the block keeps exactly the counts its proportions gave it. A short last
+        # block may hold no trial of that contrast at all — then it is left as shuffled.
+        if pinned is not None and pinned in block_contrasts:
+            idx = block_contrasts.index(pinned)
+            block_contrasts[0], block_contrasts[idx] = block_contrasts[idx], block_contrasts[0]
 
         for c in block_contrasts:
             trials.append({
@@ -161,7 +185,7 @@ def build_block_trial_list(task_config: dict) -> list[dict]:
 
     # Randomize trial order if requested (random-location paradigm)
     if sess.get("randomize_blocks", False):
-        if stim.get("switch_trial_contrast"):
+        if str(stim.get("switch_trial_contrast") or "random").strip().lower() != "random":
             print("WARNING: switch_trial_contrast ignored because randomize_blocks is True")
         rng.shuffle(trials)
         for i, t in enumerate(trials):
@@ -366,6 +390,9 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
     print(f"  Trial table: {yaml_path}")
 
     print(f"Generated {n} trials across {n_blocks_total} blocks")
+    rule = switch_trial_rule(task_config)
+    if rule:
+        print(f"  First trial of every block: {rule} contrast")
     print(f"  Azimuth range: {stim_az_deg.min():.0f} to {stim_az_deg.max():.0f} deg")
     print(f"  Pixel sizes: {px_size.min()}-{px_size.max()} px")
     print(f"  Stimulus brightness: {stim_brightness.min():.3f}-{stim_brightness.max():.3f} "

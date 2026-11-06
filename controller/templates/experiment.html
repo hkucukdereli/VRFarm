@@ -241,7 +241,7 @@
         <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">TRIAL STRUCTURE</h3>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0 8px;">
           <div><label>N blocks</label><input type="number" id="p-n_blocks" min="1" class="task-param" oninput="_updateNTrials()"></div>
-          <div><label>Block size</label><input type="number" id="p-block_size" min="1" class="task-param" oninput="_updateNTrials()"></div>
+          <div><label>Block size</label><input type="number" id="p-block_size" min="1" class="task-param" oninput="_updateNTrials(); _updateSwitchTrial()"></div>
           <div><label>N trials</label><input type="number" id="p-n_trials" readonly style="background:#2a2a2a; color:#888"></div>
           <div><label>Block sequence (deg)</label><input type="text" id="p-block_sequence" class="task-param" oninput="updateContrastHint()" title="e.g. [80, -40, 40]"></div>
         </div>
@@ -253,7 +253,7 @@
         </div>
         <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:0 8px;">
           <div><label>Global delay (s)</label><input type="text" id="p-global_delay" class="task-param" title="number or [min, max]"></div>
-          <div><label>Block delay (s)</label><input type="text" id="p-block_delay" class="task-param" title="number or [min, max]"></div>
+          <div><label>Block delay (s)</label><input type="text" id="p-block_delay" class="task-param" title="number or [min, max]" oninput="_updateSwitchTrial()"></div>
           <div style="display:flex; align-items:flex-end; padding-bottom:6px;">
             <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:#aaa; cursor:pointer;">
               <input type="checkbox" id="p-block_delay_skip_first" class="task-param"> Skip 1st block delay
@@ -261,9 +261,14 @@
           </div>
           <div style="display:flex; align-items:flex-end; padding-bottom:6px;">
             <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:#aaa; cursor:pointer;">
-              <input type="checkbox" id="p-randomize_blocks" class="task-param"> Randomize blocks
+              <input type="checkbox" id="p-randomize_blocks" class="task-param" onchange="_updateSwitchTrial()"> Randomize blocks
             </label>
           </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns:1fr 3fr; gap:0 8px; align-items:end;">
+          <div><label>1st trial of block</label><select id="p-switch_trial_contrast" class="task-param" title="Contrast of the first trial of EVERY block (the first one included). Random leaves the shuffle alone; Lowest / Highest swap a trial of that contrast into the block's first slot, so the per-block counts are unchanged. Only active with Block size > 1 or Block delay > 0, and never with Randomize blocks."><option value="random">Random</option><option value="lowest">Lowest contrast</option><option value="highest">Highest contrast</option></select></div>
+          <div id="p-switch_trial_hint" style="font-size:11px; color:#888; padding-bottom:6px;"></div>
         </div>
 
         <h3 style="font-size:11px; color:#888; margin:8px 0 6px;">ADAPTIVE</h3>
@@ -628,6 +633,37 @@ function _updateNTrials() {
   document.getElementById('p-n_trials').value = nb * bs;
 }
 
+// "1st trial of block" only means something while blocks exist as such: more than one trial per
+// block, or a block delay that separates them — and never with Randomize blocks, which dissolves
+// the blocks. The generator (shared/stim_generator.py switch_trial_rule) applies the SAME test,
+// and a greyed-out drop-down is saved as 'random', so the YAML never promises what the generated
+// list will not do.
+function _switchTrialActive() {
+  if (document.getElementById('p-randomize_blocks').checked) return false;
+  const bs = parseInt(document.getElementById('p-block_size').value) || 0;
+  const bd = _parseDur('p-block_delay');
+  let maxDelay = 0;
+  if (Array.isArray(bd)) {
+    const vals = bd.map(Number).filter(isFinite);
+    if (vals.length && bd.length <= 2) maxDelay = Math.max(...vals);
+  } else {
+    maxDelay = parseFloat(bd) || 0;
+  }
+  return bs > 1 || maxDelay > 0;
+}
+function _updateSwitchTrial() {
+  const active = _switchTrialActive();
+  document.getElementById('p-switch_trial_contrast').disabled = !active;
+  document.getElementById('p-switch_trial_hint').textContent = active ? ''
+      : (document.getElementById('p-randomize_blocks').checked
+          ? 'off — Randomize blocks dissolves the blocks'
+          : 'off — needs Block size > 1 or Block delay > 0');
+}
+function _switchTrialValue() {
+  const v = document.getElementById('p-switch_trial_contrast').value;
+  return (_switchTrialActive() && (v === 'lowest' || v === 'highest')) ? v : 'random';
+}
+
 // Format/parse duration fields (scalar or [min, max])
 function _fmtDur(v) {
   if (v == null) return '0';
@@ -698,6 +734,9 @@ function populateTaskFields(t) {
   document.getElementById('p-contrast_proportions').value = JSON.stringify(c.proportions || [1]);
   document.getElementById('p-photodiode_sync_enabled').checked = !!stim.photodiode_sync_enabled;
   document.getElementById('p-photodiode_sync_every_n').value = stim.photodiode_sync_every_n ?? 5;
+  const stc = String(stim.switch_trial_contrast || 'random').trim().toLowerCase();
+  document.getElementById('p-switch_trial_contrast').value =
+      (stc === 'lowest' || stc === 'highest') ? stc : 'random';
   refreshContrastMetric();
 
   // Reward
@@ -737,6 +776,7 @@ function populateTaskFields(t) {
   document.getElementById('p-gt_poststim').checked = gtphases.includes('poststim');
   document.getElementById('p-gt_iti').checked = gtphases.includes('iti');
   _updateNTrials();
+  _updateSwitchTrial();
 
   // Adaptive
   document.getElementById('p-adaptive_enabled').checked = !!adp.enabled;
@@ -770,6 +810,7 @@ function collectTaskFields() {
       altitude_deg: _numField('p-altitude_deg', 10),
       go_rule: document.getElementById('p-go_rule').value,
       contrast: { values: contrastValues, proportions: contrastProportions },
+      switch_trial_contrast: _switchTrialValue(),   // random | lowest | highest (1st trial of every block)
       photodiode_sync_enabled: document.getElementById('p-photodiode_sync_enabled').checked,
       photodiode_sync_every_n: parseInt(document.getElementById('p-photodiode_sync_every_n').value) || 5,
     },

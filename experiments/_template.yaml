@@ -10,7 +10,9 @@ stimulus:
   contrast:
     values: [1.0]            # contrast level(s)
     proportions: [1]         # relative proportion per value (auto-normalized)
-  # switch_trial_contrast: lowest   # optional, for blocked designs
+  switch_trial_contrast: random    # random | lowest | highest: contrast of the 1st trial of EVERY block
+                                   # (swapped in, per-block counts unchanged; needs block_size > 1 or
+                                   # block_delay > 0; off with randomize_blocks)
   photodiode_sync_enabled: false   # photodiode stim-onset sync (needs photodiode in rig)
   photodiode_sync_every_n: 5       # red patch ON every Nth display frame
 

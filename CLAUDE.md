@@ -101,11 +101,18 @@ only checks rig YAMLs, so nothing else may sit in `.101`–`.250`.
 in-kernel `ixgbe` — Intel's vendor driver pack is NOT needed; its out-of-tree ixgbe
 5.16.5 only shims kernels up to 5.11, this one is 7.0), DAC to switch port 11. Any passive/active DAC is accepted; third-party *optics* would need
 `ixgbe allow_unsupported_sfp=1`. Config: `/etc/netplan/99-vrfarm-rig.yaml`, netplan id `rig0`
-**matched by MAC** (`c4:62:37:0c:16:68`), static `192.168.10.1/24`, **no gateway** (WiFi stays the
-default route). **Never key that stanza by interface name:** `enpXsY` follows the card's PCI slot,
+**matched by MAC** (`c4:62:37:0c:16:68`), static `192.168.10.1/24`, **no gateway** (it must never
+become the default route). **Never key that stanza by interface name:** `enpXsY` follows the card's PCI slot,
 so it changed on its own (`enp6s0` → `enp4s0` after a reboot on 2026-09-15), the stanza then matched
-nothing, and every rig was unreachable while the card and its 10G link were healthy. The onboard `enp0s31f6` is
-unused: its link flapped at 100 Mbps after the card install and its cable is out. Why 10G: the
+nothing, and every rig was unreachable while the card and its 10G link were healthy.
+
+**Internet.** Since 2026-10-27 the onboard 1G port `enp0s31f6` (Intel e1000e, MAC `30:9c:23:53:11:57`)
+is cabled to the institute wired LAN and is the controller's internet path: `/etc/netplan/
+00-installer-config.yaml` (MAC match + `set-name` + `dhcp4: true`) gets a DHCP lease in
+`10.24.210.0/24` (gateway `.254`, institute DNS `10.17.21.1/.2`, domain `ista.ac.at`), and its
+default route (metric 101) beats WiFi's (600), so WiFi is only the fallback. Right after activation
+NM parks the wired default route at metric 20101 until its connectivity check passes (a few seconds);
+that is normal. Before that date the port was uncabled and WiFi carried the default route. Why 10G: the
 Data tab syncs up to `parallel_rigs` leaders at once; on a 1G controller port that saturates the
 one link every running rig's UDP also needs (`_rig_guard` only protects the rig being synced).
 
@@ -284,6 +291,13 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
 - **One serial reader.** The Teensy's `/dev/ttyACM0` gives its bytes to exactly one process;
   a second reader silently steals them. Release pi_api's devices before bench tools.
 - The Teensy sync output is **pin 16** (scope-verified), analog in is **A1**.
+- **Lick double counts (morbier, 2026-10-27):** 16 % of inter-lick intervals were < 20 ms, quantized at
+  the ~6 ms poll period — threshold chatter at the edge of a lick, not the mouse (cheddar: 1 %).
+  `devices.lick_sensor.debounce_ms` (default 50; Setup → Lick card) is the MPR121 **release** debounce,
+  i.e. a lick refractory period, in units of the chip's filter period (ESI × SFI; ~9 ms with all 12
+  channels scanned). The driver measures that period at init and re-picks the registers if the chip
+  disagrees with the model; the init log / session log prints the effective value. Changing it needs
+  Save Rig + Reinit (Setup) and a Deploy (sessions).
 - Leader is on a small SD card — reclaim with `conda clean -a -y` / `pip cache purge`.
 - Pis are firewall-gated off the institute WiFi. To install packages, run a proxy on the
   Controller (`python -m proxy --hostname 192.168.10.1 --port 8899`) and set
@@ -296,9 +310,9 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
 - **NetworkManager auto-creates a DHCP `Wired connection N`** for any ethernet port it has no
   profile for, bound to that port with autoconnect on. Delete it (`sudo nmcli connection delete
   "Wired connection N"`) *before* the new rig NIC gets a link, or it starts DHCP there; NM then
-  remembers the MAC and doesn't recreate it. The installer's `00-installer-config.yaml` still names
-  `enp0s31f6` (MAC match + `set-name`, no address) — leave it: that profile is what stops NM
-  auto-DHCPing the unused onboard port.
+  remembers the MAC and doesn't recreate it. The installer's `00-installer-config.yaml` names
+  `enp0s31f6` (MAC match + `set-name`, `dhcp4: true` since 2026-10-27) — keep it: that profile is
+  what owns the onboard port, so NM never invents a `Wired connection N` for it.
 - **Don't recable the switch during a session.** When the DAC first went in, the Follower's link
   dropped and the switch stopped delivering to the Leader's port for several minutes with its link
   up — no trace on either host, and not reproduced by a later DAC replug (~2 s recovery) or a switch

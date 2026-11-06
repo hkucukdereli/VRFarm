@@ -274,7 +274,7 @@ A task YAML has four sections. Values below are the current defaults from
 | `altitude_deg` | Stimulus elevation. |
 | `go_rule` | `all` \| `left` \| `right` — which azimuths count as **go**: `left` = az<0, `right` = az>0, `all` = every trial (`engine/leader.py:_classify_go`). |
 | `contrast` | `{values: [...], proportions: [...]}` — contrast level(s) and their relative proportions (auto-normalized). Contrast is authored in a **selectable metric** (Weber default / Michelson / Normalized), configured on the display device in the rig. |
-| `switch_trial_contrast` | Optional (e.g. `lowest`): the first trial of each new block uses this contrast. Ignored when `randomize_blocks` is on. |
+| `switch_trial_contrast` | `random` (default) \| `lowest` \| `highest`: the first trial of **every** block (the first one included) is pinned to that contrast — a trial of that contrast is swapped into the block's first slot, so the per-block counts stay as the proportions gave them. Only in force with `block_size` > 1 or a `block_delay` > 0, and ignored when `randomize_blocks` is on (the Experiment tab greys the drop-down out under the same conditions). |
 | `photodiode_sync_enabled` | Toggle photodiode stim-onset sync (needs a photodiode in the rig). |
 | `photodiode_sync_every_n` | Red sync patch ON every Nth display frame. |
 
@@ -316,7 +316,7 @@ minus the window start.
 | `global_delay` | One-time delay at session start (scalar or `[min,max]`). |
 | `block_delay` | Delay before each block (scalar or `[min,max]`). |
 | `block_delay_skip_first` | Skip the block delay on the first block. |
-| `randomize_blocks` | Optional: shuffle all trials (disables `switch_trial_contrast`). |
+| `randomize_blocks` | Optional: shuffle all trials into one block (disables `switch_trial_contrast`). |
 | `global_timeout_trials` | Abort the session after N consecutive **dry** trials (no licks in the checked phases); 0 = off. |
 | `global_timeout_phases` | Phases checked for licks by the global timeout: any of `prestim`, `stim`, `poststim`, `iti`. |
 
@@ -359,7 +359,7 @@ All timestamps are Unix time (`time.time()`) in seconds, NTP-synced.
 |---|---|---|
 | Stimulus onset | Follower ack UDP timestamp | ~1ms |
 | True onset | Photodiode-corrected (`true_onset_t`) | ~0.1ms |
-| Lick onset | MPR121 polling on Leader (200Hz) | ~5ms |
+| Lick onset | MPR121 touch status (filter period ~9 ms) polled on Leader at 200 Hz; `devices.lick_sensor.debounce_ms` (rig YAML, default 50) is the release debounce = lick refractory period | ~10ms |
 | Reward delivery | `time.time()` on Leader after GPIO | <1ms |
 | Camera frames | picamera2 callback (`wall_clock_s`) | ~1ms |
 | Sync pulses | lgpio alert tick (CLOCK_MONOTONIC ns), NTP-referenced | ~0.1ms |

@@ -32,7 +32,7 @@ stream telemetry**, does not touch the HDF5, and writes only two plain files.
 | Total + per-core CPU | `/proc/stat` | 85% / 95% |
 | Memory used % | `/proc/meminfo` | 85% / 95% |
 | Disk write rate | `/proc/diskstats` | off by default |
-| Camera encode fps (while recording) | `pi_api /api/status` | 45 / 30 fps |
+| Camera encode fps (while recording; the first two samples of a recording are skipped — the counter starts before the first frame) | `pi_api /api/status` | 45 / 30 fps |
 | `pi_api` responsive | HTTP probe | critical once down past the [grace period](#pi_api-grace-period); at once during a session |
 
 Every threshold, direction, and **message** is editable in `~/rig/shepherd/config.yaml` on the leader
@@ -146,6 +146,10 @@ the `rig` conda env with nothing extra to install.
 - `vcgencmd` and the thermal zones are Pi-only; off a Pi those metrics are simply
   absent (shepherd degrades gracefully, never errors).
 - Live encode fps needs `pi_api /api/status` to expose `camera_frames` (added
-  alongside this monitor). Older API builds just omit that one alert.
+  alongside this monitor). Older API builds just omit that one alert. The rate is only
+  computed from a delta that starts inside a recording with frames already flowing: pi_api
+  reports `camera_recording` from the moment the encoder is armed, ~0.5 s before the first
+  frame, and a delta starting at 0 used to fire a false CRITICAL at the GO second. Between
+  recordings the metric's level is dropped silently (no "recovered" at the next session).
 - The disk write-rate meter sums whole-disk devices matching `disk_devices`; it's a
   coarse "is something hammering the disk" signal, off by default.

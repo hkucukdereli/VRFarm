@@ -251,16 +251,22 @@ class Monitor:
             info = {"ok": True, "latency_ms": round(latency_ms, 1),
                     "process_running": bool(body.get("process_running")),
                     "camera_recording": bool(body.get("camera_recording"))}
-            # live encode fps from the camera frame counter, if the API exposes it
+            # live encode fps from the camera frame counter, if the API exposes it. Only a delta that
+            # starts INSIDE a recording with frames already flowing is a frame rate: pi_api reports
+            # camera_recording from the moment the encoder is armed, ~0.5 s before the first frame,
+            # so a delta starting at frames == 0 under-read by up to half and fired a false CRITICAL
+            # "dropping frames" at the GO second of most sessions (cheddar, 2026-11). The first two
+            # samples of a recording therefore carry no fps; a stall later on (counter frozen) still
+            # reads 0 fps. A counter that went backwards is a new recording: start over.
             frames = body.get("camera_frames")
             now = time.monotonic()
-            if isinstance(frames, int):
-                if self._prev_frames:
-                    df = frames - self._prev_frames[0]
-                    dt = now - self._prev_frames[1]
-                    if dt > 0 and df >= 0:
-                        info["camera_fps"] = round(df / dt, 2)
+            if info["camera_recording"] and isinstance(frames, int):
+                prev = self._prev_frames
                 self._prev_frames = (frames, now)
+                if prev is not None and prev[0] > 0 and frames >= prev[0] and now > prev[1]:
+                    info["camera_fps"] = round((frames - prev[0]) / (now - prev[1]), 2)
+            else:
+                self._prev_frames = None      # not recording: the next recording starts a fresh delta
             return info
         except Exception as e:
             return {"ok": False, "error": str(e)[:80]}
@@ -358,6 +364,12 @@ class ThresholdEngine:
         key = "critical_msg" if level == "critical" else "warn_msg"
         template = spec.get(key, f"{metric_key} {level}: {{value}}")
         return self._alert(metric_key, level, value, spec, template, ctx)
+
+    def reset(self, metric_key):
+        """Forget a metric's level WITHOUT a recovery alert — for a metric that stopped being
+        measurable (camera_fps between recordings): its next reading is judged fresh, and no
+        "recovered" is announced hours later at the start of the next session."""
+        self._state.pop(metric_key, None)
 
     @staticmethod
     def _alert(metric_key, level, value, spec, template, ctx):
@@ -484,12 +496,15 @@ def evaluate_all(engine: ThresholdEngine, sink: AlertSink, m: dict, mount: str =
         a = engine.evaluate("disk_free_gb", m["disk_free_gb"], ctx=ctx)
         if a:
             sink.send(a)
-    # camera encode fps: only meaningful while recording; 'low' direction
+    # camera encode fps: only meaningful while recording; 'low' direction. Between recordings the
+    # level is dropped silently (no rate to judge, nothing to "recover" from).
     api = m.get("api", {})
     if api.get("camera_recording") and api.get("camera_fps") is not None:
         a = engine.evaluate("camera_fps", api["camera_fps"], ctx=ctx)
         if a:
             sink.send(a)
+    elif not api.get("camera_recording"):
+        engine.reset("camera_fps")
     # ---- special cases (level set directly, not by numeric threshold) ----
     # thermal / voltage throttling reported by the SoC itself
     thr = m.get("throttled")

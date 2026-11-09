@@ -89,7 +89,9 @@ session ends). If two rigs ever hold the same session id, the sync refuses that 
 
 **Sync Now** — pick folders from the list (everything not green is pre-selected). For each folder
 the controller takes a fresh inventory of it on the Pi, consolidates any session not yet folded
-into one `.h5` (on the Pi, idempotent), and copies **whichever trees hold the folder** with
+into one `.h5` and remuxes any raw `video.h264` into `video.mp4` (both on the Pi, idempotent; a
+complete leftover `video.mp4.part` is adopted, otherwise ffmpeg takes ~10-30 s per long session —
+the card shows *N video to remux*), and copies **whichever trees hold the folder** with
 `rsync -rlt` over SSH (partial files are kept in `.rsync-partial` so a cancelled copy resumes).
 It then re-inventories and runs the dry run again. Only if the folder's trees are unchanged, every
 copy is clean and no recorded video is missing does it mark the folder green and record it in
@@ -146,7 +148,10 @@ grey, syncs fail after copying the data, consolidation waits, and nothing is pur
 the boot NVMe (`/home/vruser/video`) and needs no `video_mount`.
 
 The leader side is `shared/leader_data.py` protocol 2, which ships with **Deploy**. Until a rig is
-deployed, its card says **Deploy needed** and sync and purge are refused.
+deployed, its card says **Deploy needed** and sync and purge are refused. A leader deployed before
+2026-11 reports no `n_raw_video`, so the controller never asks it to remux; if such a leader still
+holds a stranded `video.mp4.part`, the sync of that folder is refused with "Deploy this rig first"
+rather than copying the raw + `.part` pair again.
 
 ## What runs where
 

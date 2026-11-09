@@ -201,14 +201,15 @@ live plots are saved as PNGs into the session folder and the phase becomes **End
 
 The data stays on the Leader until the **Data** tab syncs it (Sync Now, or Sync & Poweroff at
 the end of the day — [MULTI_RIG.md](MULTI_RIG.md)); consolidation into one self-contained
-`<session_id>.h5` happens on the Leader before the copy. **New session** clears the run and
+`<session_id>.h5` happens when the session ends, and the raw video is remuxed into `video.mp4`
+on the Leader before the copy. **New session** clears the run and
 returns the rig to Connected. The subject index is written when the session ends. Synced files
 land at:
 
 ```
 <data root>/<subject>/<subject>_<date>/<session_id>/
 ├── <session_id>.h5     # trials, stimulus plan, per-device data, camera timestamps, metadata
-└── video.h264          # only if Camera was checked at GO
+└── video.mp4           # only if Camera was checked at GO
 ```
 
 The destination defaults to `$VRFARM_DATA_DIR` (else `~/VRFarm/data`); the field next to

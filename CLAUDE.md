@@ -209,7 +209,7 @@ video dir) has nothing left to copy in a strict rsync dry run, **red** when some
 when the check can't be trusted (a failed dry run, an unmounted `data.video_mount`, a leader that
 needs a Deploy). No nonzero rsync exit counts as clean. A folder with no video folder is normal —
 the camera was unchecked (GO sends `camera_requested`/`camera_saved` in START; the engine records
-them). **Sync Now** copies chosen folders (consolidate on the Pi first, copy only the trees that
+them). **Sync Now** copies chosen folders (consolidate + remux raw video on the Pi first, copy only the trees that
 hold the folder, verify against a fresh inventory plus a second dry run, ledger at
 `<data root>/.vrfarm_sync_ledger.json`); **Sync & Poweroff** copies everything not green, then
 `sudo poweroff`s every Pi of each rig whose folders all verified; **Purge Data** deletes green +
@@ -309,6 +309,15 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
   landed and ignores edges < 45 ms after SHOW (`SYNC_MIN_LATENCY_S`); before that, 1.2 % of
   photodiode-confirmed trials had anchored on a heartbeat sub-pulse (`display_latency_s` < 40 ms in
   the archive marks them). Full doc, bench recipe and status: `docs/OPTOGENETICS.md`.
+- **Video remux happens at the Data-tab sync, never at the engine's exit** (2026-11-09). The controller's
+  teardown has pi_api SIGKILL the engine 10 s after SIGTERM, so the exit-time ffmpeg remux was cut short
+  on every recording over ~75 min (≥ ~6 GB at 10 Mbit/s): `video.h264` stayed next to a complete but
+  never renamed `video.mp4.part`, and both were rsynced (11 cheddar sessions 2026-09-18..11-07, 77 GB of
+  duplicates). Now `shared/leader_data.py consolidate` (run by Sync before the copy) remuxes, adopts a
+  complete leftover `.part` and prunes leftovers; the inventory reports `n_raw_video`; rsync excludes
+  `*.part`. `tools/repair_stranded_video.py` (dry run; `--apply`) does the same over the controller's
+  copies. shepherd's `camera_fps` skips the first two samples of a recording: pi_api reports
+  `camera_recording` ~0.5 s before the first frame, which faked a CRITICAL at the GO second.
 - Leader is on a small SD card — reclaim with `conda clean -a -y` / `pip cache purge`.
 - Pis are firewall-gated off the institute WiFi. To install packages, run a proxy on the
   Controller (`python -m proxy --hostname 192.168.10.1 --port 8899`) and set

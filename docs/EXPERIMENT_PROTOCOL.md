@@ -239,15 +239,16 @@ for N consecutive trials — see below).
 The session stays on the Leader. In the **Data** tab, load the rig (or its group), then
 **Sync Now** and pick the mouse/date folders (unsynced ones are red and pre-selected) — or, at
 the end of the day, **Sync & Poweroff**, which copies everything unsynced and then powers off
-every Pi of the selected rigs. Consolidation into one self-contained `<session>.h5` happens on
-the Leader before the copy; the copy is verified with a second rsync pass.
+every Pi of the selected rigs. Consolidation into one self-contained `<session>.h5` and the remux of
+the raw video into `video.mp4` happen on the Leader before the copy; the copy is verified with a
+second rsync pass.
 
 **Destination:** the Data root (`data_root` in `controller/configs/controller.yaml`; else `$VRFARM_DATA_DIR`, else
 `~/VRFarm/data`), the same tree for every rig:
 ```
 <data root>/<subject>/<subject>_<date>/<session_id>/
   <session_id>.h5      <- consolidated: trials, stim plan, per-device data, camera ts, metadata
-  video.mp4            <- behavior video (only if camera was saved; remuxed from the .h264)
+  video.mp4            <- behavior video (only if camera was saved; remuxed from the raw .h264 at sync)
 ```
 
 The subject index `<data root>/subjects/<subject_id>.json` is written when the session ends
@@ -365,14 +366,15 @@ controller drives the pins LOW again at teardown; **the Pi is not an interlock**
 ## Data Output
 
 A transferred session is **one self-contained HDF5 file** (`format_version: 2`) plus the
-raw video — built on the Leader at Transfer by merging the run-time sidecars
-(`metadata.yaml`, `stimuli.npz`, `trials.yaml`, `frame_timestamps.npy`) into
-`<session>.h5` and deleting them (`shared/consolidate.py`, `pi_api /api/consolidate`).
+video. The run-time sidecars (`metadata.yaml`, `stimuli.npz`, `trials.yaml`,
+`frame_timestamps.npy`) are merged into `<session>.h5` and deleted when the session ends
+(`shared/consolidate.py`); the raw `video.h264` is remuxed into `video.mp4` on the Leader when
+the Data tab syncs the folder (`shared/leader_data.py consolidate`, never at the engine's exit).
 
 ```
 <dest>/<subject>/<subject>_<date>/<session_id>/
 ├── <session_id>.h5     # trials, stimulus plan, per-device data, camera timestamps, metadata
-└── video.h264          # raw H.264 (only if the camera was saved)
+└── video.mp4           # the recording (only if the camera was saved; stream-copied from the raw .h264)
 ```
 
 The file groups per-trial data under `/trials`, the plan under `/stimulus`, and each saved

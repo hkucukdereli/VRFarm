@@ -1,11 +1,11 @@
 # VRFarm session data format
 
-**`format_version: 2`** — a transferred session is **one self-contained HDF5 file** plus the raw video.
+**`format_version: 2`** — a transferred session is **one self-contained HDF5 file** plus the video (`video.mp4`, a container-only remux of the Leader's raw H.264 stream).
 
 ```
 <dest>/<subject>/<subject>_<date>/<session_id>/
 ├── <session_id>.h5     # everything: trials, running wheel, stimulus plan, per-device data, camera timestamps, metadata
-└── video.h264          # raw H.264 elementary stream (only if the camera was saved)
+└── video.mp4           # the recording, stream-copied from the raw video.h264 (only if the camera was saved)
 ```
 
 `session_id = <subject>_<YYYYMMDD>_<NNN>` (e.g. `mouse1_20260803_001`). `<dest>` is the Browse override, else `$VRFARM_DATA_DIR`, else `~/VRFarm/data`.
@@ -23,7 +23,7 @@ During a run the Leader writes a **flat** `.h5` (one dataset per field at the ro
 | `trials.yaml` | stim generator (human-readable copy of the NPZ) |
 | `frame_timestamps.npy` | camera (on the SSD, next to `video.h264`) |
 
-**Consolidation runs at session end, not at Transfer.** The moment the session stops or finishes, the Leader engine's `shutdown()` calls `_consolidate_at_exit()` — after every device is closed and its sidecar flushed (the camera's `frame_timestamps.npy` included) — which runs [`shared/consolidate.py`](../shared/consolidate.py) on the just-closed `.h5`. So the archive is already self-contained before anything is transferred. **Transfer re-POSTs `/api/consolidate/<session_id>` as a no-op safety net**, so a session whose exit consolidation didn't run (crash, hard stop) still gets consolidated when pulled.
+**The `.h5` fold runs at session end; the video remux runs at sync.** The moment the session stops or finishes, the Leader engine's `shutdown()` calls `_consolidate_at_exit()` — after every device is closed and its sidecar flushed (the camera's `frame_timestamps.npy` included) — which runs [`shared/consolidate.py`](../shared/consolidate.py) on the just-closed `.h5`. So the archive is already self-contained before anything is transferred. **The Data tab's Sync then runs `shared/leader_data.py consolidate` on the Pi before copying**: it folds any session the exit step missed (crash, hard stop) and turns the raw `video.h264` into `video.mp4` (an ffmpeg stream copy, no re-encode; a complete leftover `video.mp4.part` is adopted instead of re-run, a truncated one replaced). The remux deliberately does **not** happen at the engine's exit: the controller's teardown has pi_api SIGKILL the engine 10 s after SIGTERM, which cut every remux longer than that short (cheddar, every recording over ~75 min, 2026-09..11).
 
 `consolidate.py`:
 
@@ -33,7 +33,7 @@ During a run the Leader writes a **flat** `.h5` (one dataset per field at the ro
 4. Folds `frame_timestamps.npy` into **`/camera/frame_timestamps`**.
 5. Deletes all four sidecars (`trials.yaml` is redundant with the NPZ).
 
-It's **idempotent** (a file already at `format_version 2`, or that already has a `/trials` group, is left alone) and **atomic** (writes a temp file, then swaps). Only `<session>.h5` + `video.h264` are then pulled to the controller.
+It's **idempotent** (a file already at `format_version 2`, or that already has a `/trials` group, is left alone) and **atomic** (writes a temp file, then swaps). Only `<session>.h5` + `video.mp4` are then pulled to the controller (rsync skips `*.part` temp files).
 
 ---
 
@@ -126,7 +126,7 @@ Unchecked (skipped) devices → their group is simply **absent** (see `skipped_d
 `N×3` float64, with a `columns` attribute:
 | column | meaning |
 |---|---|
-| `frame_idx` | index into the `video.h264` frames |
+| `frame_idx` | index into the video's frames (`video.mp4`; `video.h264` on the Leader before its first sync) |
 | `wall_clock_s` | host wall clock at frame callback (`time.time()`, NTP-synced — **same timebase as all `/trials` events**) |
 | `sensor_ts_ns` | hardware `SensorTimestamp` (start of readout) on `CLOCK_BOOTTIME`, ns |
 

@@ -154,6 +154,7 @@ function statusMark(st) { return st === 'green' || st === 'red' ? '●' : st ===
 function folderNotes(f) {
   const n = [];
   if (f.n_unconsolidated) n.push(`<span class="y">${f.n_unconsolidated} unconsolidated</span>`);
+  if (f.n_raw_video) n.push(`<span class="y">${f.n_raw_video} video to remux</span>`);
   if (f.status === 'missing') n.push('<span class="r">video missing</span>');
   else if (f.video_only) n.push('video only');
   else if (f.sessions.length && f.sessions.every(s => s.has_video === false)) n.push('no video');
@@ -185,7 +186,7 @@ function renderCards() {
       <div class="kv">last sync <b>${fmtT(c.last_sync_t)}</b> · <span class="g">${nGreen} synced</span> · <span class="r">${nRed} unsynced</span></div>
       <div class="folders">${(c.folders || []).map(f =>
         `<div><span class="${statusClass(f.status)}">${f.status === 'green' ? '●' : f.status === 'red' ? '●' : '○'} ${f.key.split('/')[1]}</span>
-              <span class="x">${f.sessions.length} sess${f.n_unconsolidated ? ` · <span class="y">${f.n_unconsolidated} unconsolidated</span>` : ''}${f.video_only ? ' · video only' : ''} · ${MB(f.bytes)}</span></div>`).join('') ||
+              <span class="x">${f.sessions.length} sess${f.n_unconsolidated ? ` · <span class="y">${f.n_unconsolidated} unconsolidated</span>` : ''}${f.n_raw_video ? ` · <span class="y">${f.n_raw_video} video to remux</span>` : ''}${f.video_only ? ' · video only' : ''} · ${MB(f.bytes)}</span></div>`).join('') ||
         '<span class="muted">no date folders</span>'}</div>
     </div>`;
   }).join('');

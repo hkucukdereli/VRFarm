@@ -27,6 +27,13 @@ Protocol 2 — sessions without video, and a purge that only deletes what was ve
   `--verified TREE:FOLDER` (it re-verified the copy moments before). A folder present in a tree
   that was not verified, or a verified tree whose folder has vanished, is refused whole. A caller
   that sends no --verified at all (an older controller) is refused outright.
+- Video remux (optional additions to protocol 2, 2026-11): the engine no longer remuxes at its exit,
+  so a fresh session holds a raw `video.h264`. The inventory reports per session `video_raw` (a
+  `video.h264` or `video.mp4.part` is present) and per folder `n_raw_video`; `consolidate` turns
+  those into `video.mp4` (shared/consolidate.py: stream copy, or adoption of a complete leftover
+  `.part`) and summarizes `video_adopted` / `video_remuxed` / `video_errors`. A leader without these
+  fields (older deploy) simply reports nothing, and the controller takes no video action for it.
+  `n_unconsolidated` is untouched by any of this: a raw video never blocks a purge.
 """
 from __future__ import annotations
 import argparse
@@ -43,6 +50,7 @@ PROTO = 2
 FOLDER_RE = re.compile(r"^([A-Za-z0-9-]+)/\1_(\d{8})$")
 ENGINE_MARK = "engine/leader.py"
 VIDEO_NAMES = ("video.mp4", "video.h264")
+RAW_VIDEO_NAMES = ("video.h264", "video.mp4.part")   # not yet remuxed — `consolidate` turns these into video.mp4
 TREES = ("data", "video")
 
 
@@ -241,7 +249,8 @@ def cmd_inventory(a):
             vsd = vd / sid if (vd is not None and (vd / sid).is_dir()) else None
             entry = {"id": sid, "in_data": sd is not None, "has_h5": False, "format_version": None,
                      "sidecars": [], "bytes": 0, "mtime": None,
-                     "camera_saved": None, "camera_requested": None, "has_video": None}
+                     "camera_saved": None, "camera_requested": None, "has_video": None,
+                     "video_raw": None}
             if sd is not None:
                 h5s = sorted(sd.glob("*.h5"))
                 entry["has_h5"] = bool(h5s)
@@ -261,11 +270,14 @@ def cmd_inventory(a):
                     entry["video_files"] = vfiles
                     entry["bytes_video"] = _du(vsd)
                     entry["has_video"] = any(n in VIDEO_NAMES for n in vfiles)
+                    entry["video_raw"] = any(n in RAW_VIDEO_NAMES for n in vfiles)
                 elif vroot_ok:
                     entry["has_video"] = False          # tree trusted, no folder: no video
+                    entry["video_raw"] = False
                 # tree unavailable: has_video stays None (unknown)
             elif sd is not None:
                 entry["has_video"] = any((sd / n).is_file() for n in VIDEO_NAMES)
+                entry["video_raw"] = any((sd / n).is_file() for n in RAW_VIDEO_NAMES)
             sessions.append(entry)
         missing = [s["id"] for s in sessions if s["camera_saved"] is True and s["has_video"] is False]
         mt = (dd.stat().st_mtime if dd is not None else vd.stat().st_mtime)
@@ -275,6 +287,7 @@ def cmd_inventory(a):
              "bytes_video": _du(vd) if vd is not None else 0,
              "mtime": mt,
              "n_unconsolidated": sum(1 for s in sessions if s["has_h5"] and s["format_version"] != 2),
+             "n_raw_video": sum(1 for s in sessions if s.get("video_raw")),
              "missing_video": missing}
         if in_video and not in_data:
             f["video_only"] = True
@@ -292,10 +305,12 @@ def cmd_inventory(a):
 
 
 def cmd_consolidate(a):
-    """Fold sidecars into the .h5 (and remux video) for every session that is not yet at
-    format version 2. Idempotent. Refused while the engine runs (a live .h5 is being written),
-    and while the video tree cannot be trusted: consolidating then would write a v2 .h5 without
-    /camera, and an already-consolidated file is never folded again."""
+    """Fold sidecars into the .h5 for every session that is not yet at format version 2, and
+    remux every session's raw video.h264 into video.mp4 (adopting a complete leftover video.mp4.part
+    where one exists — see shared/consolidate.py). Idempotent. Refused while the engine runs (a live
+    .h5 is being written), and while the video tree cannot be trusted: consolidating then would write
+    a v2 .h5 without /camera, and an already-consolidated file is never folded again. A video that
+    cannot be remuxed is reported in `video_errors` and copied raw; it never fails the command."""
     if engine_running():
         _out({"ok": False, "error": "engine/leader.py is running"})
         return 2
@@ -311,6 +326,8 @@ def cmd_consolidate(a):
     from shared.consolidate import consolidate_session
     want = set(a.folder or [])
     results = {}
+    n_adopted = n_remuxed = 0
+    video_errors = []
     for rel, _s, _d, d in _folders(leader_dir):
         if want and rel not in want:
             continue
@@ -319,14 +336,23 @@ def cmd_consolidate(a):
             if not h5s:
                 results[f"{rel}/{sd.name}"] = {"ok": True, "skipped": "no h5"}
                 continue
-            vd = (video_dir / rel / sd.name) if video_dir else None
+            # without a separate video tree the video sits in the session dir (the engine's layout)
+            vd = (video_dir or leader_dir) / rel / sd.name
             try:
-                res = consolidate_session(sd, vd if (vd and vd.is_dir()) else None)
+                res = consolidate_session(sd, vd if vd.is_dir() else None)
+                v = res.get("video") or {}
                 results[f"{rel}/{sd.name}"] = {"ok": bool(res.get("ok", True)), "skipped": res.get("skipped"),
-                                               "video": res.get("video")}
+                                               "video": v}
+                if v.get("adopted"):
+                    n_adopted += 1
+                elif v.get("remuxed"):
+                    n_remuxed += 1
+                if v.get("error"):
+                    video_errors.append(f"{sd.name}: {v['error']}")
             except Exception as e:
                 results[f"{rel}/{sd.name}"] = {"ok": False, "error": str(e)}
-    _out({"ok": all(r.get("ok") for r in results.values()), "results": results})
+    _out({"ok": all(r.get("ok") for r in results.values()), "results": results,
+          "video_adopted": n_adopted, "video_remuxed": n_remuxed, "video_errors": video_errors})
     return 0
 
 

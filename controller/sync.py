@@ -50,6 +50,9 @@ DEPLOY_NEEDED = "leader_data.py on the leader is out of date — Deploy this rig
 SSH_E = "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new"
 _PROGRESS_RE = re.compile(r"^\s*([\d,]+)\s+(\d{1,3})%\s+(\S+/s)\s+(\d+:\d+:\d+)")
 FILE_LEVEL_RC = (23, 24)    # rsync: some files failed / vanished — per file, not the whole link
+# Temp files of a remux / .h5 fold still being written on the Pi are never archive content: not
+# copied, and never what makes a folder red.
+TEMP_EXCLUDES = ["--exclude=*.part", "--exclude=*.consolidating"]
 SEVERITY = {"green": 0, "red": 1, "missing": 2, "grey": 3}
 
 
@@ -71,7 +74,10 @@ def leader_cmd(rs: RigState, *args) -> tuple[str, str]:
 
 def run_leader_data(rs: RigState, *args, timeout=300) -> dict:
     tgt, cmd = leader_cmd(rs, *args)
-    r = ssh_result(tgt, cmd, timeout=timeout)
+    try:
+        r = ssh_result(tgt, cmd, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"leader_data {args[0] if args else ''} timed out after {timeout} s"}
     out = (r.stdout or "").strip()
     line = out.splitlines()[-1] if out else ""
     try:
@@ -194,7 +200,7 @@ def _dry_run(rs: RigState, tree: str, only: str | None = None,
     root = settings.data_root()
     root.mkdir(parents=True, exist_ok=True)
     args = rsync_base() + ["-rltnc" if checksum else "-rltn", "--itemize-changes", "--out-format=%i|%n",
-                           "--modify-window=1", "--exclude=.rsync-partial/", "--exclude=.DS_Store"]
+                           "--modify-window=1", "--exclude=.rsync-partial/", "--exclude=.DS_Store"] + TEMP_EXCLUDES
     if only is None:
         args.append("--exclude=/lost+found/")
     else:
@@ -386,7 +392,7 @@ def _rsync_folder(job: Job, rs: RigState, tree: str, folder: str, bytes_total: i
     dst.mkdir(parents=True, exist_ok=True)
     cfg = settings.load().get("sync") or {}
     args = rsync_base() + ["-rlt", "--partial", "--partial-dir=.rsync-partial", "--modify-window=1",
-                           "--info=progress2", "--no-inc-recursive", "--stats", "--exclude=.DS_Store"]
+                           "--info=progress2", "--no-inc-recursive", "--stats", "--exclude=.DS_Store"] + TEMP_EXCLUDES
     bw = int(cfg.get("bwlimit_mbps") or 0)
     if bw > 0:
         args.append(f"--bwlimit={bw * 125}")     # rsync takes KiB/s-ish units (1 Mbit/s ~ 125 KB/s)
@@ -448,19 +454,42 @@ def sync_folder(job: Job, rs: RigState, folder: str, bytes_before: int, rig_tota
         return fail(why)
     vroot = pre.get("video_root") or {}
 
-    # 2. consolidate anything not yet at format v2 (idempotent) — but not while the video tree
-    #    can't be trusted: the .h5 would be written without /camera and never folded again
+    # 2. consolidate anything not yet at format v2 and remux raw video (both idempotent, on the Pi) —
+    #    but not while the video tree can't be trusted: the .h5 would be written without /camera and
+    #    never folded again. The remux lives here since 2026-11 (it used to run at the engine's exit,
+    #    where the 10 s stop escalation cut it short): a fresh session holds a raw video.h264 until
+    #    its first sync, and a leader deployed before then reports no n_raw_video at all.
     n = finfo.get("n_unconsolidated", 0)
-    if n and vroot.get("separate") and not vroot.get("available"):
-        job.say(rs.name, f"{folder}: {n} session(s) left unconsolidated — the video tree is unavailable "
+    nv = finfo.get("n_raw_video", 0)
+    if "n_raw_video" not in finfo and any("video.mp4.part" in (s.get("video_files") or [])
+                                          for s in finfo.get("sessions", [])):
+        # the one case where an old leader_data.py would make us copy a multi-GB raw + .part pair
+        return fail("a stranded video.mp4.part is on the leader and its leader_data.py predates the "
+                    "video remux step — Deploy this rig first")
+    if (n or nv) and vroot.get("separate") and not vroot.get("available"):
+        job.say(rs.name, f"{folder}: {n + nv} session(s) left unconsolidated — the video tree is unavailable "
                          f"({vroot.get('reason')})", "warning")
-    elif n:
-        job.say(rs.name, f"{folder}: consolidating {n} session(s)")
+    elif n or nv:
+        what = ([f"consolidating {n} session(s)"] if n else []) + ([f"remuxing video for {nv} session(s)"] if nv else [])
+        job.say(rs.name, f"{folder}: {', '.join(what)}")
         c = run_leader_data(rs, "consolidate", *leader_data_args(rs), "--folder", folder, timeout=1800)
         if not c.get("ok"):
             bad = [f"{k}: {v.get('error')}" for k, v in (c.get("results") or {}).items() if not v.get("ok")]
             job.say(rs.name, f"{folder}: consolidate had errors: {c.get('error') or '; '.join(bad)} — "
                              f"copying anyway; the folder will NOT be purged", "warning")
+        for sid, r in sorted((c.get("results") or {}).items()):
+            v = (r or {}).get("video") or {}
+            name = sid.rsplit("/", 1)[-1]
+            if v.get("adopted"):
+                job.say(rs.name, f"{name}: adopted the complete video.mp4.part as video.mp4 ({v.get('frames')} frames)")
+            elif v.get("remuxed"):
+                job.say(rs.name, f"{name}: video.h264 -> video.mp4 ({v.get('frames')} frames)")
+            elif v.get("pruned"):
+                job.say(rs.name, f"{name}: removed leftovers next to a verified video.mp4")
+            elif v.get("error"):
+                job.say(rs.name, f"{name}: video: {v['error']}", "warning")
+            if v.get("warning"):
+                job.say(rs.name, f"{name}: video: {v['warning']}", "warning")
         pre, finfo, why = look()            # sidecars are gone, video is remuxed: re-read
         if why:
             return fail(why)

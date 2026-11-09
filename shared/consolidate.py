@@ -3,10 +3,12 @@ shared/consolidate.py
 
 Fold a session's sidecar files into the single HDF5, reorganize it into groups,
 then delete the sidecars — so the archived artifact is one self-contained
-`<session_id>.h5` (plus the video.h264, which stays a file).
+`<session_id>.h5` plus `video.mp4` (the raw video.h264 stream-copied into a container).
 
-Runs on the Leader via pi_api at transfer time: the engine process that wrote
-the .h5 is already gone, so a fresh process opens the closed file and rebuilds it.
+Runs on the Leader. The .h5 fold happens at the engine's exit (engine/leader.py
+`_consolidate_at_exit`, remux_video=False) and again, idempotently, from the Data tab's
+sync (shared/leader_data.py `consolidate`), which is ALSO where the video remux runs —
+never at the engine's exit, where pi_api's 10 s SIGKILL escalation cut it short.
 
 Merges (then deletes the source):
   metadata.yaml        -> root attributes (+ task_config as a JSON string)
@@ -63,84 +65,224 @@ _NPZ_SKIP = {"trial_idx", "block_num", "stim_az_deg", "contrast", "corr_contrast
              "bg_gray", "n_trials"}
 
 
-def _remux_and_prune_video(video_session_dir, h5_path):
-    """Copy-remux video.h264 -> video.mp4 (container only, NO re-encode) and delete the raw once
-    the mp4 is verified. Runs on the Leader at consolidation, after recording has stopped.
+# A video.mp4.part younger than this is an ffmpeg still writing (a manual tools/consolidate_session.py,
+# or a Data-tab consolidate whose SSH session died mid-remux): left alone, the next pass adopts or
+# removes it. Anything older is finished — or orphaned — and is judged on its content.
+PART_SETTLE_S = 60
+# A stream copy lands at ~the raw's size (the MP4 index adds ~1 MB per 300k frames); far smaller = truncated.
+MIN_SIZE_FRACTION = 0.95
 
-    Why here: raw .h264 is what the encoder writes (crash-safe, append-only), but it has no
-    container/timing — players and DeepLabCut read the wrong fps and can't seek. A stream copy
-    into MP4 is near-free (no re-encode, ~disk-speed) and fixes that. We force the frame rate from
-    the h5 because the raw stream's embedded rate is unreliable.
 
-    Never raises: on ANY problem it leaves the raw .h264 in place and reports why, so a bad remux
-    can never cost a recording. Idempotent — skips cleanly if the mp4 already exists or ffmpeg is
-    absent."""
+def _video_h5_info(h5_path) -> dict:
+    """The /camera facts the remux needs, in one open: fps (requested, else measured, else 30 — the
+    raw stream's own rate is unreliable, ffprobe reads 120/25 on our files) and frame_count (frames
+    the camera logged; None when unknown)."""
+    fps, frame_count = 30, None
+    try:
+        import h5py
+        with h5py.File(h5_path, "r") as f:
+            cam = dict(f["camera"].attrs) if "camera" in f else {}
+        fps = int(round(float(cam.get("requested_fps") or cam.get("measured_fps") or 30)))
+        fc = cam.get("frame_count")
+        frame_count = int(fc) if fc is not None else None
+    except Exception:
+        pass
+    if fps <= 0:
+        fps = 30
+    return {"fps": fps, "frame_count": frame_count}
+
+
+def _mp4_frames(path) -> int | None:
+    """Frames in an MP4's video track, from its index (ffprobe reads the moov — no decode, a seek on
+    a 13 GB file). None when the file has no usable index: a remux killed before it finalized."""
+    import subprocess
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                            "stream=nb_frames", "-of", "default=nw=1:nk=1", str(path)],
+                           capture_output=True, text=True, timeout=120)
+        return int(r.stdout.strip().splitlines()[0]) if r.returncode == 0 and r.stdout.strip() else None
+    except Exception:
+        return None            # "N/A", no output, ffprobe crashed or timed out
+
+
+def _verify_mp4(path, raw_size, frame_count):
+    """Is this MP4 a complete copy of the recording? Returns (ok, reason, frames):
+      unverifiable  no ffprobe on this machine
+      incomplete    no readable index — a remux killed before it finalized, or a truncated copy
+      too_small     a complete file far below the raw's size: a different (shorter) recording
+      frames_short  a complete file with fewer frames than the camera logged
+    frames is what the index says whenever it could be read, so a caller can tell a broken file
+    (incomplete) from a complete file that is simply not THIS recording (the other two — e.g. a
+    session id reused on another day, cheddar ASD150_20261030_001)."""
+    import shutil
+    if not Path(path).is_file():
+        return False, "incomplete", None
+    if shutil.which("ffprobe") is None:
+        return False, "unverifiable", None
+    frames = _mp4_frames(path)
+    if frames is None:
+        return False, "incomplete", None
+    if raw_size and Path(path).stat().st_size < raw_size * MIN_SIZE_FRACTION:
+        return False, "too_small", frames
+    if frame_count is not None and frames < frame_count:
+        return False, "frames_short", frames
+    return True, None, frames
+
+
+def _remux_and_prune_video(video_session_dir, h5_path, run_ffmpeg=True):
+    """Turn the raw video.h264 into video.mp4 (container only, NO re-encode) and delete the raw once
+    the mp4 is verified. Runs on the Leader from the Data tab's consolidate step (shared/leader_data.py
+    `consolidate`), right before the copy — NOT at the engine's exit any more: the controller's teardown
+    has pi_api SIGKILL the engine 10 s after SIGTERM, which cut off every remux longer than that and
+    left video.h264 next to a complete but never renamed video.mp4.part (cheddar, every recording over
+    ~75 min, 2026-09..11). With run_ffmpeg=False the same function is what tools/repair_stranded_video.py
+    runs over the controller's copies (adopt and prune only).
+
+    Why remux at all: raw .h264 is what the encoder writes (crash-safe, append-only), but it has no
+    container/timing — players and DeepLabCut read the wrong fps and can't seek. A stream copy into
+    MP4 is near-free (no re-encode, ~disk-speed) and fixes that. The frame rate is forced from the h5.
+
+    Verification = size >= 95 % of the raw, a readable MP4 index, and at least as many frames as the
+    camera logged (a finished copy has a few MORE: the encoder flushes after the logger stops).
+      video.mp4 only                    -> nothing
+      video.mp4 + raw (+ .part)         -> verify the mp4; ok: delete the leftovers. A BROKEN mp4 (no index:
+                                           a truncated copy) is replaced by a complete .part or a fresh remux
+                                           of the raw; a complete mp4 that is NOT this recording (a reused
+                                           session id) is never touched — everything is kept and reported
+      raw + a complete, settled .part   -> ADOPT it: rename (no ffmpeg; the inode and its mtime are kept,
+                                           so the controller's rsynced copy of it still matches) + delete raw
+      raw + a truncated .part           -> delete the .part, then as "raw only"
+      raw + a .part younger than 60 s   -> someone's ffmpeg is still writing: leave everything
+      raw only                          -> ffmpeg -> .part -> verify -> rename -> delete the raw
+                                           (run_ffmpeg=False: report, touch nothing)
+      .part only (raw already gone)     -> verify (no size check) and adopt
+    Never raises: on ANY problem it leaves the raw .h264 in place and reports why, so a bad remux can
+    never cost a recording. Idempotent."""
     import shutil
     import subprocess
-    import h5py
+    import time
 
     if not video_session_dir:
         return {"skipped": "no video dir"}
     vdir = Path(video_session_dir)
     raw = vdir / "video.h264"
     mp4 = vdir / "video.mp4"
-    if mp4.exists() and not raw.exists():
+    part = vdir / "video.mp4.part"
+    have_raw, have_mp4, have_part = raw.exists(), mp4.exists(), part.exists()
+    if have_mp4 and not have_raw and not have_part:
         return {"skipped": "already mp4"}
-    if not raw.exists():
+    if not have_raw and not have_part:
         return {"skipped": "no raw video"}
+
+    info = _video_h5_info(h5_path)
+    fps, frame_count = info["fps"], info["frame_count"]
+    raw_size = raw.stat().st_size if have_raw else None
+
+    def _rm(p):
+        try:
+            p.unlink()
+            return True
+        except OSError:
+            return False
+
+    def _settled(p):
+        try:
+            return time.time() - p.stat().st_mtime >= PART_SETTLE_S
+        except OSError:
+            return True
+
+    # 1. The mp4 is already there. Good: only leftovers to clean. Bad (a truncated copy, say): a
+    #    complete .part or a fresh remux from the raw replaces it below; with neither, keep everything.
+    bad_mp4 = None
+    if have_mp4:
+        if have_part and not _settled(part):
+            return {"skipped": "remux in progress"}
+        ok, reason, frames = _verify_mp4(mp4, raw_size, frame_count)
+        if ok:
+            res = {"pruned": True, "fps": fps, "frames": frames, "frame_count": frame_count,
+                   "mp4_bytes": mp4.stat().st_size, "removed_raw": bool(have_raw and _rm(raw))}
+            if have_part:
+                res["removed_part"] = _rm(part)
+            return res
+        if reason == "unverifiable":
+            return {"error": "cannot verify video.mp4 (no ffprobe here); leftovers kept", "fps": fps}
+        if reason != "incomplete":
+            # a complete MP4 that is not this recording (a session id reused on another day?): never overwritten
+            return {"error": f"video.mp4 does not match this recording ({reason}: {frames} frames in it vs "
+                             f"{frame_count} logged by the camera, {mp4.stat().st_size} vs raw {raw_size} bytes); "
+                             f"left for inspection", "fps": fps}
+        if not have_part and not (have_raw and run_ffmpeg):
+            return {"error": "video.mp4 fails verification (incomplete) and nothing here can replace it; "
+                             "leftovers kept", "fps": fps}
+        bad_mp4 = reason
+    also_bad = f"; video.mp4 fails too ({bad_mp4})" if bad_mp4 else ""
+
+    # 2. A .part next to the raw (or alone): a remux someone started. Complete -> adopt (over a bad mp4,
+    #    if there is one); truncated -> dropped only when a fresh remux from the raw follows.
+    if have_part:
+        if not _settled(part):
+            return {"skipped": "remux in progress"}
+        ok, reason, frames = _verify_mp4(part, raw_size, frame_count)
+        if ok:
+            os.replace(part, mp4)
+            res = {"adopted": "video.mp4", "fps": fps, "frames": frames, "frame_count": frame_count,
+                   "mp4_bytes": mp4.stat().st_size}
+            if bad_mp4:
+                res["replaced_mp4"] = bad_mp4
+            if have_raw:
+                res["removed_raw"] = _rm(raw)
+            return res
+        if reason == "unverifiable":
+            return {"error": "cannot verify video.mp4.part (no ffprobe here); left as is", "fps": fps}
+        what = (f"stale video.mp4.part has {frames} < {frame_count} logged frames" if reason == "frames_short"
+                else f"video.mp4.part fails verification ({reason})")
+        if not have_raw:
+            return {"error": f"{what} and the raw is gone; left for inspection{also_bad}", "fps": fps}
+        if not run_ffmpeg:
+            return {"error": f"{what}; left for inspection{also_bad}", "fps": fps}
+        _rm(part)                       # a fresh remux from the raw replaces it
+
+    # 3. Raw only (or raw + a bad mp4 to replace).
+    if not run_ffmpeg:
+        if bad_mp4:
+            return {"error": f"video.mp4 fails verification ({bad_mp4}) and there is no complete .part to "
+                             f"adopt; leftovers kept", "fps": fps}
+        return {"skipped": "adopt only"}
     if shutil.which("ffmpeg") is None:
-        return {"error": "ffmpeg not found; kept raw .h264"}
-
-    # The raw stream's frame rate is unreliable (ffprobe reads 120/25 on our files), so force a
-    # constant rate from the h5 — requested_fps preferred, else measured, rounded to an int.
-    fps = 30
-    try:
-        with h5py.File(h5_path, "r") as f:
-            cam = dict(f["camera"].attrs) if "camera" in f else {}
-        fps = int(round(float(cam.get("requested_fps") or cam.get("measured_fps") or 30)))
-    except Exception:
-        pass
-    if fps <= 0:
-        fps = 30
-
-    tmp = vdir / "video.mp4.part"
-    raw_size = raw.stat().st_size
+        return {"error": f"ffmpeg not found; kept raw .h264{also_bad}"}
     # -r before -i forces the input rate; -c:v copy = stream copy (no re-encode); -f mp4 names the
     # muxer explicitly (the temp file's .part extension can't be auto-detected); no +faststart (it
     # would rewrite the whole file — pointless for local/DLC use); -an = no audio.
     cmd = ["ffmpeg", "-y", "-v", "error", "-fflags", "+genpts", "-r", str(fps),
-           "-i", str(raw), "-c:v", "copy", "-an", "-f", "mp4", str(tmp)]
+           "-i", str(raw), "-c:v", "copy", "-an", "-f", "mp4", str(part)]
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=3600)
     except Exception as e:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+        _rm(part)
         err = getattr(e, "stderr", "") or str(e)
         return {"error": f"remux failed ({str(err)[:120]}); kept raw .h264", "fps": fps}
-
-    # A stream copy must land ~the same size; a much smaller file = a truncated/failed remux, and
-    # we must NOT delete the raw in that case.
-    got = tmp.stat().st_size if tmp.exists() else 0
-    if got < raw_size * 0.95:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return {"error": f"remux output too small ({got}/{raw_size} bytes); kept raw .h264",
-                "fps": fps}
-    os.replace(tmp, mp4)
+    ok, reason, frames = _verify_mp4(part, raw_size, frame_count)
+    if not ok and reason not in ("frames_short", "unverifiable"):
+        _rm(part)
+        return {"error": f"remux output {reason}; kept raw .h264", "fps": fps}
+    os.replace(part, mp4)
     raw.unlink()
-    return {"remuxed": "video.mp4", "fps": fps, "removed_raw": True, "mp4_bytes": got}
-
+    res = {"remuxed": "video.mp4", "fps": fps, "removed_raw": True, "mp4_bytes": mp4.stat().st_size,
+           "frames": frames, "frame_count": frame_count}
+    if bad_mp4:
+        res["replaced_mp4"] = bad_mp4
+    if reason == "frames_short":
+        # the raw itself is short — the camera logged frames the encoder never emitted; nothing to recover
+        res["warning"] = f"{frames} frames in the video, {frame_count} logged by the camera"
+    return res
 
 def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=True, remux_video=True):
     """Build the final self-contained HDF5 for a session and remove sidecars.
 
     session_dir: dir holding <session_id>.h5, metadata.yaml, stimuli.npz, trials.yaml.
     video_session_dir: dir holding frame_timestamps.npy (+ video.h264); optional.
-    remux_video: copy-remux video.h264 -> video.mp4 and delete the raw (default True).
+    remux_video: copy-remux video.h264 -> video.mp4 and delete the raw (default True; the engine
+                 passes False at its exit and leaves the remux to the Data tab's consolidate step).
     Returns a summary dict. Idempotent: a file already at FORMAT_VERSION is left alone.
     """
     import h5py
@@ -158,7 +300,7 @@ def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=Tru
         # h5 is already consolidated, but still (re)try the video remux — a prior run may have
         # been unable to (ffmpeg missing, interrupted), and we'd rather finish it on a re-transfer
         # than leave the raw .h264 stranded.
-        vres = _remux_and_prune_video(video_session_dir, h5_path) if remux_video else {"skipped": "disabled"}
+        vres = _remux_and_prune_video(video_session_dir, h5_path) if remux_video else {"skipped": "deferred to the Data-tab sync"}
         return {"ok": True, "skipped": "already consolidated", "h5": str(h5_path), "video": vres}
 
     meta_path = session_dir / "metadata.yaml"
@@ -262,5 +404,5 @@ def consolidate_session(session_dir, video_session_dir=None, delete_sidecars=Tru
                 removed.append(Path(p).name)
 
     # Turn the raw .h264 into a playable/DLC-ready video.mp4 (stream copy) and drop the raw.
-    vres = _remux_and_prune_video(video_session_dir, h5_path) if remux_video else {"skipped": "disabled"}
+    vres = _remux_and_prune_video(video_session_dir, h5_path) if remux_video else {"skipped": "deferred to the Data-tab sync"}
     return {"ok": True, "h5": str(h5_path), "merged": merged, "removed": removed, "video": vres}

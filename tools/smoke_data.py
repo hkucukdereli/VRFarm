@@ -389,6 +389,89 @@ slack: {{enabled: false, webhook_url: ''}}
             for subj in ("M4", "M5", "M8", "M9"):
                 shutil.rmtree(pi_data / subj, ignore_errors=True)
 
+        # T6/T7 — video remux at sync (needs ffmpeg + ffprobe on this machine)
+        if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+            print("  skip T6/T7 (no ffmpeg/ffprobe)")
+        else:
+            try:
+                import h5py
+                fx = scratch / "fx"
+                fx.mkdir()
+                subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=64x64:rate=10",
+                                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "5", "-f", "h264", str(fx / "video.h264")], check=True)
+                subprocess.run(["ffmpeg", "-v", "error", "-y", "-fflags", "+genpts", "-r", "10", "-i", str(fx / "video.h264"),
+                                "-c:v", "copy", "-an", "-f", "mp4", str(fx / "video.mp4.part")], check=True)
+
+                def cam_h5(path):
+                    make_h5(path, True, camera_saved=True, camera_requested=True)
+                    with h5py.File(str(path), "a") as f:
+                        g = f.create_group("camera")
+                        g.attrs["frame_count"] = 10
+                        g.attrs["requested_fps"] = 10
+
+                # T6 — a fresh session: raw video.h264 on the Pi; remuxed on the Pi at sync, the mp4 lands here
+                d7 = pi_data / "M7/M7_20260907/M7_20260907_001"
+                d7.mkdir(parents=True)
+                cam_h5(d7 / "M7_20260907_001.h5")
+                v7 = pi_video / "M7/M7_20260907/M7_20260907_001"
+                v7.mkdir(parents=True)
+                shutil.copy2(fx / "video.h264", v7 / "video.h264")
+                f7 = folder("M7/M7_20260907")
+                check(f7 is not None and f7["status"] == "red" and f7.get("n_raw_video") == 1 and f7["n_unconsolidated"] == 0,
+                      f"T6 raw video flagged, not 'unconsolidated' ({f7 and (f7['status'], f7.get('n_raw_video'), f7['n_unconsolidated'])})")
+                j = sync_now(["M7/M7_20260907"])
+                r = j["result"]["scratch"]
+                check(r["synced"] == ["M7/M7_20260907"] and (v7 / "video.mp4").exists() and not (v7 / "video.h264").exists(),
+                      f"T6 remuxed on the Pi at sync ({r})")
+                check((root / "M7/M7_20260907/M7_20260907_001/video.mp4").exists()
+                      and not (root / "M7/M7_20260907/M7_20260907_001/video.h264").exists(), "T6 the controller received video.mp4 only")
+                check(any("video.h264 -> video.mp4" in l["msg"] for l in j["log"]), "T6 the job log reports the remux")
+                f7 = folder("M7/M7_20260907")
+                check(f7["status"] == "green" and f7.get("n_raw_video") == 0 and "M7/M7_20260907" in purge_preview(),
+                      f"T6 green, no raw left, offered for purge ({f7['status']}, {f7.get('n_raw_video')})")
+
+                # T7 — a stranded pair (raw + complete, old .part) on the Pi AND already copied here: the repair
+                # tool adopts the local copy, the sync adopts the Pi's, and nothing is copied again
+                d10 = pi_data / "M10/M10_20260910/M10_20260910_001"
+                d10.mkdir(parents=True)
+                cam_h5(d10 / "M10_20260910_001.h5")
+                v10 = pi_video / "M10/M10_20260910/M10_20260910_001"
+                v10.mkdir(parents=True)
+                shutil.copy2(fx / "video.h264", v10 / "video.h264")
+                shutil.copy2(fx / "video.mp4.part", v10 / "video.mp4.part")
+                old = time.time() - 3600
+                os.utime(v10 / "video.mp4.part", (old, old))
+                c10 = root / "M10/M10_20260910/M10_20260910_001"
+                c10.mkdir(parents=True)
+                shutil.copy2(d10 / "M10_20260910_001.h5", c10 / "M10_20260910_001.h5")
+                for n in ("video.h264", "video.mp4.part"):
+                    shutil.copy2(v10 / n, c10 / n)
+                f10 = folder("M10/M10_20260910")
+                check(f10 is not None and f10["status"] == "green" and f10.get("n_raw_video") == 1,
+                      f"T7 before the repair: green (the raw is copied; the .part is ignored by rsync), raw flagged ({f10 and (f10['status'], f10.get('n_raw_video'))})")
+                rep = subprocess.run([PY, "tools/repair_stranded_video.py", "--data-root", str(root)], cwd=str(ROOT), capture_output=True, text=True)
+                check(rep.returncode == 0 and "adopt as video.mp4" in rep.stdout and "dry run" in rep.stdout and (c10 / "video.h264").exists(),
+                      f"T7 repair tool dry run plans the adoption and touches nothing ({rep.stdout.strip().splitlines()[-1] if rep.stdout.strip() else rep.stderr[-200:]})")
+                rep = subprocess.run([PY, "tools/repair_stranded_video.py", "--data-root", str(root), "--apply"], cwd=str(ROOT), capture_output=True, text=True)
+                check(rep.returncode == 0 and (c10 / "video.mp4").exists() and not (c10 / "video.h264").exists() and not (c10 / "video.mp4.part").exists(),
+                      f"T7 repair tool --apply adopted the controller copy ({rep.stdout.strip().splitlines()[-1] if rep.stdout.strip() else rep.stderr[-200:]})")
+                check(abs((c10 / "video.mp4").stat().st_mtime - old) < 1, "T7 the adopted mp4 kept the .part's mtime")
+                ino = (c10 / "video.mp4").stat().st_ino
+                f10 = folder("M10/M10_20260910")
+                check(f10["status"] == "red" and f10.get("n_raw_video") == 1, f"T7 red after the repair: the Pi still has the raw ({f10['status']})")
+                j = sync_now(["M10/M10_20260910"])
+                r = j["result"]["scratch"]
+                check(r["synced"] == ["M10/M10_20260910"] and (v10 / "video.mp4").exists() and not (v10 / "video.h264").exists()
+                      and not (v10 / "video.mp4.part").exists(), f"T7 the Pi adopted its .part at sync ({r})")
+                check(any("adopted" in l["msg"] for l in j["log"]), "T7 the job log says adopted")
+                check(abs((v10 / "video.mp4").stat().st_mtime - old) < 1 and (c10 / "video.mp4").stat().st_ino == ino,
+                      "T7 the Pi's mp4 kept the .part mtime and the controller's copy was not rewritten (same inode)")
+                check(folder("M10/M10_20260910")["status"] == "green", "T7 green afterwards")
+            finally:
+                for subj in ("M7", "M10"):
+                    shutil.rmtree(pi_data / subj, ignore_errors=True)
+                    shutil.rmtree(pi_video / subj, ignore_errors=True)
+
         # cancel mid-copy: a big folder, cancel quickly, expect a partial and red status
         big = pi_video / "M3/M3_20260903/M3_20260903_001"
         big.mkdir(parents=True)

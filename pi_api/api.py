@@ -184,7 +184,8 @@ def list_files(session_id):
 def consolidate(session_id):
     """Leader only. Fold the session's sidecars (metadata.yaml, stimuli.npz, trials.yaml,
     frame_timestamps.npy) into <session_id>.h5 and delete them, leaving one self-contained
-    .h5 (+ video.h264) to transfer. Idempotent."""
+    .h5 (+ video) to transfer. Idempotent. Kept for older callers: the Data tab reaches the same
+    code over SSH through shared/leader_data.py `consolidate`, which also remuxes the video."""
     data = request.get_json(silent=True) or {}
     subj, subj_date, _ = _parse_session_id(session_id)
     session_dir = (DATA_DIR / subj / subj_date / session_id) if subj else (DATA_DIR / session_id)

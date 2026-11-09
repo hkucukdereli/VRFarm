@@ -1554,7 +1554,12 @@ class Leader:
         """Fold this session's sidecars into the single <session_id>.h5 as the final exit step, so the
         archive is self-contained the moment the session ends (stop OR finish). Runs after dev.close(),
         so metadata.yaml / stimuli.npz / frame_timestamps.npy all exist. Idempotent + best-effort: it
-        never raises out of shutdown, and transfer still calls consolidate as a no-op safety net."""
+        never raises out of shutdown, and the Data tab's sync runs consolidate again as a safety net.
+
+        The video remux (ffmpeg over the whole recording) is NOT done here: the controller's teardown
+        has pi_api SIGKILL this process 10 s after its SIGTERM, which cut every remux longer than that
+        short (video.h264 + an orphaned video.mp4.part, cheddar 2026-09..11). The Data tab's consolidate
+        step remuxes on the Pi right before the copy instead (shared/leader_data.py)."""
         try:
             d = self.rig.get("data", {})
             leader_dir = d.get("leader_dir")
@@ -1566,8 +1571,10 @@ class Leader:
             vd = d.get("video_dir") or leader_dir
             video_dir = Path(vd) / subj / subj_date / self.session_id
             from shared.consolidate import consolidate_session
-            res = consolidate_session(session_dir, video_dir if video_dir.exists() else None)
-            print(f"[consolidate] session end: {res}", flush=True)
+            res = consolidate_session(session_dir, video_dir if video_dir.exists() else None,
+                                      remux_video=False)
+            print(f"[consolidate] session end: {res} (video remux deferred to the Data-tab sync)",
+                  flush=True)
         except FileNotFoundError:
             pass   # no .h5 written (save skipped / no data) — nothing to consolidate
         except Exception as e:

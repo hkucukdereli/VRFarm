@@ -35,14 +35,16 @@ session:
   grace_period_s: 10           # seconds to wait after GO before trials start
   n_blocks: 6
   block_size: 25
-  block_sequence: [80]      # azimuth per block, cycled
+  block_sequence: [80]      # azimuth per block, cycled in this order (never shuffled)
   iti: [8, 16]              # [min, max] random or scalar for fixed
   prestim_duration: 0        # baseline period before stimulus onset (0 = immediate)
   poststim_duration: 0
   global_delay: 0
   block_delay: 0
   block_delay_skip_first: false
-  # randomize_blocks: true  # optional, shuffles all trials
+  # randomize_blocks: true  # optional: no blocks — one shuffled list with every block_sequence
+                            # location and every contrast in its exact share (n_blocks x
+                            # block_size then only sets the trial count)
   global_timeout_trials: 0            # abort session if dry for N consecutive trials (0 = off)
   global_timeout_phases: []           # phases checked for licks: prestim/stim/poststim/iti
   # Display-fault abort (needs stimulus.photodiode_sync_enabled — without it nothing watches

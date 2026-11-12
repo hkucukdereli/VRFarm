@@ -318,6 +318,16 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
   `*.part`. `tools/repair_stranded_video.py` (dry run; `--apply`) does the same over the controller's
   copies. shepherd's `camera_fps` skips the first two samples of a recording: pi_api reports
   `camera_recording` ~0.5 s before the first frame, which faked a CRITICAL at the GO second.
+- **Trial order is drawn at Deploy** (`shared/stim_generator.py` `build_block_trial_list`, no seed; the
+  engine only replays the plan). Blocked tasks cycle `block_sequence` **in the listed order** — the block
+  order is never shuffled, only the contrasts inside each block (per-block counts from the proportions:
+  34/33/33 of 50 is 18/16/16). **Randomize blocks** is one shuffled list balanced over location ×
+  contrast (2026-11-12): contrast totals by largest remainder, dealt around `block_sequence`, every entry
+  and every entry × contrast cell within one trial of its exact share; `n_blocks × block_size` only sets
+  the trial count. Before that date it shuffled the trials of the blocked plan, so a location's share was
+  its share of the blocks: `ASD110_20261112_001` (3 blocks of 50 over `[80, -80]`) ran 100 trials at +80
+  and 50 at −80. The Deploy log prints `Trials per location …` for every plan. Checks:
+  `tools/test_trial_order.py`.
 - Leader is on a small SD card — reclaim with `conda clean -a -y` / `pip cache purge`.
 - Pis are firewall-gated off the institute WiFi. To install packages, run a proxy on the
   Controller (`python -m proxy --hostname 192.168.10.1 --port 8899`) and set

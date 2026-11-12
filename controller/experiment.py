@@ -590,8 +590,11 @@ def deploy():
                     raise ValueError(f"Expected list, got {type(table).__name__}")
                 rs.trial_table = table
                 steps.append(f"Trial table: {len(table)} trials")
+                from shared.stim_generator import opto_summary, plan_summary
+                plan_line = plan_summary(table)       # trials per location x contrast, as planned
+                if plan_line:
+                    steps.append(plan_line)
                 if (task.get("opto") or {}).get("enabled"):
-                    from shared.stim_generator import opto_summary
                     n_opto = sum(1 for row in table if isinstance(row, dict) and row.get("opto"))
                     steps.append(opto_summary(task, n_opto, len(table)))
                     for w in opto_warnings:

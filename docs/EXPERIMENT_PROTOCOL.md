@@ -311,14 +311,14 @@ minus the window start.
 |---|---|
 | `n_blocks` | Number of blocks (defaults to `n_trials // block_size` if omitted). |
 | `block_size` | Trials per block. |
-| `block_sequence` | Azimuth (deg) per block, cycled to fill `n_blocks`. |
+| `block_sequence` | Azimuth (deg) per block, cycled **in the listed order** to fill `n_blocks` — the block order is never shuffled, so a location's share of the session is its share of the blocks (6 blocks over a 4-entry sequence give the first two entries twice the trials of the last two). Within a block the contrasts are shuffled, with per-block counts from the proportions. With `randomize_blocks` it is the list of locations instead (see there). |
 | `iti` | `[min, max]` for a random ITI, or a scalar for fixed (seconds). |
 | `prestim_duration` | Baseline period before stimulus onset (0 = immediate). |
 | `poststim_duration` | Period after the stimulus. |
 | `global_delay` | One-time delay at session start (scalar or `[min,max]`). |
 | `block_delay` | Delay before each block (scalar or `[min,max]`). |
 | `block_delay_skip_first` | Skip the block delay on the first block. |
-| `randomize_blocks` | Optional: shuffle all trials into one block (disables `switch_trial_contrast`). |
+| `randomize_blocks` | Optional: no blocks — **one shuffled list, balanced over location × contrast**. The `n_blocks × block_size` trials are split over the contrasts by their proportions (largest remainder, ties drawn at random), then dealt contrast by contrast around `block_sequence` from a random entry on, and the whole list is shuffled. Every entry of the sequence gets the same number of trials, and the same number of each contrast, give or take one; an azimuth listed twice gets twice the trials; a contrast with proportion 0 gets none. `n_blocks` and `block_size` only set the trial count. All trials are block 0, so `block_delay` is given once (before the first trial) and `switch_trial_contrast` is off. Opto trials stay stratified per contrast, not per location. *Until 2026-11-12 this shuffled the trials of the blocked plan instead, so a location's share was its share of the blocks, even only when `n_blocks` was a multiple of the sequence length: `ASD110_20261112_001` (3 blocks of 50 over `[80, -80]`) ran 100 trials at +80 and 50 at −80.* The Deploy log prints the plan's counts (`Trials per location …`). Checks: `tools/test_trial_order.py`. |
 | `global_timeout_trials` | Abort the session after N consecutive **dry** trials (no licks in the checked phases); 0 = off. |
 | `global_timeout_phases` | Phases checked for licks by the global timeout: any of `prestim`, `stim`, `poststim`, `iti`. |
 

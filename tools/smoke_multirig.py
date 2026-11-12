@@ -174,6 +174,8 @@ def main():
             check(r.get("session_id") == f"MOCK{i}_{today}_001", f"{name}: session id {r.get('session_id')}")
             r = ctl.rig(name, "/deploy", timeout=180)
             check(r.get("ok") is True, f"{name}: deploy ({r.get('error')})")
+            plan = [s for s in r.get("steps") or [] if str(s).startswith("Trials per location")]
+            check(len(plan) == 1, f"{name}: Deploy log counts the plan per location ({plan})")
 
         fleet = ctl.get("/api/fleet")["rigs"]
         check(all(fleet[n]["phase"] == "deployed" for n, _, _ in RIGS), "fleet shows both deployed")

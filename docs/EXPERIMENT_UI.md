@@ -80,6 +80,11 @@ with an opto device) and GLOBAL TIMEOUT. Everything here is live-editable and ro
 
 - **Save** overwrites the same file; **Save As** creates a new one and selects it.
 - **N trials** is computed (`N blocks × Block size`) and read-only.
+- **Trial order** is drawn at Deploy, new every time. The blocks follow **Block sequence** in the
+  listed order (cycled, never shuffled); only the contrasts are shuffled, inside each block.
+  **Randomize blocks** drops the blocks: every location of the Block sequence gets the same number
+  of trials, the contrasts follow **Proportions** within each location (every count within one
+  trial of exact), and the whole list is shuffled. `N blocks × Block size` then only sets N trials.
 - **Correct** clamps contrast to what the display can reach at the current background,
   and is the one control that explicitly invalidates a Deploy.
 - **Contrast is typed in percent** (`[25, 15, 12.5]`, 100 = 100 %); the task file and the data keep
@@ -130,7 +135,9 @@ run with any of the first three blank and focuses the offending field.
 
 **Deploy** saves the task YAML, then uploads code and configs to both Pis, restarts
 `pi_api`, re-initializes the projector, generates the stimulus plan on the Leader, pushes
-the NPZ to the Follower and downloads the trial table. Each step appears in the Log.
+the NPZ to the Follower and downloads the trial table. Each step appears in the Log, and one line
+counts the plan — `Trials per location (contrast 300/40/15 %): -80°: 75 (26/25/24) · 80°: 75
+(25/25/25)` — so an uneven split between locations is seen before GO.
 
 On success the **Estimated** clock and **Session #** appear and the Stimulus canvas
 initializes with the correct rulers.

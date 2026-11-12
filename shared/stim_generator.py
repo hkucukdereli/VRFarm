@@ -237,10 +237,54 @@ def opto_summary(task_config: dict, n_opto: int, n: int) -> str:
             + ("; mask LED on every trial" if o.get("mask") else ""))
 
 
+def plan_summary(table) -> str:
+    """One line for the Deploy log: trials per location, split by contrast (strongest first) when
+    there are several. Counted from the trial table itself (the rows of trials.yaml), so an
+    uneven plan is seen before GO. Rows it cannot read are skipped; it never raises."""
+    counts = {}             # az -> contrast -> n
+    for row in table or []:
+        try:
+            az = float(row["az"])
+            c = round(float(row["contrast"]), 6)      # the table's contrasts went through float32
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+        if np.isfinite(az) and np.isfinite(c):
+            cell = counts.setdefault(az, {})
+            cell[c] = cell.get(c, 0) + 1
+    if not counts:
+        return ""
+    cons = sorted({c for cell in counts.values() for c in cell}, reverse=True)
+    head = "Trials per location"
+    if len(cons) > 1:
+        head += f" (contrast {'/'.join(f'{c * 100:g}' for c in cons)} %)"
+    parts = []
+    for az in sorted(counts):
+        split = f" ({'/'.join(str(counts[az].get(c, 0)) for c in cons)})" if len(cons) > 1 else ""
+        parts.append(f"{az:g}°: {sum(counts[az].values())}{split}")
+    return head + ": " + " · ".join(parts)
+
+
+def _apportion(n: int, weights, rng) -> list[int]:
+    """Split n trials over `weights` (any scale) by largest remainder: every share is its exact
+    value n * w / sum(w) rounded down or up, and the shares add up to n. Entries with the same
+    remainder compete for the last trials at random, so none of them wins every session."""
+    w = np.asarray(weights, dtype=float)
+    exact = n * w / w.sum()
+    shares = np.floor(exact + 1e-9).astype(int)
+    frac = np.round(exact - shares, 9)
+    order = rng.permutation(len(w))                             # random among equal remainders:
+    order = order[np.argsort(-frac[order], kind="stable")]      # the stable sort keeps that order
+    shares[order[:n - int(shares.sum())]] += 1
+    return [int(x) for x in shares]
+
+
 def build_block_trial_list(task_config: dict, seed=None) -> list[dict]:
     """Build the ordered trial list: dicts of trial_idx, block_num, az_deg, alt_deg, contrast and
-    opto (the per-trial light flag, assigned last so it sees the final order). `seed` makes the
-    draw reproducible (tests); Deploy leaves it None, so every Deploy draws a fresh plan."""
+    opto (the per-trial light flag, assigned last so it sees the final order). Blocked by default
+    (one location per block, block_sequence cycled, contrasts shuffled within the block);
+    session.randomize_blocks gives one shuffled list balanced over location x contrast instead.
+    `seed` makes the draw reproducible (tests); Deploy leaves it None, so every Deploy draws a
+    fresh plan."""
     rng = np.random.default_rng(seed)
 
     sess = task_config["session"]
@@ -261,52 +305,67 @@ def build_block_trial_list(task_config: dict, seed=None) -> list[dict]:
     rule = switch_trial_rule(task_config)
     pinned = (min(contrast_vals) if rule == "lowest" else max(contrast_vals)) if rule else None
 
-    trials = []
-    trial_idx = 0
-    block_num = 0
-
-    while trial_idx < n_total and block_num < 999:
-        az = seq[block_num % n_seq]
-        remaining = n_total - trial_idx
-        this_block = min(bsize, remaining)
-
-        n_each = [max(1, round(p * this_block)) for p in contrast_probs]
-        while sum(n_each) > this_block:
-            n_each[np.argmax(n_each)] -= 1
-        while sum(n_each) < this_block:
-            n_each[np.argmax(contrast_probs)] += 1
-
-        block_contrasts = []
-        for c, n in zip(contrast_vals, n_each):
-            block_contrasts.extend([c] * n)
-        rng.shuffle(block_contrasts)
-
-        # Pinned first trial: SWAP the pinned contrast into position 0 (every block, block 0
-        # included), so the block keeps exactly the counts its proportions gave it. A short last
-        # block may hold no trial of that contrast at all — then it is left as shuffled.
-        if pinned is not None and pinned in block_contrasts:
-            idx = block_contrasts.index(pinned)
-            block_contrasts[0], block_contrasts[idx] = block_contrasts[idx], block_contrasts[0]
-
-        for c in block_contrasts:
-            trials.append({
-                "trial_idx": trial_idx,
-                "block_num": block_num,
-                "az_deg": float(az),
-                "alt_deg": float(stim.get("altitude_deg", 10.0)),
-                "contrast": float(c),
-            })
-            trial_idx += 1
-        block_num += 1
-
-    # Randomize trial order if requested (random-location paradigm)
     if sess.get("randomize_blocks", False):
+        # Randomize blocks (random-location paradigm): one shuffled list, no blocks. Location is
+        # drawn the way contrast is — exact counts first, the shuffle after. The session's trials
+        # are split over the contrasts by their proportions, then dealt, contrast by contrast,
+        # around block_sequence (one trial per entry, from a random entry on): every entry of the
+        # sequence gets the same number of trials, and the same number of each contrast, give or
+        # take one. An azimuth listed twice gets twice the trials. n_blocks x block_size only sets
+        # the trial count. Until 2026-11-12 this mode shuffled the trials of the blocked plan
+        # instead, so a location's share was its share of the blocks — even only when n_blocks
+        # was a multiple of the sequence length (3 blocks of 50 over [80, -80] ran 100 trials at
+        # +80 and 50 at -80).
         if str(stim.get("switch_trial_contrast") or "random").strip().lower() != "random":
             print("WARNING: switch_trial_contrast ignored because randomize_blocks is True")
-        rng.shuffle(trials)
-        for i, t in enumerate(trials):
-            t["trial_idx"] = i
-            t["block_num"] = 0
+        pairs = []
+        slot = int(rng.integers(n_seq))
+        for c, n in zip(contrast_vals, _apportion(n_total, contrast_probs, rng)):
+            for _ in range(n):
+                pairs.append((seq[slot % n_seq], c))
+                slot += 1
+        rng.shuffle(pairs)
+        trials = [{"trial_idx": i, "block_num": 0, "az_deg": float(az),
+                   "alt_deg": float(stim.get("altitude_deg", 10.0)), "contrast": float(c)}
+                  for i, (az, c) in enumerate(pairs)]
+    else:
+        trials = []
+        trial_idx = 0
+        block_num = 0
+
+        while trial_idx < n_total and block_num < 999:
+            az = seq[block_num % n_seq]
+            remaining = n_total - trial_idx
+            this_block = min(bsize, remaining)
+
+            n_each = [max(1, round(p * this_block)) for p in contrast_probs]
+            while sum(n_each) > this_block:
+                n_each[np.argmax(n_each)] -= 1
+            while sum(n_each) < this_block:
+                n_each[np.argmax(contrast_probs)] += 1
+
+            block_contrasts = []
+            for c, n in zip(contrast_vals, n_each):
+                block_contrasts.extend([c] * n)
+            rng.shuffle(block_contrasts)
+
+            # Pinned first trial: SWAP the pinned contrast into position 0 (every block, block 0
+            # included), so the block keeps exactly the counts its proportions gave it. A short last
+            # block may hold no trial of that contrast at all — then it is left as shuffled.
+            if pinned is not None and pinned in block_contrasts:
+                idx = block_contrasts.index(pinned)
+                block_contrasts[0], block_contrasts[idx] = block_contrasts[idx], block_contrasts[0]
+
+            for c in block_contrasts:
+                trials.append({
+                    "trial_idx": trial_idx,
+                    "block_num": block_num,
+                    "az_deg": float(az),
+                    "alt_deg": float(stim.get("altitude_deg", 10.0)),
+                    "contrast": float(c),
+                })
+                trial_idx += 1
+            block_num += 1
 
     # Opto trials: assigned on the FINAL order (after any shuffle), so the gap rule and the
     # per-block stratification describe the trials as they will actually run.
@@ -515,6 +574,9 @@ def generate_stimuli(task_config: dict, warp_map, output_dir: str,
     print(f"  Trial table: {yaml_path}")
 
     print(f"Generated {n} trials across {n_blocks_total} blocks")
+    plan_line = plan_summary(trial_table)
+    if plan_line:
+        print("  " + plan_line)
     rule = switch_trial_rule(task_config)
     if rule:
         print(f"  First trial of every block: {rule} contrast")

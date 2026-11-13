@@ -7,15 +7,24 @@ locally for loopback targets), a scratch data tree with two mice x two dates (on
 consolidated, one not, one folder with no h5, plus video files on a separate "SSD" tree),
 a scratch data root and scratch settings, then drives /api/data end to end:
 
-  inventory -> all red;  Sync Now one folder -> green + ledger;  purge preview lists only the
-  consolidated green one;  purge deletes it and nothing else;  auto-purge sync deletes after
-  the verified copy;  Sync & Poweroff preview lists the red folders and the job logs the
-  suppressed power-off;  then sessions without video and purge safety:
+  inventory -> all red;  Sync Now one folder -> green + ledger, with the content check on record;
+  purge preview lists only the consolidated green one;  purge deletes it and nothing else;
+  auto-purge sync deletes after the verified copy;  Sync & Poweroff preview lists the red folders
+  and the job logs the suppressed power-off;  then sessions without video and purge safety:
     T1  a data-only folder (camera unchecked) syncs green, would power off, purges the data tree only
     T2  a video-only folder syncs green and purges the video tree only
     T3  camera_saved: true with no video is "missing": not purgeable, and the rig stays on
     T4  an unreadable subdirectory greys only its own folder and is never purged (skipped as root)
     T5  an unmounted data.video_mount greys the rig and fails its syncs; the Pi refuses purges
+  video remux at sync (skipped without ffmpeg + ffprobe):
+    T6  a raw video.h264 is remuxed on the Pi at sync; the controller receives video.mp4 only
+    T7  a stranded raw + .part pair that was already copied: the repair tool adopts the copy here,
+        the sync adopts the Pi's, nothing is copied again
+  the content check (bytes, not size and time):
+    T8  a copy with the right size and mtime but other bytes is red until checked; Sync Now finds
+        it, fetches the file again and keeps the replaced copy under .vrfarm_replaced/
+    T9  verify_checksum_before_purge: a copy altered after its check stops the purge
+    T10 a file touched on the Pi inside rsync's --modify-window turns a green folder red
   a cancelled copy leaves a resumable partial;  the rsync guard trips on Apple's openrsync.
 
 The scratch settings use a real rsync >= 3.1: the vrfarm env's, else the one on PATH.
@@ -65,6 +74,17 @@ def make_h5(path: Path, consolidated: bool, **attrs):
             f.create_group("trials")
         for k, v in attrs.items():
             f.attrs[k] = v
+
+
+def corrupt(path: Path, at: int = 0, n: int = 64):
+    """Flip n bytes of a file in place — same size, same mtime: a change no rsync run can see."""
+    st = path.stat()
+    with open(path, "r+b") as f:
+        f.seek(at)
+        b = f.read(n)
+        f.seek(at)
+        f.write(bytes(x ^ 0xFF for x in b))
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
 
 
 def seed(pi_data: Path, pi_video: Path):
@@ -223,6 +243,13 @@ slack: {{enabled: false, webhook_url: ''}}
               and (root / "M1/M1_20260901/M1_20260901_001/video.mp4").exists(), "h5 + video landed under the data root, subject-first")
         led = json.loads((root / ".vrfarm_sync_ledger.json").read_text())
         check("scratch|M1|20260901" in led["folders"], "ledger entry written")
+        v = led["folders"]["scratch|M1|20260901"].get("verified") or {}
+        f1 = folder("M1/M1_20260901")
+        check(v.get("algo") == "sha256" and v.get("files") == 3 and not v.get("repaired")
+              and set(v.get("fp") or {}) == {"data", "video"} and v.get("fp") == f1.get("fp"),
+              f"ledger holds the content check: {v.get('files')} files, {v.get('algo')}, the fingerprints the inventory reports")
+        check(f1.get("content_checked") and not f1.get("content_unchecked"), "the card says content checked")
+        check(any("content of 3 file(s) checked" in l["msg"] for l in j["log"]), "the job log reports the content check")
         st = statuses()
         check(st["M1/M1_20260901"] == "green" and st["M1/M1_20260902"] == "red", f"status after sync: {st}")
 
@@ -447,8 +474,9 @@ slack: {{enabled: false, webhook_url: ''}}
                 for n in ("video.h264", "video.mp4.part"):
                     shutil.copy2(v10 / n, c10 / n)
                 f10 = folder("M10/M10_20260910")
-                check(f10 is not None and f10["status"] == "green" and f10.get("n_raw_video") == 1,
-                      f"T7 before the repair: green (the raw is copied; the .part is ignored by rsync), raw flagged ({f10 and (f10['status'], f10.get('n_raw_video'))})")
+                check(f10 is not None and f10["status"] == "red" and f10.get("content_unchecked") and f10.get("n_raw_video") == 1,
+                      f"T7 before the repair: nothing left to copy (the raw is copied; the .part is ignored by rsync), but red — its "
+                      f"content is not checked; raw flagged ({f10 and (f10['status'], f10.get('content_unchecked'), f10.get('n_raw_video'))})")
                 rep = subprocess.run([PY, "tools/repair_stranded_video.py", "--data-root", str(root)], cwd=str(ROOT), capture_output=True, text=True)
                 check(rep.returncode == 0 and "adopt as video.mp4" in rep.stdout and "dry run" in rep.stdout and (c10 / "video.h264").exists(),
                       f"T7 repair tool dry run plans the adoption and touches nothing ({rep.stdout.strip().splitlines()[-1] if rep.stdout.strip() else rep.stderr[-200:]})")
@@ -471,6 +499,98 @@ slack: {{enabled: false, webhook_url: ''}}
                 for subj in ("M7", "M10"):
                     shutil.rmtree(pi_data / subj, ignore_errors=True)
                     shutil.rmtree(pi_video / subj, ignore_errors=True)
+
+        # T8-T10 — the content check: the bytes themselves, not size and time
+        try:
+            # T8 — a copy with the right size and mtime but other bytes. No rsync run sees it; Sync Now does,
+            # fetches the file again with a direct read and keeps the copy it replaced
+            d11 = pi_data / "M11/M11_20260911/M11_20260911_001"
+            d11.mkdir(parents=True)
+            make_h5(d11 / "M11_20260911_001.h5", True, camera_saved=True, camera_requested=True)
+            v11 = pi_video / "M11/M11_20260911/M11_20260911_001"
+            v11.mkdir(parents=True)
+            (v11 / "video.mp4").write_bytes(os.urandom(3_000_000))
+            c11 = root / "M11/M11_20260911/M11_20260911_001"
+            c11.mkdir(parents=True)
+            shutil.copy2(d11 / "M11_20260911_001.h5", c11 / "M11_20260911_001.h5")
+            shutil.copy2(v11 / "video.mp4", c11 / "video.mp4")
+            corrupt(c11 / "video.mp4", at=1_000_000, n=4096)
+            wrong = (c11 / "video.mp4").read_bytes()
+            f11 = folder("M11/M11_20260911")
+            check(f11 is not None and f11["status"] == "red" and f11.get("content_unchecked") and "content" in (f11.get("reason") or ""),
+                  f"T8 a copy that rsync calls complete is red until its content is checked ({f11 and (f11['status'], f11.get('reason'))})")
+            check("M11/M11_20260911" not in purge_preview(), "T8 not offered for purge")
+            j = purge(["M11/M11_20260911"])
+            check(not j["result"]["scratch"]["purged"] and d11.exists() and v11.exists(), f"T8 a forced purge is refused ({j['result']['scratch']})")
+            j = sync_now(["M11/M11_20260911"])
+            r = j["result"]["scratch"]
+            msgs = [l["msg"] for l in j["log"]]
+            check(r["synced"] == ["M11/M11_20260911"] and (c11 / "video.mp4").read_bytes() == (v11 / "video.mp4").read_bytes(),
+                  f"T8 Sync Now leaves the Pi's bytes under the data root ({r})")
+            check(any("video.mp4: its content differs from the Pi's" in m for m in msgs)
+                  and any("replaced with the Pi's bytes" in m for m in msgs) and any("1 fetched again" in m for m in msgs),
+                  "T8 the job log names the file, the replacement and the count")
+            kept = sorted((root / ".vrfarm_replaced/M11/M11_20260911/M11_20260911_001").glob("video.mp4.*"))
+            check(len(kept) == 1 and kept[0].read_bytes() == wrong, f"T8 the replaced copy is kept ({[k.name for k in kept]})")
+            check((c11 / "video.mp4").stat().st_mtime_ns == (v11 / "video.mp4").stat().st_mtime_ns, "T8 the new copy carries the Pi's mtime")
+            e11 = ledger()["scratch|M11|20260911"]
+            check((e11.get("verified") or {}).get("repaired") == ["M11_20260911_001/video.mp4"]
+                  and [x.get("files") for x in e11.get("repairs") or []] == [["M11_20260911_001/video.mp4"]],
+                  f"T8 the ledger records the repair ({(e11.get('verified') or {}).get('repaired')})")
+            f11 = folder("M11/M11_20260911")
+            check(f11["status"] == "green" and f11.get("content_checked") and "M11/M11_20260911" in purge_preview(),
+                  f"T8 green and offered for purge after the check ({f11['status']})")
+
+            # T9 — verify_checksum_before_purge: the copy changes AFTER its check (same size, same mtime, so the
+            # folder still shows green); the purge hashes both sides once more and refuses
+            _http("PUT", f"{base}/api/data/settings", {"sync": {"verify_checksum_before_purge": True}})
+            h5c = c11 / "M11_20260911_001.h5"
+            good = (d11 / "M11_20260911_001.h5").read_bytes()
+            corrupt(h5c, at=h5c.stat().st_size // 2, n=16)
+            check(folder("M11/M11_20260911")["status"] == "green", "T9 a copy altered after its check still shows green (size and time agree)")
+            j = purge(["M11/M11_20260911"])
+            r = j["result"]["scratch"]
+            why = " ".join(x.get("reason") or "" for x in r.get("refused") or [])
+            check(not r["purged"] and d11.exists() and v11.exists()
+                  and "content check before deleting" in why and "its content differs" in why,
+                  f"T9 the purge hashes both sides first and refuses ({why})")
+            f11 = folder("M11/M11_20260911")
+            check("verified" not in ledger()["scratch|M11|20260911"] and f11["status"] == "red" and f11.get("content_unchecked"),
+                  f"T9 the passed check is dropped, the folder is red again ({f11['status']})")
+            j = sync_now(["M11/M11_20260911"])
+            check(j["result"]["scratch"]["synced"] == ["M11/M11_20260911"] and h5c.read_bytes() == good,
+                  f"T9 Sync Now fetched the file again ({j['result']['scratch']})")
+            inv()
+            j = purge(["M11/M11_20260911"])
+            check(j["result"]["scratch"]["purged"] == ["M11/M11_20260911"] and not d11.exists() and not v11.exists()
+                  and any("checking content against the Pi before deleting" in l["msg"] for l in j["log"])
+                  and (c11 / "video.mp4").exists(),
+                  f"T9 with matching content the purge goes through; the controller copy stays ({j['result']['scratch']})")
+
+            # T10 — a file on the Pi changes after the check by less than rsync's --modify-window: the dry run
+            # still calls it copied, the fingerprint does not
+            d12 = pi_data / "M12/M12_20260912/M12_20260912_001"
+            d12.mkdir(parents=True)
+            make_h5(d12 / "M12_20260912_001.h5", True, camera_saved=False)
+            j = sync_now(["M12/M12_20260912"])
+            f12 = folder("M12/M12_20260912")
+            check(j["result"]["scratch"]["synced"] == ["M12/M12_20260912"] and f12["status"] == "green", f"T10 synced and green ({f12['status']})")
+            st12 = (d12 / "M12_20260912_001.h5").stat()
+            os.utime(d12 / "M12_20260912_001.h5", ns=(st12.st_atime_ns, st12.st_mtime_ns + 1_000_000_000))
+            f12 = folder("M12/M12_20260912")
+            check(f12["status"] == "red" and f12.get("content_unchecked") and "changed since the content check" in (f12.get("reason") or ""),
+                  f"T10 an mtime 1 s later on the Pi: nothing to copy for rsync, red by the fingerprint ({f12['status']}: {f12.get('reason')})")
+            check("M12/M12_20260912" not in purge_preview(), "T10 not offered for purge")
+            j = sync_now(["M12/M12_20260912"])
+            f12 = folder("M12/M12_20260912")
+            check(j["result"]["scratch"]["synced"] == ["M12/M12_20260912"] and f12["status"] == "green"
+                  and ledger()["scratch|M12|20260912"]["verified"]["fp"] == f12["fp"],
+                  f"T10 Sync Now checks it again: green, the ledger holds the new fingerprint ({f12['status']})")
+        finally:
+            _http("PUT", f"{base}/api/data/settings", {"sync": {"verify_checksum_before_purge": False}})
+            for subj in ("M11", "M12"):
+                shutil.rmtree(pi_data / subj, ignore_errors=True)
+                shutil.rmtree(pi_video / subj, ignore_errors=True)
 
         # cancel mid-copy: a big folder, cancel quickly, expect a partial and red status
         big = pi_video / "M3/M3_20260903/M3_20260903_001"

@@ -66,7 +66,7 @@ into the env, so a version mismatch breaks `import picamera2`. Create with
 ├── pi_api/api.py                      <- Flask REST API on each Pi, port 5080
 ├── shared/
 │   ├── config.py  stim_generator.py  notify.py
-│   ├── leader_data.py                 <- Pi-side inventory / consolidate / purge for the Data tab (over SSH)
+│   ├── leader_data.py                 <- Pi-side inventory / consolidate / purge / hash / read for the Data tab (over SSH)
 │   └── deploy_manifest.py             <- single deploy file list (Install and Deploy)
 ├── display_calibration/               <- calibration scripts + <rig>/{geometry,intensity}/ + <rig>/warp_map.npz
 ├── shepherd/                          <- Pi-side health monitor
@@ -202,20 +202,37 @@ Several rigs run side by side: each loaded rig is a sub-tab of Setup and Experim
 opens ONE UDP socket and sorts datagrams by the sender's IP (falling back to the `rig` field every
 leader event carries). Pi identity (name / IP / role / user) is edited in the Network tab.
 
-**Data tab** (SSH only, talks to leaders through `shared/leader_data.py` protocol 2, which ships with
+**Data tab** (SSH only, talks to leaders through `shared/leader_data.py` protocol 3, which ships with
 Deploy): a date folder `<mouse>/<mouse>_<date>` is **green** when every tree that holds it (data dir,
-video dir) has nothing left to copy in a strict rsync dry run, **red** when something is pending,
+video dir) has nothing left to copy in a strict rsync dry run and the content of the copy was checked
+against the Pi's files as they are now (next paragraph), **red** when something is pending (files to
+copy, or a complete copy with *content not checked*),
 **missing** when a session recorded `camera_saved: true` but its video is not on the Pi, **grey**
 when the check can't be trusted (a failed dry run, an unmounted `data.video_mount`, a leader that
 needs a Deploy). No nonzero rsync exit counts as clean. A folder with no video folder is normal —
 the camera was unchecked (GO sends `camera_requested`/`camera_saved` in START; the engine records
 them). **Sync Now** copies chosen folders (consolidate + remux raw video on the Pi first, copy only the trees that
 hold the folder, verify against a fresh inventory plus a second dry run, ledger at
-`<data root>/.vrfarm_sync_ledger.json`); **Sync & Poweroff** copies everything not green, then
+`<data root>/.vrfarm_sync_ledger.json`, then the content check); **Sync & Poweroff** copies everything not green, then
 `sudo poweroff`s every Pi of each rig whose folders all verified; **Purge Data** deletes green +
 consolidated folders on the Pi, each tree's copy re-verified right before and named to the Pi with
 `--verified`, which refuses anything else; **Auto purge** runs that same purge after each verified
 sync. Data lands subject-first in one tree for all rigs: `<data root>/<mouse>/<mouse>_<date>/<session_id>/`.
+
+**Content check** (2026-11-13, `controller/sync.py` `content_check`): rsync compares size and mtime and
+reads through the Pi's page cache, so neither proves the bytes. After the copy the leader hashes every
+file from an `O_DIRECT` read (`leader_data hash`, SHA-256), the controller hashes its copy the same way
+(`leader_data.file_digest`), and a copy that differs is fetched again through `leader_data read` (a
+second direct read, accepted only when size + hash equal the first); the copy it replaced is kept under
+`<data root>/.vrfarm_replaced/<folder>/`. The ledger entry then carries `verified` with the leader's
+per-tree fingerprint `fp` (names, sizes, mtime_ns). Green needs `verified.fp` equal to the `fp` in the
+current inventory, so a ledger entry from before the check, or a file touched on the Pi since, is red
+until the next sync, and only green folders can be purged. `sync.verify_checksum_before_purge: true`
+(set on fystyk) makes Purge Data hash both sides once more, without repair, right before deleting.
+Limits: bytes that were already wrong when written on the Pi match; a controller copy altered after its
+check with the same size and mtime stays green until that purge-time hash; a repaired file keeps its
+size and mtime, so the nightly drive upload does not refresh it. Why it exists: the Pi 5 read fault
+under Known issues. Full description: `docs/MULTI_RIG.md` "The content check".
 
 ---
 
@@ -250,6 +267,7 @@ conda activate vrfarm
 python controller/app.py            # the controller UI, localhost:5000 (on macOS: --port 5055 if AirPlay squats 5000)
 python tools/smoke_multirig.py      # two fake rigs end to end (mock Pis)
 python tools/smoke_data.py          # the Data tab against a scratch data tree
+python tools/test_leader_hash.py    # the Data tab's content check, piece by piece
 ```
 Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
 
@@ -269,7 +287,9 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
 - **Every new package or Pi-side file goes through Install / Deploy**: apt packages in the Install
   step (`controller/setup.py`), Pi-side files in `shared/deploy_manifest.py`, controller packages
   in the list above. A leader installed before the multi-rig work needs a Deploy (ships
-  `shared/leader_data.py`) and a re-Install or `sudo apt install rsync`.
+  `shared/leader_data.py`) and a re-Install or `sudo apt install rsync`. A leader last deployed before
+  2026-11-13 (protocol 2) needs a Deploy too: until then its Data-tab card says **Deploy needed**, its
+  folders are grey, and sync and purge are refused.
 - **shepherd's "pi_api not responding" has a measured grace period.** Deploy and Restart API time
   each pi_api restart (`controller/pi_restart.py`) and write the outage ×1.5 (5–60 s) to
   `~/rig/shepherd/api_grace.json` on the leader through `/api/shepherd_grace`; shepherd alerts only
@@ -328,10 +348,27 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
   its share of the blocks: `ASD110_20261112_001` (3 blocks of 50 over `[80, -80]`) ran 100 trials at +80
   and 50 at −80. The Deploy log prints `Trials per location …` for every plan. Checks:
   `tools/test_trial_order.py`.
+- **Pi 5 page-cache read fault (found 2026-11-12, gone with the kernel).** On `6.18.34+rpt-rpi-2712` the
+  morbier and pecorino leaders returned wrong bytes from buffered reads once the page cache had to
+  recycle pages: each damaged spot starts on a 16 KiB page boundary, is at most ~2.6 KiB long and holds
+  bytes of another file. The disk and every `O_DIRECT` read were right, a second read was right again,
+  and the kernel log shows nothing. rsync reads buffered, so a copy made then can be wrong and still
+  verify by size, mtime and `--checksum`. Read test on fystyk, only with no session on that rig:
+  `ssh vruser@<ip> 'python3 - <GB> 1200' < ~/pi_read_test/readtest.py` — morbier 75 of 102 files wrong,
+  pecorino 196 of 1600 (186 after a plain reboot); on `6.18.39+rpt-rpi-2712`, the kernel cheddar already
+  ran, 0 in three runs each (installed 2026-11-12: `sudo apt-get install --no-install-recommends
+  linux-image-6.18.39+rpt-rpi-2712 linux-image-6.18.39+rpt-rpi-v8`, reboot). The followers (Pi 4) read
+  correctly on either kernel. A new Pi 5 from the same image comes with the old kernel: run the read
+  test before its first session. The kernel meta packages still name 6.18.34 and `apt upgrade` would
+  bring a newer, untested kernel (6.18.60 on 2026-11-12): rerun the test after any kernel change. The
+  Data tab's content check (above) no longer trusts a buffered read on any kernel. Rollback recipe:
+  `docs/MULTI_RIG.md` "The Pi 5 kernel".
 - Leader is on a small SD card — reclaim with `conda clean -a -y` / `pip cache purge`.
 - Pis are firewall-gated off the institute WiFi. To install packages, run a proxy on the
   Controller (`python -m proxy --hostname 192.168.10.1 --port 8899`) and set
-  `HTTPS_PROXY=http://192.168.10.1:8899` on the Pi.
+  `HTTPS_PROXY=http://192.168.10.1:8899` on the Pi. (2026-11-12: the morbier and pecorino leaders
+  installed straight from the apt mirrors over WiFi, no proxy, and `proxy.py` is not in the `vrfarm`
+  env on fystyk — `pip install proxy.py` first if a Pi is gated again.)
 - **Never `netplan apply` or `netplan try` on fystyk.** Both restart NetworkManager, disconnect
   WiFi and flush addresses (observed: WiFi dropped ~4.5 s and rejoined a different SSID), and
   `try`'s auto-revert leaves the edited YAML on disk. Apply rig-link changes surgically — only files

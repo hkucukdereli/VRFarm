@@ -6,14 +6,15 @@ The Data tab's engine. Talks to leader Pis over SSH only:
   inventory   — run shared/leader_data.py on the leader (which date folders sit in which tree,
                 consolidated or not, recorded video that is missing, is the engine running, disk),
                 then an rsync DRY RUN per tree to give each folder a status: green (nothing left
-                to copy), red (something pending), missing (a session's recorded video is not on
-                the Pi) or grey (the check itself can't be trusted).
+                to copy AND the copy's content was checked against the Pi's files as they are
+                now), red (something pending, or the content not checked), missing (a session's
+                recorded video is not on the Pi) or grey (the check itself can't be trusted).
   sync        — per date folder: consolidate what needs it, refuse cross-rig session-id
                 collisions, rsync the trees that hold the folder into the one data root with live
                 progress, verify against a fresh inventory and a second dry run, write the ledger,
-                and (auto-purge) purge it.
-  purge       — delete a folder on the Pi tree by tree, each copy re-verified clean moments
-                before; the Pi refuses any tree the controller did not name as verified.
+                check the content (below), and (auto-purge) purge it.
+  purge       — delete a folder on the Pi tree by tree, each copy content-checked and re-verified
+                clean moments before; the Pi refuses any tree the controller did not name as verified.
   poweroff    — `sudo poweroff` on every follower, then the leader, and wait for port 22 to close.
 
 Copying uses -rlt (files, links, times), NOT -a: owner/group can never match between the Pi
@@ -22,12 +23,26 @@ user and the controller user, so an -a dry run would never come back clean.
 No nonzero rsync exit counts as clean: exit 23 is also what an unreadable subdirectory gives, and
 its files would otherwise look copied. Which trees a folder is in (a session recorded with the
 camera unchecked has no video folder) comes from the inventory, never from rsync's error text.
+
+Content check (leader_data protocol 3, 2026-11). rsync calls a file copied when size and mtime
+agree, and its sender reads through the leader's page cache — which on the Pi 5 kernel 6.18.34
+handed out wrong bytes once memory had filled (morbier, pecorino; found 2026-11-12). A copy made
+then holds wrong bytes and still passes every dry run, `-c` included. So after the copy the leader
+hashes each file from a direct read of its disk (`leader_data hash`, O_DIRECT), the controller
+hashes its own copy the same way, and a copy that differs is fetched again through a direct read
+(`leader_data read`) — the copy it replaces is kept under <data root>/.vrfarm_replaced/. The
+ledger entry then carries `verified` with the leader's fingerprint of the folder (names, sizes,
+mtimes); a folder is green only while the inventory still reports that fingerprint, and only a
+green folder can be purged.
 """
 from __future__ import annotations
+import collections
+import hashlib
 import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -38,14 +53,15 @@ from pathlib import Path
 
 from controller import settings
 from controller.registry import registry, RigState
-from controller.ssh import target as ssh_target, is_local, ssh_result, ssh_ok, q
+from controller.ssh import target as ssh_target, is_local, ssh_result, ssh_ok, ssh_popen, q
 from controller.jobs import Job
+from shared import leader_data
 
 ROOT = settings.ROOT
 FOLDER_RE = re.compile(r"^([A-Za-z0-9-]+)/\1_(\d{8})(?:/|$)")
 FOLDER_KEY_RE = re.compile(r"^([A-Za-z0-9-]+)/\1_(\d{8})$")      # a whole folder key, nothing after it
 LEDGER_NAME = ".vrfarm_sync_ledger.json"
-LEADER_DATA_PROTO = 2       # the shared/leader_data.py protocol this controller needs on a leader
+LEADER_DATA_PROTO = 3       # the shared/leader_data.py protocol this controller needs on a leader
 DEPLOY_NEEDED = "leader_data.py on the leader is out of date — Deploy this rig"
 SSH_E = "ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new"
 _PROGRESS_RE = re.compile(r"^\s*([\d,]+)\s+(\d{1,3})%\s+(\S+/s)\s+(\d+:\d+:\d+)")
@@ -54,6 +70,16 @@ FILE_LEVEL_RC = (23, 24)    # rsync: some files failed / vanished — per file, 
 # copied, and never what makes a folder red.
 TEMP_EXCLUDES = ["--exclude=*.part", "--exclude=*.consolidating"]
 SEVERITY = {"green": 0, "red": 1, "missing": 2, "grey": 3}
+_HASH_PROGRESS_RE = re.compile(r"^P (\d+) (\d+)\s*$")
+CONTENT_STALL_S = 300       # a `hash` on the leader that stays silent this long is given up on
+REPLACED_DIR = ".vrfarm_replaced"       # under the data root: the copies a content check replaced
+CONTENT_UNCHECKED = "copied, but its content has not been checked against the Pi yet — Sync Now checks it"
+CONTENT_STALE = "its files on the Pi changed since the content check — Sync Now checks them again"
+CONTENT_NO_FP = "its files on the Pi could not be listed for the content check"
+
+
+class _Cancelled(Exception):
+    """Raised inside a read loop when the job is cancelled."""
 
 
 # ── leader access ──
@@ -65,7 +91,7 @@ def leader_cmd(rs: RigState, *args) -> tuple[str, str]:
     tgt = ssh_target(leader)
     argstr = " ".join(q(a) for a in args)
     if is_local(tgt):
-        cmd = f"cd {q(ROOT)} && {q(sys.executable)} -m shared.leader_data {argstr}"
+        cmd = f"cd {q(ROOT)} && exec {q(sys.executable)} -m shared.leader_data {argstr}"
     else:
         cmd = ("source ~/miniforge3/etc/profile.d/conda.sh && conda activate rig && cd ~/rig && "
                f"python -m shared.leader_data {argstr}")
@@ -112,7 +138,8 @@ def leader_data_args(rs: RigState) -> list[str]:
 
 
 def proto_outdated(inv: dict) -> bool:
-    """Replies from a leader_data.py older than protocol 2 carry no `proto`."""
+    """Is the leader's leader_data.py older than this controller needs (protocol 3: `hash`, `read`
+    and the inventory's `fp`)? Replies from before protocol 2 carry no `proto` at all."""
     try:
         return int(inv.get("proto") or 1) < LEADER_DATA_PROTO
     except (TypeError, ValueError):
@@ -187,10 +214,10 @@ def _bucket(rel: str):
     return f"{m.group(1)}/{m.group(1)}_{m.group(2)}" if m else None
 
 
-def _dry_run(rs: RigState, tree: str, only: str | None = None,
-             checksum: bool = False) -> tuple[int | None, set, str | None]:
+def _dry_run(rs: RigState, tree: str, only: str | None = None) -> tuple[int | None, set, str | None]:
     """rsync dry run of a tree on the leader (or of one date folder in it) against the data root.
     Returns (exit code, or None when rsync could not run; pending folder keys; error or None).
+    It compares names, sizes and mtimes only — content is content_check's job.
 
     One folder is picked with filter rules on the tree root instead of pointing rsync at the
     folder: nothing has to be created under the data root first, and an unreadable sibling folder
@@ -199,7 +226,7 @@ def _dry_run(rs: RigState, tree: str, only: str | None = None,
         return None, set(), f"not a date folder: {only!r}"
     root = settings.data_root()
     root.mkdir(parents=True, exist_ok=True)
-    args = rsync_base() + ["-rltnc" if checksum else "-rltn", "--itemize-changes", "--out-format=%i|%n",
+    args = rsync_base() + ["-rltn", "--itemize-changes", "--out-format=%i|%n",
                            "--modify-window=1", "--exclude=.rsync-partial/", "--exclude=.DS_Store"] + TEMP_EXCLUDES
     if only is None:
         args.append("--exclude=/lost+found/")
@@ -207,7 +234,7 @@ def _dry_run(rs: RigState, tree: str, only: str | None = None,
         args += [f"--include=/{only.split('/')[0]}/", f"--include=/{only}/***", "--exclude=*"]
     args += [remote_path(rs, tree), str(root) + "/"]
     try:
-        r = subprocess.run(args, capture_output=True, text=True, timeout=7200 if checksum else 600)
+        r = subprocess.run(args, capture_output=True, text=True, timeout=600)
     except Exception as e:
         return None, set(), str(e)
     if r.returncode != 0:
@@ -256,18 +283,21 @@ def folder_status(rs: RigState, inv: dict) -> dict:
     """Status of every folder in the inventory, the worst finding winning (grey > missing > red >
     green): {status: {key: ...}, reasons: {key: why or None}, errors: [...], proto_outdated}.
 
-      green    every tree that holds the folder has nothing left to copy, and no session that
-               recorded camera_saved: true lacks its video. A folder with no video copy is green
-               when its sessions were not saving video (or predate the flag).
-      red      something is still pending
+      green    every tree that holds the folder has nothing left to copy, the content of the copy
+               was checked against the Pi's files as they are now (content_state), and no session
+               that recorded camera_saved: true lacks its video. A folder with no video copy is
+               green when its sessions were not saving video (or predate the flag).
+      red      something is still pending, or the copy is complete by size and time but its
+               content is not checked (those keys are also listed in `unchecked`)
       missing  a session's recorded video is not on the Pi
-      grey     can't be trusted: leader_data.py predates protocol 2, a tree is unavailable, or the
-               folder's dry run failed
+      grey     can't be trusted: leader_data.py predates protocol 3, a tree is unavailable, the
+               folder's dry run failed, or its files on the Pi could not be listed
     """
     folders = inv.get("folders", [])
     status = {f["key"]: "green" for f in folders}
     reasons = {k: None for k in status}
     errors = []
+    unchecked = []
 
     def mark(keys, st, why):
         for k in keys:
@@ -275,7 +305,8 @@ def folder_status(rs: RigState, inv: dict) -> dict:
                 status[k], reasons[k] = st, why
 
     def result(outdated=False):
-        return {"status": status, "reasons": reasons, "errors": errors, "proto_outdated": outdated}
+        return {"status": status, "reasons": reasons, "errors": errors, "proto_outdated": outdated,
+                "unchecked": unchecked}
 
     if proto_outdated(inv):
         errors.append(DEPLOY_NEEDED)
@@ -304,6 +335,15 @@ def folder_status(rs: RigState, inv: dict) -> dict:
                 mark([k], "red", f"not fully copied yet ({name} tree)")
             elif v:
                 mark([k], "grey", f"{name} tree: {v[len('error: '):]}")
+    ledger = ledger_load().get("folders", {})
+    for f in folders:
+        why = content_state(ledger.get(ledger_key(rs.name, f["key"])), f)
+        if why == CONTENT_NO_FP:
+            mark([f["key"]], "grey", why)
+        elif why:
+            if status[f["key"]] == "green":
+                unchecked.append(f["key"])
+            mark([f["key"]], "red", why)
     for f in folders:
         if f.get("missing_video"):
             mark([f["key"]], "missing", "video recorded but not on the Pi: " + ", ".join(f["missing_video"]))
@@ -339,6 +379,9 @@ def inventory(rs: RigState) -> dict:
         lk = ledger.get(ledger_key(rs.name, f["key"]))
         entry["last_synced"] = lk.get("last_synced") if lk else None
         entry["purged_at"] = lk.get("purged_at") if lk else None
+        entry["content_unchecked"] = f["key"] in st["unchecked"]
+        entry["content_checked"] = (((lk or {}).get("verified") or {}).get("t")
+                                    if content_state(lk, f) is None else None)
         folders.append(entry)
     card.update({"hostname": inv.get("hostname"), "engine_running": inv.get("engine_running"),
                  "disk_data": inv.get("disk_data"), "disk_video": inv.get("disk_video"),
@@ -379,6 +422,265 @@ def collision(rs: RigState, folder: str, finfo: dict | None = None) -> str | Non
             if v.get("rig") != rs.name and s["id"] in (v.get("sessions") or []):
                 return f"session {s['id']} already synced from rig '{v.get('rig')}'"
     return None
+
+
+# ── content check ──
+
+def content_state(entry: dict | None, f: dict) -> str | None:
+    """Why a folder's copy can't be called content-checked, or None when it can: the ledger entry
+    holds a passed check (`verified`) whose fingerprint of every tree the folder is in is the one
+    the inventory reports now — the Pi's files are still the ones that were hashed against the copy.
+    `f` is the folder's inventory entry."""
+    fp = f.get("fp")
+    if not isinstance(fp, dict) or not fp or any(v is None for v in fp.values()):
+        return CONTENT_NO_FP
+    v = (entry or {}).get("verified")
+    vfp = v.get("fp") if isinstance(v, dict) else None
+    if not isinstance(vfp, dict):
+        return CONTENT_UNCHECKED
+    if any(vfp.get(t) != h for t, h in fp.items()):
+        return CONTENT_STALE
+    return None
+
+
+def _leader_hash(job: Job, rs: RigState, folder: str) -> dict:
+    """Run `leader_data hash` for one date folder: its reply, or {"ok": False, "error": ...}. The
+    leader reads every file off its disk, so this takes as long as the folder is big. Its
+    `P <done> <total>` lines on stderr drive the progress text and a stall timer, and the process
+    is registered with the job, so Cancel ends it."""
+    tgt, cmd = leader_cmd(rs, "hash", *leader_data_args(rs), "--folder", folder)
+    try:
+        p = ssh_popen(tgt, cmd)
+    except OSError as e:
+        return {"ok": False, "error": f"could not start it: {e}"}
+    job.procs[rs.name] = p
+    out, err = [], collections.deque(maxlen=20)
+    last = [time.monotonic()]
+
+    def read_err():
+        for line in p.stderr:
+            last[0] = time.monotonic()
+            m = _HASH_PROGRESS_RE.match(line)
+            if m:
+                pct = min(100, 100 * int(m.group(1)) // max(1, int(m.group(2))))
+                job.set_progress(rs.name, current=f"{folder} — checking content on the Pi ({pct} %)",
+                                 rate=None, eta_s=None)
+            elif line.strip():
+                err.append(line.strip())
+
+    threads = [threading.Thread(target=read_err, daemon=True),
+               threading.Thread(target=lambda: out.append(p.stdout.read()), daemon=True)]
+    for t in threads:
+        t.start()
+    stalled = False
+    try:
+        while p.poll() is None:
+            stalled = time.monotonic() - last[0] > CONTENT_STALL_S
+            if stalled or job.cancel.is_set():
+                p.kill()
+                break
+            time.sleep(0.2)
+        p.wait()
+        for t in threads:
+            t.join(timeout=10)
+    finally:
+        job.procs.pop(rs.name, None)
+    if job.cancel.is_set():
+        return {"ok": False, "error": "cancelled"}
+    if stalled:
+        return {"ok": False, "error": f"no sign of life from the leader for {CONTENT_STALL_S} s"}
+    text = (out[0] if out else "").strip()
+    try:
+        d = json.loads(text.splitlines()[-1])
+    except Exception:
+        return {"ok": False, "error": " | ".join(err)[-400:] or text[-400:] or f"exit {p.returncode}"}
+    return d if isinstance(d, dict) else {"ok": False, "error": "unexpected reply"}
+
+
+def _copy_differs(path: Path, size: int, digest: str, tick) -> tuple[str | None, bool]:
+    """(how the copy at `path` differs from a file of this size and SHA-256 — None when it does
+    not; whether it was read direct). The copy is read the way the leader reads its own files
+    (leader_data.file_digest: O_DIRECT where the filesystem allows), so the hash is of what is on
+    this disk, not of what the page cache kept from the copy. An unreadable copy raises OSError."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return "missing under the data root", True
+    if not stat.S_ISREG(st.st_mode):
+        return "not a regular file under the data root", True
+    if st.st_size != size:
+        return f"{st.st_size} bytes under the data root, {size} on the Pi", True
+    got, n, direct = leader_data.file_digest(path, tick=tick)
+    if n != size or got != digest:
+        return "its content differs from the Pi's", direct
+    return None, direct
+
+
+def _fetch_file(job: Job, rs: RigState, tree: str, folder: str, rel: str, dest: Path,
+                size: int, mtime_ns: int, digest: str) -> str | None:
+    """Replace one file under the data root with a fresh copy that the leader reads from its disk
+    with O_DIRECT (`leader_data read`). The stream is hashed as it arrives and is put in place only
+    when it has the size and the SHA-256 the leader reported from its first direct read — two direct
+    reads that agree. It gets the Pi's mtime (so rsync still sees it as copied) and the copy it
+    replaces is kept under <data root>/.vrfarm_replaced/<folder>/. Returns None, or why nothing was
+    replaced ("cancelled" when the job was)."""
+    tgt, cmd = leader_cmd(rs, "read", *leader_data_args(rs), "--tree", tree, "--folder", folder, "--file", rel)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".fetch.", suffix=".part", dir=str(dest.parent))
+    p = None
+    try:
+        p = ssh_popen(tgt, cmd, text=False)
+        job.procs[rs.name] = p
+        err = []
+        err_t = threading.Thread(target=lambda: err.extend(p.stderr.read().decode(errors="replace").splitlines()[-20:]),
+                                 daemon=True)
+        err_t.start()
+        h, n = hashlib.new(leader_data.HASH_ALGO), 0
+        with os.fdopen(fd, "wb") as f:
+            fd = None
+            while True:
+                chunk = p.stdout.read(1 << 20)
+                if not chunk:
+                    break
+                h.update(chunk)
+                f.write(chunk)
+                n += len(chunk)
+            f.flush()
+            os.fsync(f.fileno())
+        rc = p.wait()
+        err_t.join(timeout=5)
+        if job.cancel.is_set():
+            return "cancelled"
+        if rc != 0:
+            return f"the leader could not send it (exit {rc}): {' | '.join(err)[-300:]}"
+        if n != size or h.hexdigest() != digest:
+            return "two direct reads of it on the Pi do not agree — nothing replaced"
+        try:
+            old = os.lstat(dest)
+        except FileNotFoundError:
+            old = None
+        os.chmod(tmp, stat.S_IMODE(old.st_mode) if (old and stat.S_ISREG(old.st_mode)) else 0o644)
+        os.utime(tmp, ns=(mtime_ns, mtime_ns))
+        if old is not None:
+            kept = settings.data_root() / REPLACED_DIR / folder / f"{rel}.{time.strftime('%Y%m%d-%H%M%S')}"
+            kept.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(dest, kept)
+            except OSError:
+                os.replace(dest, kept)
+        os.replace(tmp, dest)
+        tmp = None
+        return None
+    except OSError as e:
+        return f"could not replace it: {e}"
+    finally:
+        job.procs.pop(rs.name, None)
+        if fd is not None:
+            os.close(fd)
+        if tmp is not None and os.path.exists(tmp):
+            os.unlink(tmp)
+        if p is not None and p.poll() is None:
+            p.kill()
+            p.wait()
+
+
+def content_check(job: Job, rs: RigState, folder: str, finfo: dict,
+                  repair: bool = True) -> tuple[dict | None, str | None, bool]:
+    """Compare the content of every file of a date folder on the leader with its copy under the
+    data root. Returns (record for the ledger, None, False) when all of it matches, else
+    (None, why, differs) — `differs` is True only when a copy really holds other bytes, False when
+    the check could not be made (leader unreachable, cancelled, the folder changed meanwhile).
+
+    This is the one check of the bytes themselves; everything rsync says rests on size and mtime
+    and on reads through the leader's page cache (module docstring). The leader hashes each file
+    from a direct read of its disk, the controller hashes its copy from a direct read of its own.
+    With repair=True a copy that differs is fetched again (_fetch_file) and re-read from disk; with
+    repair=False (the look before a purge) the first difference ends the check.
+
+    `finfo` is the folder's inventory entry. Its `fp` must be the fingerprint of what the leader
+    then hashes, so a folder that changes between the inventory and the hash is never called
+    checked — and that same `fp` is what the record carries for content_state."""
+    t0 = time.time()
+    fp = finfo.get("fp")
+    if not isinstance(fp, dict) or not fp or any(v is None for v in fp.values()):
+        return None, CONTENT_NO_FP, False
+    reply = _leader_hash(job, rs, folder)
+    if job.cancel.is_set():
+        return None, "cancelled", False
+    fr = (reply.get("folders") or {}).get(folder)
+    if not isinstance(fr, dict):
+        return None, f"the leader could not hash it: {reply.get('error') or 'no reply for this folder'}", False
+    if not fr.get("ok"):
+        return None, "the leader could not hash it: " + ("; ".join(fr.get("errors") or [])[-300:] or "unknown error"), False
+    if reply.get("algo") != leader_data.HASH_ALGO:
+        return None, f"the leader hashes with {reply.get('algo')}, this controller with {leader_data.HASH_ALGO} — Deploy this rig", False
+    trees = fr.get("trees") or {}
+    if {t: v.get("fp") for t, v in trees.items()} != fp:
+        return None, "its files on the Pi changed during the content check — sync it again", False
+
+    local = settings.data_root() / folder
+    total = sum(int(v.get("bytes") or 0) for v in trees.values())
+    done, last = 0, [0.0]
+
+    def tick(n):
+        nonlocal done
+        if job.cancel.is_set():
+            raise _Cancelled()
+        done += n
+        now = time.monotonic()
+        if now - last[0] >= 0.5:
+            last[0] = now
+            job.set_progress(rs.name, current=f"{folder} — checking content here ({min(100, 100 * done // max(1, total))} %)",
+                             rate=None, eta_s=None)
+
+    n_files, n_bytes, repaired, direct_here, seen = 0, 0, [], True, set()
+    try:
+        for tree in ("data", "video"):
+            t = trees.get(tree)
+            if t is None:
+                continue
+            for rel, target in t.get("links") or []:
+                try:
+                    same = os.readlink(local / rel) == target
+                except OSError:
+                    same = False
+                if not same:
+                    return None, f"{rel}: the link under the data root is not the Pi's", True
+            for rel, size, mtime_ns, digest in t.get("files") or []:
+                if rel in seen:
+                    return None, f"{rel} is in both the data and the video tree on the Pi", False
+                seen.add(rel)
+                why, direct = _copy_differs(local / rel, size, digest, tick)
+                if why and not repair:
+                    return None, f"{rel}: {why}", True
+                if why:
+                    job.say(rs.name, f"{folder}: {rel}: {why} — fetching it again with a direct read", "warning")
+                    err = _fetch_file(job, rs, tree, folder, rel, local / rel, size, mtime_ns, digest)
+                    if job.cancel.is_set():
+                        return None, "cancelled", False
+                    if err:
+                        return None, f"{rel}: {why}; {err}", True
+                    why, direct = _copy_differs(local / rel, size, digest, tick)
+                    if why:
+                        return None, f"{rel}: still wrong after fetching it again ({why})", True
+                    repaired.append(rel)
+                    job.say(rs.name, f"{folder}: {rel}: replaced with the Pi's bytes; the copy it replaced is kept "
+                                     f"under {REPLACED_DIR}/{folder}/", "warning")
+                direct_here = direct_here and direct
+                n_files += 1
+                n_bytes += size
+    except _Cancelled:
+        return None, "cancelled", False
+    except OSError as e:
+        return None, f"could not read the copy under the data root: {e}", False
+    finally:
+        job.set_progress(rs.name, current=folder)
+    rec = {"t": time.time(), "algo": leader_data.HASH_ALGO, "fp": dict(fp), "files": n_files, "bytes": n_bytes,
+           "direct": {"pi": all(bool(v.get("direct")) for v in trees.values()), "controller": direct_here},
+           "seconds": round(time.time() - t0, 1)}
+    if repaired:
+        rec["repaired"] = repaired
+    return rec, None, False
 
 
 # ── copying ──
@@ -425,8 +727,9 @@ def _rsync_folder(job: Job, rs: RigState, tree: str, folder: str, bytes_total: i
 
 
 def sync_folder(job: Job, rs: RigState, folder: str, bytes_before: int, rig_total: int) -> bool:
-    """Consolidate, guard, copy the trees that hold the folder, verify, ledger, (auto-)purge.
-    Decisions come from fresh inventories of this one folder, not from the card. True on success."""
+    """Consolidate, guard, copy the trees that hold the folder, verify, ledger, content check,
+    (auto-)purge. Decisions come from fresh inventories of this one folder, not from the card.
+    True on success."""
     leader_dir, video_dir = data_dirs(rs)
     res = job.result[rs.name]
 
@@ -539,7 +842,8 @@ def sync_folder(job: Job, rs: RigState, folder: str, bytes_before: int, rig_tota
     if pinfo.get("missing_video"):
         return fail(f"video expected for {', '.join(pinfo['missing_video'])} but not on the Pi; data copied")
 
-    # 6. ledger
+    # 6. ledger: the copy is complete by size and time. Written before the content check, so the
+    #    collision guard knows these sessions whatever the check then says.
     sessions = [s["id"] for s in pinfo.get("sessions", [])]
     nbytes = int(pinfo.get("bytes_data") or 0) + int(pinfo.get("bytes_video") or 0)
     now = time.time()
@@ -553,27 +857,71 @@ def sync_folder(job: Job, rs: RigState, folder: str, bytes_before: int, rig_tota
                   "trees": {"data": leader_dir, "video": video_dir},
                   "present": {"data": bool(pinfo.get("in_data")), "video": bool(pinfo.get("in_video"))}})
     ledger_update(_upd)
-    rs.data.setdefault("status", {})[folder] = "green"
     rs.data["last_sync_t"] = now
+
+    # 7. content: the bytes themselves, each side read straight from its disk. A copy that differs
+    #    is fetched again; the folder is green only with a passed check in the ledger.
+    job.say(rs.name, f"{folder}: checking content against the Pi")
+    rec, why, differs = content_check(job, rs, folder, pinfo, repair=True)
+    if differs:
+        _forget_content_check(rs, folder)
+    if job.cancel.is_set():
+        return False
+    if why:
+        return fail(f"content check: {why}")
+    if rec.get("repaired"):
+        for name, tree, _n in trees:
+            pend, err = pending_folders(rs, tree, only=folder)
+            if err or pend:
+                return fail(f"verification failed on the {name} tree after fetching files again: "
+                            f"{err or 'still pending'}")
+
+    def _checked(d):
+        e = d["folders"].get(ledger_key(rs.name, folder))
+        if e is not None:
+            e["verified"] = rec
+            e["last_verified"] = rec["t"]
+            if rec.get("repaired"):
+                e.setdefault("repairs", []).append({"t": rec["t"], "files": rec["repaired"]})
+    ledger_update(_checked)
+    rs.data.setdefault("status", {})[folder] = "green"
     res["synced"].append(folder)
-    job.say(rs.name, f"{folder}: synced and verified ({' + '.join(t[0] for t in trees)}, {nbytes / 1e6:.1f} MB)")
+    job.say(rs.name, f"{folder}: synced and verified ({' + '.join(t[0] for t in trees)}, {nbytes / 1e6:.1f} MB; "
+                     f"content of {rec['files']} file(s) checked in {rec['seconds']:.0f} s"
+                     + (f", {len(rec['repaired'])} fetched again" if rec.get("repaired") else "") + ")")
     unstarted = [s["id"] for s in pinfo.get("sessions", [])
                  if s.get("camera_requested") is True and s.get("camera_saved") is False]
     if unstarted:
         job.say(rs.name, f"{folder}: note — the camera was checked but never started recording for "
                          f"{', '.join(unstarted)}; no video was expected", "warning")
 
-    # 7. auto-purge: the full purge path, re-verified from scratch
+    # 8. auto-purge: the full purge path, re-verified from scratch — except the hashing, done a
+    #    moment ago
     if job.params.get("auto_purge"):
-        purge_folders(job, rs, [folder])
+        purge_folders(job, rs, [folder], checked=(folder,))
     return True
 
 
-def purge_folders(job: Job, rs: RigState, folders: list) -> list:
+def _forget_content_check(rs: RigState, folder: str):
+    """A copy turned out to hold other bytes than the Pi's file: drop the folder's passed check
+    from the ledger, so it shows red until a Sync Now has fetched the file again."""
+    def _clear(d):
+        e = d["folders"].get(ledger_key(rs.name, folder))
+        if e is not None:
+            e.pop("verified", None)
+    ledger_update(_clear)
+    rs.data.get("status", {}).pop(folder, None)
+    rs.data["inventory_t"] = 0
+
+
+def purge_folders(job: Job, rs: RigState, folders: list, checked=()) -> list:
     """Delete date folders on the Pi, tree by tree, and only copies that re-verified moments ago.
-    Everything is decided from a fresh inventory, never from the card the page showed: each tree
-    holding the folder must pass a strict dry run (and the checksum pass, when the setting asks),
-    and the Pi is told exactly which trees were verified — it refuses the rest. Returns the purged
+    Everything is decided from a fresh inventory, never from the card the page showed: the ledger
+    must hold a passed content check of the folder as it is on the Pi now (content_state), each
+    tree holding it must pass a strict dry run, and — when `verify_checksum_before_purge` is on —
+    both sides are hashed once more (content_check without repair; skipped for the folders in
+    `checked`, which the caller content-checked a moment ago). The Pi is told exactly which trees
+    were verified and refuses the rest. A cancelled purge deletes nothing more. Returns the purged
     folder keys; refusals are logged and collected in the job result's `refused`."""
     res = job.result[rs.name]
     refused = res.setdefault("refused", [])
@@ -609,6 +957,7 @@ def purge_folders(job: Job, rs: RigState, folders: list) -> list:
     leader_dir, video_dir = data_dirs(rs)
     checksum = bool((settings.load().get("sync") or {}).get("verify_checksum_before_purge"))
     on_pi = {f["key"]: f for f in inv.get("folders", [])}
+    ledger = ledger_load().get("folders", {})
     verified = {}
     for folder in folders:
         if job.cancel.is_set():
@@ -623,6 +972,10 @@ def purge_folders(job: Job, rs: RigState, folders: list) -> list:
         if f.get("missing_video"):
             refuse([folder], "video recorded but not on the Pi: " + ", ".join(f["missing_video"]))
             continue
+        why = content_state(ledger.get(ledger_key(rs.name, folder)), f)
+        if why:
+            refuse([folder], why)
+            continue
         trees = ([("data", leader_dir)] if f.get("in_data") else []) + \
                 ([("video", video_dir)] if (f.get("in_video") and video_dir) else [])
         why = None
@@ -631,15 +984,31 @@ def purge_folders(job: Job, rs: RigState, folders: list) -> list:
             if err or pend:
                 why = f"{name} tree: {err or 'not fully copied to the data root'}"
                 break
-            if checksum:
-                _rc, pend, err = _dry_run(rs, tree, only=folder, checksum=True)
-                if err or pend:
-                    why = f"{name} tree: checksum pass " + (f"failed: {err}" if err else "found content that differs from the data root")
-                    break
+        if not why and checksum and trees and folder not in checked:
+            # the bytes once more, right before deleting: rsync's own -c would hash what the Pi's
+            # page cache hands out, which is the read this check exists to distrust
+            job.say(rs.name, f"{folder}: checking content against the Pi before deleting")
+            rec, cwhy, differs = content_check(job, rs, folder, f, repair=False)
+            if job.cancel.is_set():
+                break
+            if differs:
+                _forget_content_check(rs, folder)
+            if cwhy:
+                why = f"content check before deleting: {cwhy}" + (" — Sync Now fetches it again" if differs else "")
+            else:
+                def _stamp(d, k=ledger_key(rs.name, folder), rec=rec):
+                    e = d["folders"].get(k)
+                    if e is not None:
+                        e["verified"] = rec
+                        e["last_verified"] = rec["t"]
+                ledger_update(_stamp)
         if why:
             refuse([folder], why)
         elif trees:
             verified[folder] = [name for name, _tree in trees]
+    if job.cancel.is_set():
+        job.say(rs.name, "cancelled — nothing more is purged", "warning")
+        return []
     if not verified:
         return []
     args = [a for k in verified for a in ("--folder", k)]

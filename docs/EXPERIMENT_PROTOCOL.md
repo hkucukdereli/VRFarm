@@ -241,7 +241,8 @@ The session stays on the Leader. In the **Data** tab, load the rig (or its group
 the end of the day, **Sync & Poweroff**, which copies everything unsynced and then powers off
 every Pi of the selected rigs. Consolidation into one self-contained `<session>.h5` and the remux of
 the raw video into `video.mp4` happen on the Leader before the copy; the copy is verified with a
-second rsync pass.
+second rsync pass and then by content: every file is hashed on the Leader and on the controller, and
+a copy that differs is fetched again. A folder turns green only after that check.
 
 **Destination:** the Data root (`data_root` in `controller/configs/controller.yaml`; else `$VRFARM_DATA_DIR`, else
 `~/VRFarm/data`), the same tree for every rig:

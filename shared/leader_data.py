@@ -9,10 +9,13 @@ the rig conda env (h5py for the format check):
     cd ~/rig && python -m shared.leader_data inventory   --leader-dir ~/data --video-dir /media/vruser/ssd/video [--video-mount /media/vruser/ssd] [--folder S/S_YYYYMMDD ...]
     cd ~/rig && python -m shared.leader_data consolidate --leader-dir ... --video-dir ... [--video-mount ...] [--folder S/S_YYYYMMDD ...]
     cd ~/rig && python -m shared.leader_data purge       --leader-dir ... --video-dir ... [--video-mount ...] --folder S/S_YYYYMMDD ... --verified data:S/S_YYYYMMDD ...
+    cd ~/rig && python -m shared.leader_data hash        --leader-dir ... --video-dir ... [--video-mount ...] --folder S/S_YYYYMMDD ...
+    cd ~/rig && python -m shared.leader_data read        --leader-dir ... --video-dir ... [--video-mount ...] --folder S/S_YYYYMMDD --tree data|video --file <path inside the folder>
     cd ~/rig && python -m shared.leader_data prune-logs  --days 7
 
-Every command prints ONE JSON object on stdout, always carrying `proto` (PROTO below). Folder
-names are always `<subject>/<subject>_<date>` ("date folders").
+Every command prints ONE JSON object on stdout, always carrying `proto` (PROTO below) — except
+`read`, whose stdout is the file itself. Folder names are always `<subject>/<subject>_<date>`
+("date folders").
 
 Protocol 2 — sessions without video, and a purge that only deletes what was verified:
 - A date folder may exist in the data tree, the video tree, or both. A session recorded with the
@@ -34,24 +37,47 @@ Protocol 2 — sessions without video, and a purge that only deletes what was ve
   `.part`) and summarizes `video_adopted` / `video_remuxed` / `video_errors`. A leader without these
   fields (older deploy) simply reports nothing, and the controller takes no video action for it.
   `n_unconsolidated` is untouched by any of this: a raw video never blocks a purge.
+
+Protocol 3 — the content of a copy is checked, not only its size and time (2026-11):
+- rsync calls a file copied when size and mtime agree, and its sender reads through the page cache.
+  On the Pi 5 kernel 6.18.34 that cache handed out wrong bytes once memory had filled (morbier and
+  pecorino, found 2026-11-12; reads with O_DIRECT were always right, 6.18.39 is clean), so a copy
+  could hold wrong bytes and still verify — rsync's checksum mode included, it hashes what the same
+  cache hands out. `hash` reads every file the rsync copies (same excludes) with O_DIRECT and reports
+  its SHA-256; the controller hashes its own copy the same way and compares. `read` streams one file,
+  again with O_DIRECT: how the controller fetches a file whose copy does not match.
+- The inventory carries `fp` per folder: one hash per tree over the names, sizes and mtimes (ns) of
+  those files. The controller stores it with a passed content check; the same value in a later
+  inventory means the Pi's files are still the ones that were checked.
 """
 from __future__ import annotations
 import argparse
+import errno
+import hashlib
 import json
+import mmap
 import os
 import re
 import shutil
 import socket
+import stat
 import sys
 import time
 from pathlib import Path
 
-PROTO = 2
+PROTO = 3
 FOLDER_RE = re.compile(r"^([A-Za-z0-9-]+)/\1_(\d{8})$")
 ENGINE_MARK = "engine/leader.py"
 VIDEO_NAMES = ("video.mp4", "video.h264")
 RAW_VIDEO_NAMES = ("video.h264", "video.mp4.part")   # not yet remuxed — `consolidate` turns these into video.mp4
 TREES = ("data", "video")
+HASH_ALGO = "sha256"
+READ_BUF = 4 << 20             # direct reads want a buffer that is a multiple of every block and page size
+# What the controller's rsync leaves out of a copy (controller/sync.py: TEMP_EXCLUDES, .DS_Store and
+# rsync's own partial dir) — the content check has to look at the same set of files.
+SKIP_NAMES = (".DS_Store",)
+SKIP_SUFFIXES = (".part", ".consolidating")
+SKIP_DIRS = (".rsync-partial",)
 
 
 def _out(obj):
@@ -219,6 +245,131 @@ def _roots(leader_dir: Path, video_dir: Path | None, video_mount: Path | None) -
     return {"data": data, "video": video}
 
 
+def _skipped(name: str, is_dir: bool) -> bool:
+    return name in SKIP_NAMES or name.endswith(SKIP_SUFFIXES) or (is_dir and name in SKIP_DIRS)
+
+
+def _archive_files(folder) -> tuple[list, list, list]:
+    """Everything under a date folder that the controller's rsync copies (-rl, no -D): regular files
+    as (rel, size, mtime_ns) and symlinks as (rel, target), both sorted by rel, plus the errors met
+    on the way (an unreadable directory, a file that vanished). Links are never followed."""
+    files, links, errors = [], [], []
+    stack = [""]
+    while stack:
+        rel_dir = stack.pop()
+        try:
+            with os.scandir(os.path.join(folder, rel_dir) if rel_dir else folder) as it:
+                entries = list(it)
+        except OSError as e:
+            errors.append(f"{rel_dir or '.'}: {e.strerror or e}")
+            continue
+        for de in entries:
+            rel = f"{rel_dir}/{de.name}" if rel_dir else de.name
+            try:
+                if de.is_symlink():
+                    if not _skipped(de.name, False):
+                        links.append((rel, os.readlink(de.path)))
+                elif de.is_dir(follow_symlinks=False):
+                    if not _skipped(de.name, True):
+                        stack.append(rel)
+                elif de.is_file(follow_symlinks=False) and not _skipped(de.name, False):
+                    st = de.stat(follow_symlinks=False)
+                    files.append((rel, st.st_size, st.st_mtime_ns))
+            except OSError as e:
+                errors.append(f"{rel}: {e.strerror or e}")
+    files.sort()
+    links.sort()
+    return files, links, errors
+
+
+def _fingerprint(files, links) -> str:
+    """One hash over what _archive_files lists. Equal fingerprints = the same files with the same
+    sizes and mtimes; it says nothing about content (that is what `hash` is for)."""
+    h = hashlib.sha256()
+    for rel, size, mtime_ns in files:
+        h.update(f"F\0{rel}\0{size}\0{mtime_ns}\n".encode("utf-8", "surrogateescape"))
+    for rel, target in links:
+        h.update(f"L\0{rel}\0{target}\n".encode("utf-8", "surrogateescape"))
+    return h.hexdigest()
+
+
+def _tree_fp(path):
+    """A date folder's fingerprint in one tree, or None when it could not be listed in full."""
+    files, links, errors = _archive_files(path)
+    return None if errors else _fingerprint(files, links)
+
+
+def read_file(path, sink, direct: bool = True) -> tuple[int, bool]:
+    """Feed a file's bytes to sink(chunk); returns (bytes read, whether the read was direct).
+
+    direct=True reads with O_DIRECT, straight from the device and past the page cache — the cache is
+    what returned wrong bytes on the Pi 5 kernel 6.18.34, and a hash made through it would certify
+    exactly the bytes rsync got. Where a filesystem has no direct I/O (tmpfs on older kernels, some
+    network mounts) the read falls back to a buffered one and the flag says so. The loop stops at
+    the first short read; the caller compares the byte count with the size it expects, so a short
+    read in the middle of a file is an error there and never a wrong hash. A chunk is only valid
+    during the sink call."""
+    flag = getattr(os, "O_DIRECT", 0) if direct else 0
+    if flag:
+        try:
+            fd = os.open(path, os.O_RDONLY | flag)
+        except OSError as e:
+            if e.errno != errno.EINVAL:
+                raise
+            flag = 0
+    if flag:
+        buf = mmap.mmap(-1, READ_BUF)              # page-aligned, which O_DIRECT needs
+        mv = memoryview(buf)
+        total = 0
+        try:
+            with os.fdopen(fd, "rb", buffering=0) as f:
+                while True:
+                    try:
+                        n = f.readinto(mv)
+                    except OSError as e:
+                        if e.errno == errno.EINVAL and total == 0:
+                            flag = 0                # opened, but this filesystem refuses direct reads
+                            break
+                        raise
+                    if not n:
+                        break
+                    total += n
+                    sink(mv[:n])
+                    if n < READ_BUF:
+                        break
+        finally:
+            mv.release()
+            try:
+                buf.close()
+            except BufferError:                     # a chunk is still referenced (a sink that raised)
+                pass
+        if flag:
+            return total, True
+    total = 0
+    with open(path, "rb", buffering=0) as f:
+        while True:
+            chunk = f.read(READ_BUF)
+            if not chunk:
+                break
+            total += len(chunk)
+            sink(chunk)
+    return total, False
+
+
+def file_digest(path, direct: bool = True, tick=None) -> tuple[str, int, bool]:
+    """(SHA-256 hex, bytes read, direct) of a file read through read_file; tick(n) per chunk. The
+    controller hashes its own copies with this same function."""
+    h = hashlib.new(HASH_ALGO)
+
+    def sink(chunk):
+        h.update(chunk)
+        if tick is not None:
+            tick(len(chunk))
+
+    total, was_direct = read_file(path, sink, direct=direct)
+    return h.hexdigest(), total, was_direct
+
+
 def cmd_inventory(a):
     leader_dir, video_dir, video_mount = _dirs(a)
     roots = _roots(leader_dir, video_dir, video_mount)
@@ -288,7 +439,9 @@ def cmd_inventory(a):
              "mtime": mt,
              "n_unconsolidated": sum(1 for s in sessions if s["has_h5"] and s["format_version"] != 2),
              "n_raw_video": sum(1 for s in sessions if s.get("video_raw")),
-             "missing_video": missing}
+             "missing_video": missing,
+             # per tree: the fingerprint of what rsync copies (None: could not be listed in full)
+             "fp": {t: _tree_fp(p) for t, p in (("data", dd), ("video", vd)) if p is not None}}
         if in_video and not in_data:
             f["video_only"] = True
         folders.append(f)
@@ -386,7 +539,7 @@ def cmd_purge(a):
         verified.setdefault(rel, set()).add(tree)
     if not verified:
         _out({"ok": False, "error": "refusing: no --verified trees. The controller that sent this predates "
-                                    f"leader_data protocol {PROTO} — update the controller"})
+                                    "leader_data protocol 2 — update the controller"})
         return 2
     leader_dir, video_dir, video_mount = _dirs(a)
     roots = _roots(leader_dir, video_dir, video_mount)
@@ -442,6 +595,146 @@ def cmd_purge(a):
     return 0
 
 
+def _progress(done: int, total: int):
+    """One `P <bytes done> <bytes total>` line on stderr: progress for the UI and a sign of life for
+    the controller's stall timer. A write that fails means the controller hung up (cancel, a dropped
+    link) — stop reading the disk for nobody."""
+    try:
+        sys.stderr.write(f"P {done} {total}\n")
+        sys.stderr.flush()
+    except OSError:
+        os._exit(1)
+
+
+def cmd_hash(a):
+    """SHA-256 of every file the controller's rsync copies from the named date folders, each read
+    with O_DIRECT (read_file). A stat-only pass first, so progress has a total; then the reads. Per
+    folder and tree the reply carries the fingerprint (the inventory's `fp`), whether every read was
+    direct, and `files` as [rel, size, mtime_ns, sha256]. A file that changes while it is read, or
+    cannot be read, fails its folder (`ok: false`, `errors`), never the whole command. Refused while
+    the engine runs: this reads the whole folder off the disk a session would be writing to."""
+    if engine_running():
+        _out({"ok": False, "error": "engine/leader.py is running"})
+        return 2
+    want = list(dict.fromkeys(a.folder or []))
+    if not want:
+        _out({"ok": False, "error": "hash needs at least one --folder"})
+        return 2
+    leader_dir, video_dir, video_mount = _dirs(a)
+    roots = _roots(leader_dir, video_dir, video_mount)
+    if not roots["data"]["available"]:
+        _out({"ok": False, "error": f"data tree unavailable: {roots['data']['reason']}"})
+        return 2
+    separate = roots["video"]["separate"]
+    if separate and not roots["video"]["available"]:
+        _out({"ok": False, "error": f"video tree unavailable ({roots['video']['reason']})"})
+        return 2
+    tree_roots = {"data": leader_dir}
+    if separate:
+        tree_roots["video"] = video_dir
+
+    plan, paths, total = {}, {}, 0
+    for rel in want:
+        entry = plan[rel] = {"ok": True, "errors": [], "trees": {}}
+        for tree, root in tree_roots.items():
+            p = _safe_folder(root, rel)
+            if p is None:
+                entry["errors"].append(f"{tree}: {rel} is not a date folder inside {root}")
+                continue
+            if not p.is_dir():
+                continue
+            files, links, errors = _archive_files(p)
+            entry["errors"] += [f"{tree}: {e}" for e in errors]
+            entry["trees"][tree] = {"fp": None if errors else _fingerprint(files, links), "direct": True,
+                                    "bytes": 0, "files": [list(f) for f in files],
+                                    "links": [list(ln) for ln in links]}
+            paths[(rel, tree)] = p
+            total += sum(f[1] for f in files)
+
+    done, last = 0, time.monotonic()
+
+    def tick(n):
+        nonlocal done, last
+        done += n
+        now = time.monotonic()
+        if now - last >= 1.0:
+            last = now
+            _progress(done, total)
+
+    _progress(0, total)
+    for rel, entry in plan.items():
+        for tree, t in entry["trees"].items():
+            for f in t["files"]:
+                name, size, mtime_ns = f
+                fpath = os.path.join(paths[(rel, tree)], name)
+                try:
+                    digest, n, was_direct = file_digest(fpath, tick=tick)
+                    st = os.lstat(fpath)
+                except OSError as e:
+                    entry["errors"].append(f"{tree}: {name}: {e.strerror or e}")
+                    continue
+                if n != size or st.st_size != size or st.st_mtime_ns != mtime_ns:
+                    entry["errors"].append(f"{tree}: {name}: changed while it was read")
+                    continue
+                f.append(digest)
+                t["bytes"] += n
+                t["direct"] = t["direct"] and was_direct
+        entry["ok"] = not entry["errors"]
+    _progress(done, total)
+    _out({"ok": all(e["ok"] for e in plan.values()), "algo": HASH_ALGO, "folders": plan})
+    return 0
+
+
+def cmd_read(a):
+    """Stream one file of a date folder to stdout, read with O_DIRECT (read_file) — how the
+    controller fetches a file again when its copy does not match the hash. stdout carries the raw
+    bytes and nothing else, so every refusal goes to stderr with exit code 3, never as JSON. Only
+    a regular file reached without any symlink, inside a date folder of the named tree."""
+    def refuse(msg):
+        sys.stderr.write(f"read: {msg}\n")
+        return 3
+
+    if engine_running():
+        return refuse("engine/leader.py is running")
+    if len(a.folder or []) != 1:
+        return refuse("needs exactly one --folder")
+    folder = a.folder[0]
+    leader_dir, video_dir, video_mount = _dirs(a)
+    roots = _roots(leader_dir, video_dir, video_mount)
+    if a.tree == "data":
+        if not roots["data"]["available"]:
+            return refuse(f"data tree unavailable: {roots['data']['reason']}")
+        root = leader_dir
+    else:
+        if not roots["video"]["separate"]:
+            return refuse("this rig has no separate video tree")
+        if not roots["video"]["available"]:
+            return refuse(f"video tree unavailable ({roots['video']['reason']})")
+        root = video_dir
+    base = _safe_folder(root, folder)
+    if base is None or not base.is_dir():
+        return refuse(f"{folder} is not a date folder inside {root}")
+    rel = a.file
+    if not rel or rel.startswith("/") or any(c in ("", ".", "..") for c in rel.split("/")):
+        return refuse(f"bad --file {rel!r}")
+    p = os.path.join(base, rel)
+    try:
+        st = os.lstat(p)
+    except OSError as e:
+        return refuse(f"{rel}: {e.strerror or e}")
+    if not stat.S_ISREG(st.st_mode) or os.path.realpath(p) != p:
+        return refuse(f"{rel} is not a regular file inside {folder}")
+    out = sys.stdout.buffer
+    try:
+        read_file(p, out.write)
+        out.flush()
+    except BrokenPipeError:
+        os._exit(1)                                 # the controller hung up
+    except OSError as e:
+        return refuse(f"{rel}: {e.strerror or e}")
+    return 0
+
+
 def cmd_prune_logs(a):
     """Delete shepherd logs older than --days, always keeping the newest two files."""
     d = Path(a.log_dir).expanduser()
@@ -465,7 +758,7 @@ def cmd_prune_logs(a):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("inventory", "consolidate", "purge"):
+    for name in ("inventory", "consolidate", "purge", "hash", "read"):
         sp = sub.add_parser(name)
         sp.add_argument("--leader-dir", required=True)
         sp.add_argument("--video-dir", default=None)
@@ -477,14 +770,20 @@ def main(argv=None):
         if name == "purge":
             sp.add_argument("--verified", action="append",
                             help="TREE:<subject>/<subject>_<YYYYMMDD> (TREE = data|video), repeatable")
+        if name == "read":
+            sp.add_argument("--tree", choices=TREES, required=True)
+            sp.add_argument("--file", required=True, help="path of one file inside the date folder")
     sp = sub.add_parser("prune-logs")
     sp.add_argument("--days", type=int, default=7)
     sp.add_argument("--log-dir", default="~/shepherd_logs")
     a = ap.parse_args(argv)
     try:
-        rc = {"inventory": cmd_inventory, "consolidate": cmd_consolidate,
-              "purge": cmd_purge, "prune-logs": cmd_prune_logs}[a.cmd](a)
+        rc = {"inventory": cmd_inventory, "consolidate": cmd_consolidate, "purge": cmd_purge,
+              "hash": cmd_hash, "read": cmd_read, "prune-logs": cmd_prune_logs}[a.cmd](a)
     except Exception as e:
+        if a.cmd == "read":                         # its stdout is the file: never JSON there
+            sys.stderr.write(f"read: {type(e).__name__}: {e}\n")
+            return 3
         _out({"ok": False, "error": f"{type(e).__name__}: {e}"})
         return 1
     return rc or 0

@@ -13,7 +13,9 @@ rsync_path: null              # null -> the vrfarm conda env's rsync (conda-forg
 sync:
   parallel_rigs: 4            # rigs synced at the same time
   bwlimit_mbps: 0             # 0 = unlimited
-  verify_checksum_before_purge: false   # full checksum pass before deleting on the Pi (slow, exact)
+  # every sync already checks content (hash of a direct read on the Pi vs the copy under the data
+  # root); true hashes every file once more right before Purge Data deletes it on the Pi
+  verify_checksum_before_purge: false
   shepherd_logs_keep_days: 7
 
 groups: {}                    # "super rigs": name -> [rig, rig, ...], e.g. roomA: [cheddar, gouda]

@@ -63,8 +63,9 @@ def ssh_merged(tgt: str, cmd: str, timeout: int = 60) -> str:
     return r.stdout
 
 
-def ssh_popen(tgt: str, cmd: str) -> subprocess.Popen:
-    return subprocess.Popen(_argv(tgt, cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+def ssh_popen(tgt: str, cmd: str, text: bool = True) -> subprocess.Popen:
+    """A running command with both pipes open. text=False for a command whose stdout is binary."""
+    return subprocess.Popen(_argv(tgt, cmd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text)
 
 
 def ssh_ok(tgt: str, timeout: int = 8) -> bool:

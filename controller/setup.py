@@ -14,6 +14,8 @@ shared display_calibration/ folder.
 from __future__ import annotations
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -26,6 +28,7 @@ from flask import Blueprint, Response, g, jsonify, request
 
 from shared.config import save_rig_atomic, photodiode_init_payload, opto_init_payload
 from devices.lick_sensor import DEFAULT_DEBOUNCE_MS, debounce_registers, describe_debounce
+from devices.photodiode import TEENSY_PARAMS, check_teensy_params
 from shared.mjpeg_relay import relay
 from controller import settings, calib_paths
 from controller.registry import registry, RigState
@@ -503,7 +506,13 @@ def api_proxy():
             r = requests.get(f"http://{ip}:{port}{endpoint}", timeout=timeout)
         else:
             r = requests.post(f"http://{ip}:{port}{endpoint}", json=payload, timeout=timeout)
-        return jsonify(r.json())
+        try:
+            return jsonify(r.json())
+        except ValueError:
+            # Not JSON: a pi_api that does not know the route answers 404 in HTML (a rig that
+            # needs a Deploy). `status` lets the page say that instead of a parse error.
+            return jsonify({"ok": False, "status": r.status_code,
+                            "error": f"HTTP {r.status_code} from {endpoint}"})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -571,10 +580,14 @@ def _init_one_device(rs: RigState, dev_name, devices, post):
 
 
 def _mk_post(ip, api_port, steps):
+    """post(endpoint, payload, label, timeout) -> (ok, message) for one Pi, logging into `steps`.
+    The Pi's whole last answer stays on `post.last` (None when the call itself failed)."""
     def _post(endpoint, payload, label, timeout=10):
+        _post.last = None
         try:
             r = requests.post(f"http://{ip}:{api_port}{endpoint}", json=payload, timeout=timeout)
             res = r.json()
+            _post.last = res
             ok = res.get("ok", False)
             msg = res.get("message", res.get("error", ""))
             steps.append(f"{label}: {'OK' if ok else 'FAIL'} {msg}")
@@ -582,7 +595,17 @@ def _mk_post(ip, api_port, steps):
         except Exception as e:
             steps.append(f"{label}: FAIL ({e})")
             return False, str(e)
+    _post.last = None
     return _post
+
+
+def _init_extra(dev_name, res) -> dict:
+    """What a device's init answer carries beyond ok / message, for its card. The photodiode says
+    whether it stayed open after a failed flash check (`device_open`: the card's Debug window,
+    Flash Test and Update then still work) and what firmware the Teensy reports (`fw`)."""
+    if dev_name != "photodiode" or not isinstance(res, dict):
+        return {}
+    return {k: res[k] for k in ("device_open", "fw", "verify") if k in res}
 
 
 @bp.route("/init_devices", methods=["POST"])
@@ -598,8 +621,9 @@ def api_init_devices():
         if dev_name in devices and devices[dev_name].get("enabled"):
             ip = dev_to_ip.get(dev_name)
             if ip:
-                ok, msg = _init_one_device(rs, dev_name, devices, _mk_post(ip, api_port, steps))
-                results[dev_name] = {"ok": ok, "message": msg}
+                post = _mk_post(ip, api_port, steps)
+                ok, msg = _init_one_device(rs, dev_name, devices, post)
+                results[dev_name] = {"ok": ok, "message": msg, **_init_extra(dev_name, post.last)}
     all_ok = bool(results) and all(r["ok"] for r in results.values())
     return jsonify({"ok": all_ok, "steps": steps, "results": results})
 
@@ -617,8 +641,10 @@ def api_reinit_device():
     if not ip:
         return jsonify({"ok": False, "error": f"{dev_name} is not assigned to a Pi"}), 400
     steps = []
-    ok, _msg = _init_one_device(rs, dev_name, devices, _mk_post(ip, rs.api_port, steps))
-    return jsonify({"ok": ok, "device": dev_name, "steps": steps})
+    post = _mk_post(ip, rs.api_port, steps)
+    ok, msg = _init_one_device(rs, dev_name, devices, post)
+    return jsonify({"ok": ok, "device": dev_name, "steps": steps, "message": msg,
+                    **_init_extra(dev_name, post.last)})
 
 
 @bp.route("/lick_debounce")
@@ -1086,6 +1112,7 @@ ARDUINO_CLI_URL = "https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_L
 TEENSY_INDEX_URL = "https://www.pjrc.com/teensy/package_teensy_index.json"
 TEENSY_RULES = ROOT / "teensy" / "00-teensy.rules"
 TEENSY_HID_REBOOT = ROOT / "teensy" / "teensy_hid_reboot.py"
+TEENSY_FW_WAIT_S = 8.0      # after a flash: the Teensy re-enumerates, the Pi reopens its port
 TEENSY_STATUS_CMD = ("test -x ~/bin/arduino-cli && echo CLI; "
                      "test -d ~/.arduino15/packages/teensy/hardware/avr && echo CORE; "
                      "command -v teensy_loader_cli >/dev/null && echo LOADER; "
@@ -1138,7 +1165,7 @@ def _install_teensy_toolchain(tgt, steps, status=None):
 
 
 def _default_sketch(rig: str) -> Path:
-    """The sketch Upload flashes when no file is chosen: the newest (by name) sketch folder under
+    """The sketch a rig starts with before one is chosen: the newest (by name) sketch folder under
     teensy/<rig>/ if that rig has its own copies (pins and thresholds differ per rig), else the
     newest shared teensy/<sketch>/<sketch>.ino."""
     for base in (ROOT / "teensy" / rig, ROOT / "teensy"):
@@ -1151,6 +1178,119 @@ def _default_sketch(rig: str) -> Path:
 
 def _photodiode_pi(rs: RigState):
     return next((pi for pi in rs.pis if "photodiode" in pi.get("devices", [])), None)
+
+
+# The sketch's tunables are its `const <type> NAME = value;` lines, named as in TEENSY_PARAMS
+# (devices/photodiode.py — the same names firmware v2_3 reports and takes over serial).
+_TEENSY_LINE = {name: re.compile(r"^([ \t]*const[ \t]+(?:float|uint32_t|unsigned long|int)[ \t]+"
+                                 + name + r"[ \t]*=[ \t]*)([^;\n]+)(;.*)$", re.M)
+                for name in TEENSY_PARAMS}
+_NUMBER = re.compile(r"\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)")
+
+
+def _teensy_fmt(name: str, value) -> str:
+    """A tunable as the sketch spells it: counts plain, volts and fractions with two or three
+    decimals and the f suffix (0.10f, 0.125f)."""
+    if TEENSY_PARAMS[name][0] is int:
+        return str(int(value))
+    text = f"{float(value):.3f}"
+    return (text[:-1] if text.endswith("0") else text) + "f"
+
+
+def _sketch_params(text: str) -> dict:
+    """The tunables a sketch is compiled with, read from its constant lines."""
+    out = {}
+    for name, rx in _TEENSY_LINE.items():
+        m = rx.search(text)
+        num = _NUMBER.match(m.group(2)) if m else None
+        if num:
+            out[name] = TEENSY_PARAMS[name][0](float(num.group(1)))
+    return out
+
+
+def _sketch_with_params(text: str, params: dict):
+    """(text, changes, absent): `params` written into the sketch's constant lines. Only a line
+    whose value changes is rewritten, so a sketch that already holds them stays byte for byte."""
+    have = _sketch_params(text)
+    changes, absent = [], []
+    for name, val in params.items():
+        new = _teensy_fmt(name, val)
+        if name not in have:
+            absent.append(name)
+        elif _teensy_fmt(name, have[name]) != new:
+            text = _TEENSY_LINE[name].sub(lambda m: m.group(1) + new + m.group(3), text, count=1)
+            changes.append(f"{name} {_teensy_fmt(name, have[name]).rstrip('f')} -> {new.rstrip('f')}")
+    return text, changes, absent
+
+
+def _sketch_shown(p: Path) -> str:
+    """A sketch path as the rig YAML and the card hold it: relative to the repo when inside it."""
+    try:
+        return str(p.relative_to(ROOT))
+    except ValueError:
+        return str(p)
+
+
+def _saved_sketch(rs: RigState) -> str:
+    return ((rs.config.get("devices") or {}).get("photodiode") or {}).get("teensy_sketch") or ""
+
+
+def _sketch_file(rs: RigState, raw=None) -> Path:
+    """The sketch to work on: `raw` (what the card holds), else the rig YAML's
+    devices.photodiode.teensy_sketch, else the rig's default. A relative path is relative to
+    the repo."""
+    raw = (raw or "").strip() or _saved_sketch(rs)
+    if not raw:
+        return _default_sketch(rs.name)
+    p = Path(raw).expanduser()
+    p = Path(os.path.normpath(p if p.is_absolute() else ROOT / p))
+    if p.suffix != ".ino":
+        raise RuntimeError(f"not a .ino file: {raw}")
+    return p
+
+
+def _remember_sketch(rs: RigState, shown: str) -> bool:
+    """Store the chosen sketch in the rig YAML (devices.photodiode.teensy_sketch) so the card
+    comes back with it. True when the file was written. Not while a session runs (a running
+    rig's config is never re-read) — the next choice or upload stores it then."""
+    devices = rs.config.get("devices") or {}
+    if rs.phase == "running" or "photodiode" not in devices or devices["photodiode"].get("teensy_sketch") == shown:
+        return False
+    devices["photodiode"]["teensy_sketch"] = shown
+    save_rig_atomic(rs.config, rs.path)
+    registry.reload_config(rs.name)
+    return True
+
+
+def _sketch_info(rs: RigState, raw=None) -> dict:
+    """What the photodiode card shows about a sketch: its path, the tunables it is compiled with,
+    which firmware version it is, and whether the last upload from here was the DEBUG build."""
+    out = {"ok": True, "saved": _saved_sketch(rs), "debug_mode": rs.teensy_debug,
+           "spec": {n: {"type": t.__name__, "min": lo, "max": hi} for n, (t, lo, hi) in TEENSY_PARAMS.items()},
+           "path": (raw or "").strip(), "exists": False, "params": {}, "missing": list(TEENSY_PARAMS),
+           "version": None, "has_debug": False}
+    try:
+        out["default"] = _sketch_shown(_default_sketch(rs.name))
+    except RuntimeError:
+        out["default"] = ""
+    try:
+        p = _sketch_file(rs, raw)
+    except RuntimeError as e:
+        return {**out, "ok": False, "error": str(e)}
+    out["path"] = _sketch_shown(p)
+    if not p.is_file():
+        return {**out, "ok": False, "error": f"no such file: {out['path']}"}
+    try:
+        text = p.read_text(errors="replace")
+    except OSError as e:
+        return {**out, "ok": False, "error": f"cannot read {out['path']}: {e.strerror or e}"}
+    out["exists"] = True
+    out["params"] = _sketch_params(text)
+    out["missing"] = [n for n in TEENSY_PARAMS if n not in out["params"]]
+    m = re.search(r'^\s*#define\s+FW_VERSION\s+"([^"]+)"', text, re.M)
+    out["version"] = m.group(1) if m else None
+    out["has_debug"] = bool(re.search(r"^\s*#define\s+DEBUG\s+\d+", text, re.M))
+    return out
 
 
 @bp.route("/teensy_status")
@@ -1166,35 +1306,160 @@ def api_teensy_status():
         return jsonify({"ok": False, "pi": pd_pi["name"], "error": str(e)})
 
 
+@bp.route("/teensy_sketch", methods=["GET", "POST"])
+def api_teensy_sketch():
+    """The photodiode card's sketch. GET (?path= to look at another one): path, tunables, firmware
+    version, the remembered Debug Mode. POST {path}: choose a sketch — written to the rig YAML at
+    once (devices.photodiode.teensy_sketch), so the card remembers it without Save Rig; the page
+    mirrors it into its own copy of the rig so a later Save Rig keeps it."""
+    rs: RigState = g.rs
+    if request.method == "GET":
+        return jsonify(_sketch_info(rs, request.args.get("path")))
+    info = _sketch_info(rs, (request.json or {}).get("path"))
+    if info["ok"]:
+        info["stored"] = _remember_sketch(rs, info["path"])
+        info["saved"] = _saved_sketch(rs)
+    return jsonify(info)
+
+
+@bp.route("/teensy_browse")
+def api_teensy_browse():
+    """One folder's sub-folders and .ino files, for the card's Browse panel (the browser may sit
+    on another machine, so there is no native file dialog to open). Stays inside the home
+    directory and the repo, and does not list hidden folders; any other path can be typed."""
+    rs: RigState = g.rs
+    roots = [Path.home().resolve(), ROOT.resolve()]
+    raw = (request.args.get("dir") or "").strip()
+    if raw:
+        d = Path(raw).expanduser()
+        d = d if d.is_absolute() else ROOT / d
+    else:
+        try:
+            d = _sketch_file(rs).parent
+        except RuntimeError:
+            d = ROOT / "teensy"
+        d = next((c for c in (d, ROOT / "teensy" / rs.name, ROOT / "teensy", ROOT) if c.is_dir()), ROOT)
+    d = d.resolve()
+    if not any(d == r or r in d.parents for r in roots):
+        return jsonify({"ok": False, "error": "Browse stays inside the home directory — type any other path into the field"}), 403
+    if not d.is_dir():
+        return jsonify({"ok": False, "error": f"not a folder: {d}"}), 400
+    dirs, files = [], []
+    try:
+        for e in sorted(d.iterdir(), key=lambda e: e.name.lower()):
+            if e.name.startswith("."):
+                continue
+            if e.is_dir():
+                dirs.append(e.name)
+            elif e.suffix == ".ino" and e.is_file():
+                files.append(e.name)
+    except OSError as e:
+        return jsonify({"ok": False, "error": f"cannot list {d}: {e.strerror or e}"}), 400
+    return jsonify({"ok": True, "dir": str(d), "parent": None if d in roots else str(d.parent),
+                    "dirs": dirs, "files": files})
+
+
+def _teensy_report(rs: RigState, pi, want_debug: bool, wait_s: float = TEENSY_FW_WAIT_S):
+    """(fw, how) after a flash: what the Teensy says it runs, asked through the photodiode
+    device open on the Pi (pi_api /api/photodiode_fw), waiting while the Teensy re-enumerates
+    and the device reopens its port. how: "ok" (the build just flashed answers), "timeout" (it
+    did not within wait_s; fw = the last answer), "older" (the sketch is from before v2_3 and
+    answers nothing), "closed" (no photodiode open on the Pi — nothing reads the port), "deploy"
+    (that pi_api does not have the route)."""
+    url = f"http://{pi['ip']}:{rs.api_port}/api/photodiode_fw"
+    deadline = time.time() + wait_s
+    while True:
+        try:
+            r = requests.get(url, timeout=5)
+        except Exception:
+            return None, "closed"
+        if r.status_code == 404:
+            return None, "deploy"
+        try:
+            res = r.json()
+        except ValueError:
+            return None, "deploy"
+        if not res.get("open"):
+            return None, "closed"
+        fw = res.get("fw") or {}
+        if fw.get("known") and fw.get("debug") == want_debug:
+            return fw, "ok"
+        if fw.get("serial_open") and not fw.get("known") and fw.get("version"):
+            return fw, "older"
+        if time.time() >= deadline:
+            return fw, "timeout"
+        time.sleep(0.5)
+
+
+def _fw_text(fw: dict) -> str:
+    params = fw.get("params") or {}
+    return (f"{fw.get('version')}, DEBUG={1 if fw.get('debug') else 0}, "
+            + ", ".join(f"{n} {_teensy_fmt(n, params[n]).rstrip('f')}" for n in TEENSY_PARAMS if n in params))
+
+
 @bp.route("/teensy_upload", methods=["POST"])
 def api_teensy_upload():
-    """Compile the photodiode Teensy sketch and flash it on the Pi that owns the photodiode."""
+    """Compile the rig's Teensy sketch and flash it on the Pi that owns the photodiode.
+    Body {path, params, debug}:
+      debug false (the card's Upload): `params` are written into the sketch file first, then it
+        is compiled with DEBUG 0 — the build sessions run on, and the file is the record of it.
+      debug true (the card's Debug): a copy with `params` and DEBUG 1 is compiled; the sketch
+        file is not touched.
+    The answer says which build the Teensy now runs (`debug_mode`) and, when a photodiode is
+    open on the Pi, what the Teensy itself reports (`fw`)."""
     rs: RigState = g.rs
+    if rs.phase == "running":
+        return jsonify({"ok": False, "error": "rig is running a session — its engine reads the Teensy"}), 409
     pd_pi = _photodiode_pi(rs)
     if not pd_pi:
         return jsonify({"ok": False, "error": "No Pi has the photodiode device"}), 400
-    import re as _re
     data = request.json or {}
     debug = bool(data.get("debug"))
-    ino_text = data.get("ino_text")
-    ino_name = data.get("ino_name") or ""
     steps = []
+    src = None
     try:
-        if not ino_text:
-            src = _default_sketch(rs.name)
-            ino_text = src.read_text()
-            ino_name = src.name
-            steps.append(f"No file chosen — using {src.relative_to(ROOT)}")
-        sketch = ino_name[:-4] if ino_name.endswith(".ino") else ino_name
-        if not sketch:
-            raise RuntimeError("cannot derive sketch name from the filename")
-        ino_text, n = _re.subn(r"#define\s+DEBUG\s+\d+", f"#define DEBUG {1 if debug else 0}", ino_text, count=1)
-        steps.append(f"DEBUG set to {1 if debug else 0}" if n else
-                     "WARNING: no '#define DEBUG' line found — uploading as-is")
+        src = _sketch_file(rs, data.get("path"))
+        shown = _sketch_shown(src)
+        if not src.is_file():
+            raise RuntimeError(f"no such file: {shown}")
+        sketch = src.stem
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", sketch):
+            raise RuntimeError(f"sketch name '{sketch}' has characters arduino-cli does not take")
+        ino_text = src.read_text()
+        have = _sketch_params(ino_text)
+        clean, errors = check_teensy_params(data.get("params") or {}, have)
+        if errors:
+            raise RuntimeError("; ".join(errors))
+        # Before anything is written or installed: is there a Teensy to flash at all?
         tgt = ssh_target(pd_pi)
-        st = _install_teensy_toolchain(tgt, steps)            # no-op when everything is there
+        st = _teensy_status(tgt)
         if not st["usb_pids"]:
             raise RuntimeError(f"no Teensy on {pd_pi['name']}'s USB (lsusb shows no 16c0 device)")
+        ino_text, changes, absent = _sketch_with_params(ino_text, clean)
+        if absent:
+            steps.append(f"WARNING: {shown} has no constant line for {', '.join(absent)} — "
+                         "not set (the card's Teensy parameters need the v2_3 sketch)")
+        if debug:
+            steps.append(f"Sketch {shown}" + (f", compiled with {'; '.join(changes)} (file not changed)" if changes else ""))
+        elif changes:
+            # Next to the file and renamed into place: a crash can't leave half a sketch.
+            fd, tmp = tempfile.mkstemp(prefix=f".{sketch}.", suffix=".ino", dir=str(src.parent))
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(ino_text)
+                shutil.copymode(src, tmp)
+                os.replace(tmp, src)
+            except Exception:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+                raise
+            steps.append(f"Wrote into {shown}: {'; '.join(changes)}")
+        else:
+            steps.append(f"Sketch {shown} (already holds the card's parameters)")
+        ino_text, n = re.subn(r"#define\s+DEBUG\s+\d+", f"#define DEBUG {1 if debug else 0}", ino_text, count=1)
+        steps.append(f"DEBUG set to {1 if debug else 0}" if n else
+                     "WARNING: no '#define DEBUG' line found — uploading as-is")
+        st = _install_teensy_toolchain(tgt, steps, st)        # no-op when everything is there
         rdir = f"~/teensy_build/{sketch}"
         ssh(tgt, f"mkdir -p {rdir}")
         with tempfile.NamedTemporaryFile("w", suffix=".ino", delete=False) as f:
@@ -1222,6 +1487,32 @@ def api_teensy_upload():
         steps.append((out.strip().splitlines() or ["Flashed."])[-1])
         if "Booting" not in out and "Programming" not in out:
             raise RuntimeError("teensy_loader_cli did not program the board: " + out.strip()[-300:])
-        return jsonify({"ok": True, "steps": steps})
+        rs.teensy_debug = debug
+        if _remember_sketch(rs, shown):
+            steps.append(f"Rig remembers the sketch (saved to {rs.path.name})")
+        fw, how = _teensy_report(rs, pd_pi, debug)
+        if how == "ok":
+            steps.append("Teensy reports " + _fw_text(fw))
+        elif how == "older":
+            steps.append("WARNING: the Teensy does not answer '?' — this sketch is older than v2_3 "
+                         "(no Debug window, no Update)")
+        elif how == "timeout":
+            steps.append(f"WARNING: the Teensy has not reported the new build within {TEENSY_FW_WAIT_S:.0f} s"
+                         + (f" (last: {_fw_text(fw)})" if fw.get("known") else
+                            f" (serial: {fw.get('serial_error') or 'no answer'})"))
+        elif how == "deploy":
+            steps.append(f"{pd_pi['name']}'s pi_api cannot report the Teensy's firmware yet — Deploy this rig")
+        else:
+            steps.append(f"Photodiode not open on {pd_pi['name']}: the Teensy's own report comes with "
+                         "the next Initialize or Debug")
+        return jsonify({"ok": True, "steps": steps, "debug_mode": debug, "path": shown,
+                        "params": {**have, **{k: v for k, v in clean.items() if k in have}},
+                        "file_params": have if debug else _sketch_params(src.read_text()),
+                        "fw": fw, "fw_how": how})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e), "steps": steps})
+        out = {"ok": False, "error": str(e), "steps": steps, "debug_mode": rs.teensy_debug}
+        try:        # Upload writes the file before it compiles: a failure after that leaves the new values in it
+            out["file_params"] = _sketch_params(src.read_text())
+        except Exception:
+            pass
+        return jsonify(out)

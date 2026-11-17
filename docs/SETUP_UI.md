@@ -234,16 +234,29 @@ the chip actually measured. It lives in the rig YAML (`devices.lick_sensor.debou
 
 The photodiode timestamps sync pulses from the Teensy. The `Sync ...` fields are authored
 here but consumed by the **display** — they control the red patch the projector draws.
-**Live** shows a triggered scope (−2 ms to +14 ms); **Test** additionally tells the
-display Pi to start flashing the patch, so you can confirm the whole optical path in one
-click. Filtering now lives on the Teensy, so there are no debounce sliders.
+Filtering lives on the Teensy, so the card's second and third rows work on its firmware (the
+picture is the mock rig: a real trace is not this square):
 
-**Teensy firmware** (row under the card, usable before the device is initialized): **Browse** a
-local `.ino` or leave it on the newest repo sketch, tick **Debug** for the serial traces, **Upload**.
-The sketch is compiled and flashed on the Pi that owns the photodiode (named in the row), where the
-Teensy is plugged in; the toolchain is installed there first if missing. A fresh Teensy (RawHID) is
-rebooted over HID into its bootloader, so no button press is needed. Details:
-[TEENSY_INSTRUCTIONS.md](TEENSY_INSTRUCTIONS.md).
+- **Teensy sketch** / **Browse** — the rig's `.ino`; the choice is saved in the rig YAML
+  (`devices.photodiode.teensy_sketch`) at once.
+- **Upload** — writes the five Teensy parameters of the row below into the sketch, compiles and
+  flashes the production build on the Pi that owns the photodiode, and turns Debug Mode off.
+- **Debug** — with Debug Mode off it first flashes the DEBUG build (the sketch file is not
+  changed), then opens the live trace: the voltage the Teensy reads, its two thresholds, a yellow
+  triangle where the Teensy raised its output and a green line where the Pi's GPIO saw the pulse.
+  With Debug Mode on it only shows / hides the trace.
+- **Debug Mode** — an indicator of which build the Teensy runs, as the Teensy reports it.
+- **Flash Test** — tells the display Pi to flash the patch until **Stop test**, so the whole
+  optical path can be checked in one click, with or without the trace.
+- **Update** (enabled while the trace is open) — sends the five parameters to the running DEBUG
+  build over serial. They last until the next upload or power cycle; **Upload** makes them permanent.
+
+**Initialize** flashes the patch for about a second and fails the photodiode (red dot) when
+flashes are missed. The device stays open all the same, so Debug, Flash Test and Update work on
+a rig that fails this check — that is what they are for. Sessions run on the production build:
+finish a tuning with **Upload**. The toolchain is installed on the Pi first if missing, and a
+fresh Teensy (RawHID) is rebooted over HID into its bootloader, so no button press is needed.
+Details and how to read the trace: [TEENSY_INSTRUCTIONS.md](TEENSY_INSTRUCTIONS.md).
 
 ### Running Wheel
 

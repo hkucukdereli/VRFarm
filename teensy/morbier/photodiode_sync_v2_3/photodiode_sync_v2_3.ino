@@ -1,7 +1,34 @@
 /*
- * photodiode_sync_v2_2.ino  —  Teensy 4.x photodiode sync-pulse detector   (VERSION v2_2)
+ * photodiode_sync_v2_3.ino  —  Teensy 4.x photodiode sync-pulse detector   (VERSION v2_3)
  *
- * v2_2 replaces v2_1's 100 Hz bare-V stream with PER-PULSE amplitude reports. The old
+ * v2_3 (2026-11-16) adds a serial command channel and a tagged debug stream for the Setup
+ * UI's photodiode card (Debug window, Update button). The detection logic is v2_2's; only
+ * five of its tunables became variables that a DEBUG build can change while it runs.
+ *
+ * Lines the Teensy SENDS — every build:
+ *     P <median_V> <peak_V> <baseline_V> <width_us>   one per accepted pulse (see v2_2 below)
+ *     B <floor_V> <ceil_V>                            once per second
+ *     I v2_3 DEBUG=<0|1> MIN_PULSE_V=<v> START_FRAC=<v> END_FRAC=<v> STEADY_US=<n> HOLDOFF_US=<n>
+ *                                                     at boot, on "?" and after every "S"
+ *     X <text>                                        a refused command
+ *   DEBUG builds add:
+ *     D <t_us> <V> <start_V> <end_V>   every DEBUG_PERIOD_US: the analog input and the two
+ *                                      live thresholds; t_us = micros() of that sample
+ *     E <t_us>                         the moment OUT_PIN went high (an accepted pulse)
+ *
+ * Lines the Teensy ACCEPTS (newline-terminated):
+ *     ?                  answer with the I line
+ *     S <NAME> <value>   DEBUG builds only: set MIN_PULSE_V / START_FRAC / END_FRAC /
+ *                        STEADY_US / HOLDOFF_US in RAM. Gone at the next reboot or upload:
+ *                        the constants below are the stored values, and the Setup UI's
+ *                        Upload button writes them before it compiles.
+ *
+ * A DEBUG build still sends P and B, so the Pi's telemetry, the init check and the heartbeat
+ * diagnosis work the same in both builds. The price of DEBUG is ~130 kB/s of serial traffic.
+ * devices/photodiode.py reads all of this; a parser from before v2_3 skips I / D / E / X.
+ *
+ * ── v2_2 ─────────────────────────────────────────────────────────────────────
+ * v2_2 replaced v2_1's 100 Hz bare-V stream with PER-PULSE amplitude reports. The old
  * stream sampled at random phase while the optical pulses are ~1-2 ms wide, so most
  * samples landed in the dark between pulses and percentile monitoring on the Pi was
  * aliased garbage (bench 2026-08-22: p99 varied 0.12-2.7 V across identical runs).
@@ -24,11 +51,9 @@
  * The Pi-side rules this enables: peak_V >= 3.0 -> "too high / clipping" safety warning;
  * median_V - baseline_V small (approaching MIN_PULSE_V) -> "too low" warning; no P lines
  * while flashes are commanded -> optical path dead; P lines with width ~10 ms -> hum.
- * NOTE: the v2_1/main-branch parser (devices/photodiode.py float(first-field)) skips
- * tagged lines silently — update the parser alongside deploying this firmware.
  *
  * Detection logic (adaptive thresholds, steady filter, hold-off, output pulse) is
- * UNCHANGED from v2_1. DEBUG mode (4-trace Serial Plotter) is unchanged.
+ * UNCHANGED from v2_1.
  *
  * ── ADAPTIVE THRESHOLDS ──────────────────────────────────────────────────────
  * The photodiode baseline drifts. With ADAPTIVE=1 the two Schmitt thresholds RIDE on a
@@ -71,7 +96,7 @@ const float PEAK_RISE_TC_S     = 0.01f;
 const float PEAK_FALL_TC_S     = 2.0f;
 const float START_FRAC  = 0.60f;
 const float END_FRAC    = 0.30f;
-const float MIN_PULSE_V = 0.15f;   // morbier: flashes 0.34 V above floor, black-level red segments 0.07 V
+const float MIN_PULSE_V = 0.10f;   // morbier 2026-11-16, sync_brightness 1.0: flash tops 0.189-0.197 V on a 0.04 V floor, black-level red segments <= 0.093 V; start threshold ~0.14 V sits midway (raw capture ~/pd_bench_20261116)
 
 // ── Filters ──────────────────────────────────────────────────────────────────
 const uint32_t STEADY_US  = 150;
@@ -96,7 +121,7 @@ const uint32_t HOLDOFF_US = 30000;
 const uint32_t OUT_PULSE_US = 5000;
 
 // ── Debug ────────────────────────────────────────────────────────────────────
-#define DEBUG 0                       // 1 = 4-trace Serial Plotter stream; 0 = production (P/B lines)
+#define DEBUG 0                       // 1 = also stream D / E lines and take "S" commands; 0 = production
 const uint32_t DEBUG_PERIOD_US = 200;
 
 // ── v2_2 reporting ───────────────────────────────────────────────────────────
@@ -106,6 +131,16 @@ const int      PULSE_BUF_MAX      = 256;      // samples kept for the median (a 
                                               // a 10 ms hum crossing still fits)
 
 // ── State ────────────────────────────────────────────────────────────────────
+
+// ── v2_3: live tunables ──────────────────────────────────────────────────────
+// They start from the constants above. A DEBUG build changes them in RAM on
+// "S <NAME> <value>"; nothing here is stored — Upload writes the constants.
+#define FW_VERSION "v2_3"
+float    minPulseV = MIN_PULSE_V;
+float    startFrac = START_FRAC;
+float    endFrac   = END_FRAC;
+uint32_t steadyUs  = STEADY_US;
+uint32_t holdoffUs = HOLDOFF_US;
 int      hiCounts, loCounts;
 float    floorCounts = 0;
 float    ceilCounts  = 0;
@@ -143,6 +178,53 @@ static int pulseMedianCounts() {
   return pulseBufN ? pulseBuf[pulseBufN / 2] : 0;
 }
 
+// ── v2_3: serial commands ────────────────────────────────────────────────────
+static void printInfo() {
+  Serial.print("I " FW_VERSION " DEBUG=");  Serial.print(DEBUG);
+  Serial.print(" MIN_PULSE_V=");  Serial.print(minPulseV, 3);
+  Serial.print(" START_FRAC=");   Serial.print(startFrac, 3);
+  Serial.print(" END_FRAC=");     Serial.print(endFrac, 3);
+  Serial.print(" STEADY_US=");    Serial.print(steadyUs);
+  Serial.print(" HOLDOFF_US=");   Serial.println(holdoffUs);
+}
+
+static void runCommand(char *cmd) {
+  if (cmd[0] == '?') { printInfo(); return; }
+  if (cmd[0] != 'S' || cmd[1] != ' ') return;         // anything else is line noise
+#if DEBUG
+  char *name = cmd + 2;
+  char *sp = strchr(name, ' ');
+  if (!sp) { Serial.println("X usage: S <NAME> <value>"); return; }
+  *sp = 0;
+  const float v = atof(sp + 1);
+  bool ok = true;
+  // Ranges only. END_FRAC < START_FRAC is the sender's job (the Pi checks the pair).
+  if      (!strcmp(name, "MIN_PULSE_V")) { ok = (v >= 0.0f && v <= 3.3f);       if (ok) minPulseV = v; }
+  else if (!strcmp(name, "START_FRAC"))  { ok = (v >  0.0f && v <= 1.0f);       if (ok) startFrac = v; }
+  else if (!strcmp(name, "END_FRAC"))    { ok = (v >  0.0f && v <= 1.0f);       if (ok) endFrac   = v; }
+  else if (!strcmp(name, "STEADY_US"))   { ok = (v >= 0.0f && v <= 20000.0f);   if (ok) steadyUs  = (uint32_t)(v + 0.5f); }
+  else if (!strcmp(name, "HOLDOFF_US"))  { ok = (v >= 0.0f && v <= 2000000.0f); if (ok) holdoffUs = (uint32_t)(v + 0.5f); }
+  else { Serial.print("X unknown name ");  Serial.println(name);  return; }
+  if (!ok) { Serial.print("X out of range ");  Serial.println(name); }
+  printInfo();
+#else
+  Serial.println("X S needs a DEBUG build");
+#endif
+}
+
+static char    cmdBuf[48];
+static uint8_t cmdN = 0;
+static void handleSerial() {
+  while (Serial.available()) {
+    const char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (cmdN) { cmdBuf[cmdN] = 0;  runCommand(cmdBuf);  cmdN = 0; }
+    } else if (cmdN < sizeof(cmdBuf) - 1) {
+      cmdBuf[cmdN++] = c;
+    }
+  }
+}
+
 void setup() {
   pinMode(OUT_PIN, OUTPUT);  digitalWriteFast(OUT_PIN, LOW);
   pinMode(LED_PIN, OUTPUT);  digitalWriteFast(LED_PIN, LOW);
@@ -159,11 +241,13 @@ void setup() {
   loCounts = (int)(THRESHOLD_LO_V / ADC_VREF * ((1 << ADC_BITS) - 1));
 
   lastSampleUs = micros();
+  printInfo();
 }
 
 void loop() {
   const uint32_t now = micros();
   const int counts   = analogRead(PD_PIN);
+  if (Serial.available()) handleSerial();
 
   // ── Adaptive tracking (unchanged from v2_1) ─────────────────────────────────
   if (ADAPTIVE) {
@@ -189,10 +273,10 @@ void loop() {
 
     float span = ceilCounts - floorCounts;
     if (span < 0) span = 0;
-    const float minPulse = MIN_PULSE_V / ADC_VREF * ((1 << ADC_BITS) - 1);
-    float startOff = START_FRAC * span;
-    float endOff   = END_FRAC   * span;
-    if (startOff < minPulse) { startOff = minPulse; endOff = minPulse * (END_FRAC / START_FRAC); }
+    const float minPulse = minPulseV / ADC_VREF * ((1 << ADC_BITS) - 1);
+    float startOff = startFrac * span;
+    float endOff   = endFrac   * span;
+    if (startOff < minPulse) { startOff = minPulse; endOff = minPulse * (endFrac / startFrac); }
 
     if (ACTIVE_HIGH) {
       hiCounts = (int)(floorCounts + startOff);
@@ -221,12 +305,12 @@ void loop() {
   }
 
   // ── Filter 1: steady ────────────────────────────────────────────────────────
-  if (hyst != steadyActive && (now - hystChangeUs) >= STEADY_US) {
+  if (hyst != steadyActive && (now - hystChangeUs) >= steadyUs) {
     const bool rising = (hyst && !steadyActive);
     steadyActive = hyst;
 
     // ── Filter 2: hold-off ────────────────────────────────────────────────────
-    if (rising && (now - lastAcceptUs) >= HOLDOFF_US) {
+    if (rising && (now - lastAcceptUs) >= holdoffUs) {
       lastAcceptUs = now;
       pulseCount++;
       outActive = true; outStartUs = now;
@@ -240,20 +324,19 @@ void loop() {
       pulseBuf[pulseBufN++] = (int16_t)counts;
 #if DEBUG
       digitalWriteFast(LED_PIN, HIGH);
+      Serial.print("E ");  Serial.println(now);
 #endif
     }
 
     // v2_2: pulse ended (steady level fell) — emit the per-pulse report.
     if (!rising && pulseTracking) {
       pulseTracking = false;
-#if !DEBUG
       const uint32_t width = now - pulseStartUs;
       Serial.print("P ");
       Serial.print(countsToVolts(pulseMedianCounts()) * DIVIDER, 3);  Serial.print(' ');
       Serial.print(countsToVolts(pulsePeak)           * DIVIDER, 3);  Serial.print(' ');
       Serial.print(countsToVolts(pulseBaseline)       * DIVIDER, 3);  Serial.print(' ');
       Serial.println(width);
-#endif
     }
   }
 
@@ -266,7 +349,6 @@ void loop() {
 #endif
   }
 
-#if !DEBUG
   // ── v2_2: 1 Hz idle/baseline line — covers the out-of-pulse fault class
   //    (amp off, lifted ground, ambient light) without the old aliased 100 Hz stream.
   if (now - lastBaselineUs >= BASELINE_PERIOD_US) {
@@ -275,16 +357,15 @@ void loop() {
     Serial.print(countsToVolts(floorCounts) * DIVIDER, 3);  Serial.print(' ');
     Serial.println(countsToVolts(ceilCounts) * DIVIDER, 3);
   }
-#endif
 
 #if DEBUG
-  // 4-trace Serial Plotter stream (unchanged from v2_1).
+  // v2_3: the tagged debug stream the Setup UI's Debug window draws.
   if (now - lastDebugUs >= DEBUG_PERIOD_US) {
     lastDebugUs = now;
+    Serial.print("D ");  Serial.print(now);  Serial.print(' ');
     Serial.print(countsToVolts(counts)   * DIVIDER, 3);  Serial.print(' ');
     Serial.print(countsToVolts(hiCounts) * DIVIDER, 3);  Serial.print(' ');
-    Serial.print(countsToVolts(loCounts) * DIVIDER, 3);  Serial.print(' ');
-    Serial.println(steadyActive ? (ADC_VREF * DIVIDER) : 0.0f, 3);
+    Serial.println(countsToVolts(loCounts) * DIVIDER, 3);
   }
 #endif
 }

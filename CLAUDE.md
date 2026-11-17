@@ -268,6 +268,7 @@ python controller/app.py            # the controller UI, localhost:5000 (on macO
 python tools/smoke_multirig.py      # two fake rigs end to end (mock Pis)
 python tools/smoke_data.py          # the Data tab against a scratch data tree
 python tools/test_leader_hash.py    # the Data tab's content check, piece by piece
+python tools/test_photodiode_serial.py   # the photodiode's Teensy serial side (firmware v2_3 lines, Debug ring) on a fake port
 ```
 Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
 
@@ -310,7 +311,19 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
   renderer, the Leader's generator and the controller alike. See `display_calibration/README.md`.
 - **One serial reader.** The Teensy's `/dev/ttyACM0` gives its bytes to exactly one process;
   a second reader silently steals them. Release pi_api's devices before bench tools.
-- The Teensy sync output is **pin 16** (scope-verified), analog in is **A1**.
+- The Teensy sync output is **pin 16** (scope-verified), analog in is **A1** — cheddar and the stock
+  sketch; morbier and pecorino use pin 3 and A0 (each rig's copy under `teensy/<rig>/`).
+- **Photodiode card / Teensy firmware v2_3** (Setup tab, 2026-11-17). The sketch path is in the rig
+  YAML (`devices.photodiode.teensy_sketch`). **Upload** writes the card's five tunables (`MIN_PULSE_V`,
+  `START_FRAC`, `END_FRAC`, `STEADY_US`, `HOLDOFF_US`) into that file and flashes the production build;
+  **Debug** flashes a `DEBUG 1` copy (file untouched) and opens a live trace: V from the Teensy's `D`
+  lines plus a line per rising edge on the Pi's sync GPIO; **Update** sends the tunables to the DEBUG
+  build over serial (`S`, RAM only, gone at the next upload or power cycle). Debug Mode is what the
+  Teensy reports (`I` line), not what the page remembers. A failed flash check at Initialize is an init
+  failure (red dot), but the photodiode stays open, so Debug / Flash Test / Update still work. Sessions
+  run on the production build — a DEBUG build streams ~130 kB/s. A leader needs a Deploy (device +
+  pi_api) and an Upload of v2_3 before the Debug window works. Tested against a mock Teensy only; not
+  yet tried on hardware as of 2026-11-17. `docs/TEENSY_INSTRUCTIONS.md`.
 - **Lick double counts (morbier, 2026-10-27):** 16 % of inter-lick intervals were < 20 ms, quantized at
   the ~6 ms poll period — threshold chatter at the edge of a lick, not the mouse (cheddar: 1 %).
   `devices.lick_sensor.debounce_ms` (default 50; Setup → Lick card) is the MPR121 **release** debounce,

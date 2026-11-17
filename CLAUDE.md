@@ -46,7 +46,7 @@ into the env, so a version mismatch breaks `import picamera2`. Create with
 ├── experiments/
 │   └── *.yaml                         <- task/paradigm configs (stimulus/reward/session/adaptive/opto)
 ├── devices/                           <- one file per device type (base.py = Device, DEVICE_REGISTRY)
-│   ├── lick_sensor.py  reward.py  camera.py  photodiode.py  encoder.py  display.py  opto.py
+│   ├── lick_sensor.py  reward.py  camera.py  photodiode.py  encoder.py  display.py  opto.py ir_led.py
 ├── engine/
 │   └── leader.py                      <- Leader Pi main process (imperative trial loop)
 ├── displayd/                          <- KMS display daemon (owns the projector)

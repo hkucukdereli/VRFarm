@@ -154,7 +154,7 @@ def api_install_pi():
                       "conda activate rig && ")
     needs_camera = "camera" in devices
     needs_gpio = any(d in devices for d in ["reward", "photodiode", "calibration_probe", "opto"])
-    needs_i2c = any(d in devices for d in ["lick_sensor", "encoder", "display"])
+    needs_i2c = any(d in devices for d in ["lick_sensor", "encoder", "display", "ir_led"])
 
     try:
         # 1. Directories
@@ -236,6 +236,7 @@ def api_install_pi():
             "photodiode": ["pyserial"],
             "display": [],
             "opto": [],            # lgpio comes with needs_gpio (apt python3-lgpio + env symlink)
+            "ir_led": ["smbus2"],  # MCP4725 DAC on the IRDriver board; I2C only, no GPIO
         }
         for dev in devices:
             packages.update(device_packages.get(dev, []))

@@ -31,6 +31,7 @@ _COMMON = [
     ("devices/calibration_probe.py", "devices/calibration_probe.py"),
     ("devices/encoder.py", "devices/encoder.py"),
     ("devices/opto.py", "devices/opto.py"),               # optogenetic stimulator
+    ("devices/ir_led.py", "devices/ir_led.py"),           # IR illuminator (IRDriver board)
     # Pi API
     ("pi_api/api.py", "pi_api/api.py"),
 ]

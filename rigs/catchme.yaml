@@ -1,9 +1,43 @@
-name: catchme
-# The catchme rig: one Pi 4 leader (rpi-demo0), two cameras, a 6-axis IMU and the IR LED,
-# the two I2C boards on a Seeed Grove Base Hat (Grove-to-Qwiic cables; plug with the Pi off).
 data:
   leader_dir: /home/pi/data
   video_dir: /home/pi/video
+devices:
+  imu:
+    accel_fs_g: 16
+    enabled: true
+    gyro_fs_dps: 2000
+    i2c_address: '0x6B'
+    i2c_bus: 1
+    odr_hz: 120
+    type: lsm6dsv16x
+  ir_led:
+    enabled: true
+    i2c_address: '0x60'
+    i2c_bus: 1
+    intensity_pct: 50
+    type: ir_led
+  naneye:
+    camera_match: vbridge
+    enabled: true
+    fps: 30
+    libcamera_bin: /usr/local/bin/libcamera-vid
+    preview_fps: 10
+    resolution:
+    - 320
+    - 320
+    type: naneye
+    video: true
+  worldcam:
+    enabled: true
+    fps: 30
+    preview_fps: 10
+    resolution:
+    - 1280
+    - 720
+    type: worldcam
+    video: true
+    video_device: /dev/v4l/by-id/usb-MACROSILICON_USB_Video_20200909-video-index0
+name: catchme
 network:
   api_port: 5080
   command_port: 5572
@@ -14,51 +48,10 @@ pis:
   - naneye
   - imu
   - ir_led
-  ip: 192.168.10.103
+  ip: 10.24.54.14
   name: rpi-demo0
   role: leader
   user: pi
-devices:
-  worldcam:
-    type: worldcam
-    enabled: true
-    video: true
-    # MacroSilicon MS210x USB grabber — stable by-id path (== /dev/video1 today),
-    # immune to node renumbering across boots.
-    video_device: /dev/v4l/by-id/usb-MACROSILICON_USB_Video_20200909-video-index0
-    resolution: [1280, 720]
-    fps: 30
-    preview_fps: 10
-  naneye:
-    type: naneye
-    enabled: true
-    video: true
-    # BRING-UP after a power cycle: the vbridge FPGA must be (re)loaded before frames
-    # flow — the bridge MCU must ACK at 0x15 on i2c-1 (i2cdetect -y 1), then:
-    #   python3 ~/Projects/vbridge/cbi-upd.py --fpga -i /dev/i2c-1 -f ~/Projects/ams/naneyem.bit
-    # Enumeration in --list-cameras alone does NOT mean the sensor is streaming.
-    libcamera_bin: /usr/local/bin/libcamera-vid
-    camera_match: vbridge
-    resolution: [320, 320]
-    fps: 30            # sensor does up to 186 — raise after measured_fps proves headroom
-    preview_fps: 10
-  imu:
-    type: lsm6dsv16x
-    enabled: true
-    # SparkFun 6DoF IMU Breakout - LSM6DSV16X (Qwiic) on i2c-1; 0x6B (ADR jumper -> 0x6A)
-    i2c_bus: 1
-    i2c_address: '0x6B'
-    odr_hz: 120        # 15, 30, 60, 120 or 240 (task yaml may override)
-    accel_fs_g: 16     # 2, 4, 8 or 16
-    gyro_fs_dps: 2000  # 125, 250, 500, 1000, 2000 or 4000
-  ir_led:
-    type: ir_led
-    enabled: true
-    # IRDriver rev 3.2 on i2c-1 (Grove-to-Qwiic into a hat I2C port); LED supply 9-12 V on J1.
-    # First Initialize with the LED supply off: init() programs the DAC EEPROM to 0.
-    i2c_bus: 1
-    i2c_address: '0x60'
-    intensity_pct: 50  # % of the LDD's 0.5-2.5 V dimming range (task yaml may override)
 shepherd:
   enabled: false
 slack:

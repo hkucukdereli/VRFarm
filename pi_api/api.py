@@ -10,6 +10,8 @@ and a GENERIC device surface — devices self-register via @register_device
   /api/device_data?name=
 Camera-like devices (anything implementing start_preview/start_recording/
 mjpeg_stream) are driven through the device-name-keyed camera endpoints.
+Devices that override Device.safe_state are put to rest whenever their owner may
+have died uncleanly (engine exit, pi_api start-up and SIGTERM) — see "Safe state".
 """
 
 from __future__ import annotations
@@ -74,6 +76,133 @@ def _is_session_recording(dev) -> bool:
     """A real SESSION recording is writing (not a throwaway preview)."""
     return bool(getattr(dev, "_recording", False)
                 and not getattr(dev, "_is_preview", True))
+
+
+# ── Safe state (Device.safe_state) ──
+# Some hardware keeps doing something after the process that drove it dies — the IR LED's DAC
+# holds its last value, so a SIGKILLed engine leaves the LED lit. Device classes that override
+# Device.safe_state(rig_config) get it applied here whenever their owner may have died
+# uncleanly: after the engine process exits (any way: natural end, crash, the SIGKILL in
+# /api/stop), when pi_api starts (after a crash or restart — KillMode=mixed SIGKILLs the engine
+# along with pi_api — or a warm reboot, which keeps the Pi's 3V3 up), and on pi_api's own
+# SIGTERM (systemd stop at shutdown; the engine is SIGKILLed right after). The configs of those
+# devices are remembered in SAFE_STATE_FILE, so the start-up pass knows them without a rig yaml.
+SAFE_STATE_FILE = RIG_DIR / "safe_state.json"
+_safe_file_lock = threading.Lock()
+
+
+def _has_safe_state(cls) -> bool:
+    _ensure_rig_path()
+    from devices.base import Device
+    return getattr(cls.safe_state, "__func__", None) is not Device.safe_state.__func__
+
+
+def _load_safe_entries() -> dict:
+    """{device name: {type, config}} last remembered, or {} (missing / unreadable file)."""
+    try:
+        d = json.loads(SAFE_STATE_FILE.read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_safe_entries(entries: dict):
+    try:
+        SAFE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = SAFE_STATE_FILE.with_name(SAFE_STATE_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(entries, indent=1))
+        os.replace(tmp, SAFE_STATE_FILE)
+    except OSError as e:
+        print(f"[safe_state] could not write {SAFE_STATE_FILE}: {e}", flush=True)
+
+
+def _remember_safe_entry(name: str, dev_type: str, config: dict, cls):
+    """init_device: remember (or forget) one device's config for the safe-state passes."""
+    with _safe_file_lock:
+        entries = _load_safe_entries()
+        if _has_safe_state(cls):
+            if entries.get(name) == {"type": dev_type, "config": config}:
+                return
+            entries[name] = {"type": dev_type, "config": config}
+        elif entries.pop(name, None) is None:
+            return
+        _save_safe_entries(entries)
+
+
+def _safe_entries_from_rig(rig_path: str) -> dict:
+    """The rig yaml's enabled leader devices whose class declares a safe state — the same
+    selection engine/leader.py makes in init_devices()."""
+    import yaml
+    rig = yaml.safe_load(Path(rig_path).read_text()) or {}
+    leader = next((p for p in rig.get("pis") or [] if p.get("role") == "leader"), {})
+    devices = rig.get("devices") or {}
+    out = {}
+    for name in leader.get("devices") or []:
+        cfg = devices.get(name) or {}
+        if not cfg.get("enabled", True):
+            continue
+        dev_type = cfg.get("type", name)
+        try:
+            if _has_safe_state(_load_device_class(dev_type)):
+                out[name] = {"type": dev_type, "config": cfg}
+        except Exception as e:
+            print(f"[safe_state] {name}: cannot load type '{dev_type}': {e}", flush=True)
+    return out
+
+
+def _apply_safe_states(why: str, skip_held: bool = True):
+    """Run safe_state for every remembered device. skip_held: leave alone the devices pi_api
+    itself holds an instance of (they manage their own state; checked under the device's lock,
+    so a concurrent init_device can't slip in between). The SIGTERM path passes False and takes
+    no locks: pi_api is going down and its instances with it."""
+    for name, entry in _load_safe_entries().items():
+        try:
+            cls = _load_device_class(entry.get("type", name))
+            if not _has_safe_state(cls):
+                continue
+            if skip_held:
+                with _cam_lock(name):
+                    with _devices_lock:
+                        if name in _devices:
+                            continue
+                    cls.safe_state(entry.get("config") or {})
+            else:
+                cls.safe_state(entry.get("config") or {})
+            print(f"[safe_state] {name}: safe state applied ({why})", flush=True)
+        except Exception as e:
+            print(f"[safe_state] {name}: safe state FAILED ({why}): {e}", flush=True)
+
+
+def _foreign_engine_running(proc_root: str = "/proc") -> bool:
+    """Is an engine/leader.py running that is NOT our own child (e.g. started by hand over SSH)?
+    Then a safe-state pass would yank its hardware mid-session, so the start-up and SIGTERM
+    passes skip. Scans /proc from Python — `pgrep -f` would match its own shell."""
+    own = _process.pid if _process is not None and _process.poll() is None else None
+    try:
+        procs = list(Path(proc_root).iterdir())
+    except OSError:
+        return False                          # no /proc (not Linux): nothing to protect
+    for d in procs:
+        if not d.name.isdigit() or int(d.name) in (own, os.getpid()):
+            continue
+        try:
+            argv = (d / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if argv and b"python" in argv[0] and any(a.endswith(b"engine/leader.py") for a in argv[1:]):
+            return True
+    return False
+
+
+def _on_sigterm(signum, frame):
+    """pi_api is being stopped (systemd stop at shutdown, Restart API, Deploy): put safe-state
+    devices to rest, then terminate exactly as the default SIGTERM action would."""
+    try:
+        if not _foreign_engine_running():
+            _apply_safe_states("pi_api stopping", skip_held=False)
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGTERM)
 
 
 @app.route("/api/status")
@@ -283,6 +412,25 @@ def start():
 
     threading.Thread(target=read_output, daemon=True).start()
 
+    # Safe-state watcher: snapshot this rig's safe-state devices (so a pi_api crash mid-session
+    # still knows them at the next start-up), then, whenever this engine exits — however it
+    # exits — put them to rest.
+    proc = _process
+    rig_path = cmd[cmd.index("--rig") + 1] if "--rig" in cmd[:-1] else None
+
+    def watch_engine():
+        if rig_path:
+            try:
+                entries = _safe_entries_from_rig(rig_path)
+                with _safe_file_lock:
+                    _save_safe_entries(entries)
+            except Exception as e:
+                print(f"[safe_state] cannot read rig {rig_path}: {e}", flush=True)
+        proc.wait()
+        _apply_safe_states(f"engine exited with code {proc.returncode}")
+
+    threading.Thread(target=watch_engine, daemon=True).start()
+
     return jsonify({"ok": True, "pid": _process.pid})
 
 
@@ -406,6 +554,10 @@ def init_device():
                 dev.load_calibration(config["calibration"])
             with _devices_lock:
                 _devices[name] = dev
+            try:
+                _remember_safe_entry(name, dev_type, config, cls)
+            except Exception as e:
+                print(f"[safe_state] {name}: not remembered: {e}", flush=True)
             check = dev.check()
             ok = bool(check.get("ok", True))
             body = {"ok": ok, "message": check.get("message", "OK")}
@@ -723,4 +875,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="VRFarm Pi API")
     parser.add_argument("--port", type=int, default=5080)
     args = parser.parse_args()
+    # Whatever the last owner of a safe-state device left behind (an engine killed with the
+    # previous pi_api, a warm reboot): put it to rest before serving. Then do the same on our
+    # own SIGTERM.
+    if not _foreign_engine_running():
+        _apply_safe_states("pi_api start-up")
+    signal.signal(signal.SIGTERM, _on_sigterm)
     app.run(host="0.0.0.0", port=args.port, threaded=True)

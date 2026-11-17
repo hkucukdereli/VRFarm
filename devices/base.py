@@ -56,6 +56,17 @@ class Device:
         """Clean shutdown."""
         raise NotImplementedError
 
+    @classmethod
+    def safe_state(cls, rig_config: dict):
+        """Put the hardware into its safe idle state WITHOUT an instance — for hardware that keeps
+        doing something after the process that drove it dies (the IR LED's DAC holds its last
+        value). pi_api calls this for every device whose class overrides it, whenever the owner
+        may have died uncleanly: after the engine exits (SIGKILL included), when pi_api starts,
+        and when pi_api gets SIGTERM. Must be quick, idempotent, safe to call while nothing else
+        holds the device, and may raise if the hardware is absent (pi_api logs and moves on).
+        Default: nothing to do."""
+        return None
+
     # ── Livestream ──
 
     def start_stream(self, callback):

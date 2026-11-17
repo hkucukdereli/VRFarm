@@ -19,12 +19,15 @@ Safety model (handoff §2.2, decision 17):
                                  mid-scale (1.65 V ≈ 60 % LED) — program it once on the bench
                                  before wiring the LED (see "Bench bring-up" below).
   * Pi up                     -> DAC 0 V = OFF; DAC 0.5..2.5 V = min..100 % LED current.
-  * process crash / warm reboot with the LED on -> the DAC keeps its last value. This is the
-                                 accepted gap of the I2C-only board; this module narrows it in
-                                 software (off() on close/stop, an atexit hook, off() verified by
-                                 read-back), but a SIGKILL or kernel panic leaves the LED lit
-                                 until the next DAC write of 0 (any Connect does that) or a
-                                 power cycle.
+  * process crash / warm reboot with the LED on -> the DAC keeps its last value (a warm reboot
+                                 keeps the Pi's 3V3, so the gate stays open). This is the
+                                 accepted gap of the I2C-only board; software closes most of it:
+                                 off() on stop/close (verified by read-back), an atexit hook in
+                                 this module, and pi_api's safe_state() calls (Device.safe_state:
+                                 a DAC write of 0 after the engine exits — SIGKILL included —,
+                                 at pi_api start-up, i.e. after a reboot, and on pi_api SIGTERM).
+                                 Left: a kernel panic / hang, or a SIGKILL of pi_api itself, keeps
+                                 the LED lit until the next of those or a power cycle.
   The EEPROM is only ever written with 0 — never write a non-zero power-up value.
 
 Analog dimming (no PWM: PWM at a few hundred Hz beats against the camera frame rate). Intensity
@@ -138,6 +141,18 @@ class IRLed(Device):
             self.bus = None
             raise RuntimeError(f"MCP4725 at 0x{self.addr:02x} on I2C-{self.i2c_bus}: {e}")
         _LIVE.add(self)
+
+    @classmethod
+    def safe_state(cls, rig_config: dict):
+        """LED off without an instance (Device.safe_state): one volatile DAC write of 0 V, EEPROM
+        untouched. A missing board raises OSError, which pi_api logs and moves on from."""
+        import smbus2
+        bus = smbus2.SMBus(int(rig_config.get("i2c_bus", 1)))
+        try:
+            bus.write_i2c_block_data(_parse_addr(rig_config.get("i2c_address", "0x60")),
+                                     _CMD_WRITE_DAC, [0, 0])
+        finally:
+            bus.close()
 
     # ── MCP4725 access (callers hold self._lock) ──
 

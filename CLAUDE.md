@@ -172,6 +172,10 @@ Devices self-register: `devices/<type>.py` defines a class with `@register_devic
    optionally `start_stream/stop_stream`, `hdf5_datasets/hdf5_trial_data/
    hdf5_session_data`, `reset_trial`; camera-likes add `start_preview/start_recording/
    stop_recording/mjpeg_stream` and `_recording/_is_preview/_frame_idx` attrs).
+   Hardware that keeps acting after its process dies (a DAC holding a level) overrides the
+   classmethod `safe_state(rig_config)`: pi_api applies it after every engine exit (SIGKILL
+   included), at its own start-up and on its SIGTERM, from configs it remembers in
+   `~/rig/safe_state.json` — skipping devices it holds itself and any hand-started engine.
    The class must construct with no args and touch no hardware before `init()`.
 2. Add it to `shared/deploy_manifest.py` (or it never reaches the Pi).
 3. If it needs packages: add to `DEVICE_PACKAGES` (pip) / `DEVICE_APT_PACKAGES` (apt) in

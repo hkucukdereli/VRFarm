@@ -1,6 +1,6 @@
 # VRFarm dev-catchme — Claude Code Handoff
 
-This is the **catchme branch**: the barebones leader-only template plus the four catchme
+This is the **catchme branch**: the barebones leader-only template plus the catchme
 devices, running on rig **catchme** (`rigs/catchme.yaml`) — one Pi 4, hostname rpi-demo0,
 192.168.10.103, user **pi**, Debian 11 bullseye (system python 3.9 — keep Pi-deployed
 code 3.9-compatible). The full attention-paradigm system lives on `main`; the stripped
@@ -13,22 +13,24 @@ controller as `main` (Network / Setup / Experiment / Data, one app on :5000).
 |-------------------|-----------------------------------------------------|------|
 | `worldcam`        | LogiLink USB grabber (MacroSilicon MS210x, UVC) — ffmpeg MJPEG stream-copy subprocess | video.mjpeg → video.avi + frame_timestamps + preview |
 | `naneye`          | NanEyeM via "vbridge" CSI bridge — CUSTOM libcamera at /usr/local/bin/libcamera-vid, MJPEG subprocess | same |
-| `gyroscope_nano`  | ICM-42670-P 6-axis IMU on an Arduino Nano (FT232 → /dev/ttyUSB0), CSV @ ~100 Hz — flash `arduino/gyroscope_nano/gyroscope_nano.ino` | /imu continuous (raw int16 + scale factors) |
-| `gyroscope_i2c`   | the SAME sensor rewired to the Pi's i2c-1, polled via smbus2 | same |
-| `ir_led`          | IR illuminator: IRDriver board rev 3.2 (LDD-1000L + MCP4725 DAC 0x60) on the HQ Camera, Qwiic cable to i2c-1 — no GPIO; **disabled** until the board is built | `ir_led_*` session scalars (intensity, volts, on/off t) |
+| `imu` (`lsm6dsv16x`) | ST LSM6DSV16X 6-axis IMU, SparkFun Qwiic breakout, on i2c-1 at 0x6B — polled via smbus2 at 2× its ODR (default 120 Hz), one read per new sample | /imu continuous (raw int16 + scale factors, odr, missed estimate) |
+| `ir_led`          | IR illuminator: IRDriver board rev 3.2 (LDD-1000L + MCP4725 DAC 0x60) on the HQ Camera, Qwiic cable to i2c-1 — no GPIO | `ir_led_*` session scalars (intensity, volts, on/off t) |
 
-Only ONE gyro variant is physically wired at a time — flip the two `enabled:` flags in
-`rigs/catchme.yaml` together with the wiring. Shared pieces: `devices/mjpeg_pipe.py`
-(subprocess MJPEG source + PipeCameraBase) and `devices/icm42670.py` (registers + ImuBase).
+Both I2C boards plug into a Seeed Grove Base Hat (Grove-to-Qwiic cables, colours matched; plug
+with the Pi OFF — a hot-plugged cable has taken the Pi down). Shared pieces:
+`devices/mjpeg_pipe.py` (subprocess MJPEG source + PipeCameraBase) and `devices/imu_base.py`
+(chip-neutral ImuBase: buffers, ~15 Hz `imu` events, HDF5).
 Frame timestamps are pipe-arrival (`ts_source` in the metadata); NanEye fps is 30 for v1
 (sensor does 186 — raise after `measured_fps` proves headroom). Video devices record into
 per-device subdirs (`worldcam/`, `naneye/`) under the session's video dir; consolidation
 remuxes each and folds its sidecars (`shared/consolidate.py`). The Experiment tab shows an
-IMU |a| strip during a session and the Setup tab a live gyro trace on the device card.
+IMU |a| strip during a session and the Setup tab a live |a| trace on the IMU card
+(`Device.monitor_view = "imu"`).
 `ir_led` is lit (DAC 0.5–2.5 V) from session start to end, and while its Setup Live monitor
 runs; otherwise DAC 0 V = off. The Pi's 3V3 on the cable is the board's hardware gate, so the
-MCP4725 EEPROM must hold 0 (init() programs it). A crash/SIGKILL with the LED on leaves it lit
-until the next Connect or a power cycle — the board's accepted trade-off. Board handoff:
+MCP4725 EEPROM must hold 0 (init() programs it). pi_api's safe-state hook switches it off after
+any engine exit, at its own start-up and on SIGTERM; only a hang or a SIGKILL of pi_api itself
+leaves it lit until the next pi_api start or a power cycle. Board handoff:
 `docs/assets/IRDriver_HANDOFF.md`; safety model in the module docstring.
 
 ---
@@ -39,7 +41,7 @@ A behavioral-experiment scaffold: one Raspberry Pi ("leader") per rig, any numbe
 all driven from ONE Flask app on the Controller machine. The trial engine is a simple
 4-phase loop (**ITI → pre-stim → stim → post-stim**) with no stimulus hardware and no
 response contingency — the stim phase is a timed placeholder window a real task grows
-into. Devices are pluggable and fully generic; this branch ships the four catchme devices above (the
+into. Devices are pluggable and fully generic; this branch ships the catchme devices above (the
 template it builds on, `barebones`, ships none).
 
 **Controller:** `python controller/app.py` → http://localhost:5000, four tabs:
@@ -77,15 +79,14 @@ VRFarm/
 │   ├── template.yaml           <- task config: session (trial timing) + devices (per-device params)
 │   └── catchme_smoke.yaml      <- 3 short trials for a bench run
 ├── rigs/
-│   ├── catchme.yaml            <- THE catchme rig: rpi-demo0 (.103, user pi), two cameras + IMU
+│   ├── catchme.yaml            <- THE catchme rig: rpi-demo0 (.103, user pi), two cameras, IMU, IR LED
 │   ├── _template.yaml          <- what Add rig starts from ('_' files are not rigs)
 │   ├── demo.yaml  demo2.yaml   <- loopback mock rigs (tools/mock_pi.py on :5080 / :5081)
 │   └── .trash/                 <- deleted rigs (gitignored)
 ├── devices/
 │   ├── base.py                 <- Device base class, IOType, DEVICE_REGISTRY (@register_device)
-│   ├── mjpeg_pipe.py  icm42670.py       <- shared bases: subprocess MJPEG camera, ICM-42670 IMU
-│   └── worldcam.py  naneye.py  gyroscope_nano.py  gyroscope_i2c.py  ir_led.py
-├── arduino/gyroscope_nano/     <- Nano sketch for the serial IMU variant
+│   ├── mjpeg_pipe.py  imu_base.py       <- shared bases: subprocess MJPEG camera, 6-axis IMU
+│   └── worldcam.py  naneye.py  lsm6dsv16x.py  ir_led.py
 ├── engine/
 │   └── leader.py               <- 4-phase trial loop, generic device init/stream/HDF5
 ├── controller/                 <- THE controller, localhost:5000
@@ -165,7 +166,8 @@ Devices self-register: `devices/<type>.py` defines a class with `@register_devic
   monitor (video devices get the MJPEG preview; everything else a JSON event readout).
   Fields a type lists in the classmethod `live_params()` are sliders: bound to the rig field
   (Save Rig keeps them) and applied to the running device through `set_live()` (`ir_led`
-  intensity — Live lights the LED, the slider dims it, Stop turns it off).
+  intensity — Live lights the LED, the slider dims it, Stop turns it off). A class attribute
+  `monitor_view = "imu"` swaps the JSON readout for the |a| trace (every ImuBase device).
   The catalog comes from `/api/device_schemas`, which scans `devices/*.py`.
 - **Experiment tab**: one video panel per `video: true` device; a save-checkbox per enabled
   device (video unchecked = livestream only; other devices unchecked = HDF5 skipped).
@@ -185,8 +187,7 @@ Devices self-register: `devices/<type>.py` defines a class with `@register_devic
 3. If it needs packages: add to `DEVICE_PACKAGES` (pip) / `DEVICE_APT_PACKAGES` (apt) in
    `controller/setup.py`, and to `I2C_DEVICE_TYPES` if it needs the I2C bus. A `video: true`
    device gets ffmpeg + v4l-utils automatically. `DeviceInfo.required_packages` is display-only.
-   The gyros and the IR LED are there already (`gyroscope_nano` → pyserial; `gyroscope_i2c`,
-   `ir_led` → smbus2 + I2C).
+   The IMU and the IR LED are there already (`lsm6dsv16x`, `ir_led` → smbus2 + I2C).
 4. Rig yaml: `devices.<name>: {type: <type>, enabled: true, ...hardware config}`
    (+ `video: true` for a camera-like) and add `<name>` to the Pi's `devices:` list — both in
    the Setup tab; Pi identity itself is edited in Network.

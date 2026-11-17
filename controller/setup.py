@@ -115,12 +115,11 @@ def api_check_pi():
 # which defaults to the device's name; a new device adds its entries here. Video devices
 # (`video: true`) get ffmpeg + v4l-utils regardless.
 DEVICE_PACKAGES: dict = {         # type -> pip packages, into the rig conda env
-    "gyroscope_nano": ["pyserial"],
-    "gyroscope_i2c": ["smbus2"],
+    "lsm6dsv16x": ["smbus2"],      # SparkFun LSM6DSV16X IMU on i2c-1
     "ir_led": ["smbus2"],          # MCP4725 DAC on the IRDriver board; no GPIO since rev 2.3
 }
 DEVICE_APT_PACKAGES: dict = {}    # type -> apt packages
-I2C_DEVICE_TYPES: set = {"gyroscope_i2c", "ir_led"}     # types that need the Pi's I2C bus enabled
+I2C_DEVICE_TYPES: set = {"lsm6dsv16x", "ir_led"}     # types that need the Pi's I2C bus enabled
 
 
 @bp.route("/install_pi", methods=["POST"])

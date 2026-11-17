@@ -701,7 +701,7 @@ async function pollDeviceData(name, ip) {
   const boxEl = document.getElementById('mon-box-' + name);
   if (cntEl) cntEl.textContent = String(ds.monCount || 0);
   if (boxEl && ds.monLast) boxEl.textContent = JSON.stringify(ds.monLast, null, 1);
-  if (document.getElementById('gyro-canvas-' + name)) drawGyroTrace(name);
+  if (document.getElementById('imu-canvas-' + name)) drawImuTrace(name);
 }
 
 // ── Video devices (rig config `video: true`): preview via the camera endpoints ──
@@ -930,7 +930,7 @@ function renderDeviceCard(name, dev, pisReady) {
   const showControls = enabled && pisReady;
   const devType = dev.type || name;
   const controlsHtml = !showControls ? ''
-    : devType.startsWith('gyroscope') ? renderGyroControls(name, dev)
+    : ((deviceSchemas[devType] || {}).monitor_view === 'imu') ? renderImuControls(name, dev)
     : renderGenericControls(name, dev);
 
   // Reinit lives in the header row (next to title/status) — one per device.
@@ -1087,15 +1087,18 @@ function renderGenericControls(name, dev) {
     ${liveHtml}`;
 }
 
-// Gyro card body: editable fields + Live monitor drawing the |a| trace on a canvas
-// (same monitor endpoints as the generic card; the device publishes ~15 Hz IMU events).
-function renderGyroControls(name, dev) {
+// IMU card body (Device.monitor_view == 'imu'): editable fields + Live monitor drawing the |a|
+// trace on a canvas (same monitor endpoints as the generic card; ~15 Hz `imu` events).
+function _imuReadout(e) {
+  return `|a| ${(e.mag ?? 0).toFixed(2)} g · acc ${e.ax}/${e.ay}/${e.az} · gyro ${e.gx}/${e.gy}/${e.gz}`
+    + (e.missed ? ` · ~${e.missed} missed` : '');
+}
+
+function renderImuControls(name, dev) {
   const ds = deviceState[name] || {};
   const monitoring = !!ds.monitoring;
   const last = ds.monLast;
-  const readout = last
-    ? `|a| ${(last.mag ?? 0).toFixed(2)} g · acc ${last.ax}/${last.ay}/${last.az} · gyro ${last.gx}/${last.gy}/${last.gz}`
-    : 'waiting for samples…';
+  const readout = last ? _imuReadout(last) : 'waiting for samples…';
   return `
     <div class="device-controls">${_genericFields(name, dev)}</div>
     <div style="font-size:10px; color:#666; margin-top:2px">Fields persist on Save Rig; Reinit applies them to the device.</div>
@@ -1103,13 +1106,13 @@ function renderGyroControls(name, dev) {
       ${monitoring
         ? `<button class="btn btn-red btn-sm" onclick="stopDeviceMonitor('${name}')">Stop</button>`
         : `<button class="btn btn-blue btn-sm" onclick="startDeviceMonitor('${name}')" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
-      ${monitoring ? `<span style="font-size:11px; color:#888" id="gyro-readout-${name}">${readout}</span>` : ''}
+      ${monitoring ? `<span style="font-size:11px; color:#888" id="imu-readout-${name}">${readout}</span>` : ''}
     </div>
-    ${monitoring ? `<canvas id="gyro-canvas-${name}" class="lick-canvas" width="440" height="90" style="background:#0a0a1a;border-radius:4px;margin-top:6px"></canvas>` : ''}`;
+    ${monitoring ? `<canvas id="imu-canvas-${name}" class="lick-canvas" width="440" height="90" style="background:#0a0a1a;border-radius:4px;margin-top:6px"></canvas>` : ''}`;
 }
 
-function drawGyroTrace(name) {
-  const canvas = document.getElementById('gyro-canvas-' + name);
+function drawImuTrace(name) {
+  const canvas = document.getElementById('imu-canvas-' + name);
   const ds = deviceState[name];
   if (!canvas || !ds || !(ds.trace || []).length) return;
   const ctx = canvas.getContext('2d');
@@ -1137,10 +1140,9 @@ function drawGyroTrace(name) {
     const x = ((WINDOW - tau) / WINDOW) * w;
     ctx.fillText(tau === 0 ? 'now' : '-' + tau + 's', Math.min(x + 1, w - 26), h - 2);
   }
-  const el = document.getElementById('gyro-readout-' + name);
+  const el = document.getElementById('imu-readout-' + name);
   const last = win[win.length - 1];
-  if (el && last) el.textContent =
-    `|a| ${(last.mag ?? 0).toFixed(2)} g · acc ${last.ax}/${last.ay}/${last.az} · gyro ${last.gx}/${last.gy}/${last.gz}`;
+  if (el && last) el.textContent = _imuReadout(last);
 }
 
 function renderDeviceCatalog() {

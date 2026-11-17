@@ -26,9 +26,9 @@ FORMAT_VERSION = 2
 # flat dataset (engine output) -> destination group. Extend when a device family
 # should get its own group (e.g. a continuous stream); unknown names -> /trials.
 _GROUP = {}
-for _n in ("imu_t", "imu_accel_raw", "imu_gyro_raw",
-           "imu_accel_lsb_per_g", "imu_gyro_lsb_per_dps"):
-    _GROUP[_n] = "imu"     # gyroscope_nano / gyroscope_i2c continuous stream
+for _n in ("imu_t", "imu_accel_raw", "imu_gyro_raw", "imu_accel_lsb_per_g",
+           "imu_gyro_lsb_per_dps", "imu_odr_hz", "imu_missed"):
+    _GROUP[_n] = "imu"     # IMU continuous stream (devices/imu_base.py)
 
 
 def _video_subdirs(video_session_dir):

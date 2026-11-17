@@ -20,9 +20,8 @@ _COMMON = [
     ("devices/mjpeg_pipe.py", "devices/mjpeg_pipe.py"),
     ("devices/worldcam.py", "devices/worldcam.py"),
     ("devices/naneye.py", "devices/naneye.py"),
-    ("devices/icm42670.py", "devices/icm42670.py"),
-    ("devices/gyroscope_nano.py", "devices/gyroscope_nano.py"),
-    ("devices/gyroscope_i2c.py", "devices/gyroscope_i2c.py"),
+    ("devices/imu_base.py", "devices/imu_base.py"),
+    ("devices/lsm6dsv16x.py", "devices/lsm6dsv16x.py"),
     ("devices/ir_led.py", "devices/ir_led.py"),
     ("pi_api/api.py", "pi_api/api.py"),
 ]

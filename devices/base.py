@@ -38,6 +38,9 @@ class Device:
     """Base class for all hardware devices."""
 
     info: DeviceInfo  # subclass sets as class variable
+    # How the Setup card draws this device's Live monitor: None = a JSON readout of the last
+    # event; "imu" = the |a| trace (events carrying mag / ax..gz, devices/imu_base.py).
+    monitor_view = None
 
     # ── Lifecycle ──
 

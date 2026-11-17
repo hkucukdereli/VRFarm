@@ -264,7 +264,7 @@ let clockInterval = null;
 let liveOn = false;
 let videoRetries = {};          // per-device <img> retry timers
 
-// IMU stream (from either gyroscope device, session-time)
+// IMU stream (any IMU device — devices/imu_base.py — session-time)
 let imuEvents = [];             // {t, mag, gx, gy, gz}, last ~30 s at ~15 Hz
 
 // Today's date as yyyymmdd (LOCAL, not UTC — avoids the evening off-by-one). Set once at load;
@@ -707,7 +707,7 @@ function handleEvent(evt) {
       }
       break;
     case 'imu':
-      // Gyroscope stream (throttled ~15 Hz by the device): plot |a| over the last 30 s.
+      // IMU stream (throttled ~15 Hz by the device): plot |a| over the last 30 s.
       imuEvents.push({t: evt.t, mag: evt.mag || 0, gx: evt.gx, gy: evt.gy, gz: evt.gz});
       if (imuEvents.length > 600) imuEvents.shift();
       drawImuStrip();

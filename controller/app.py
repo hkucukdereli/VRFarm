@@ -132,6 +132,7 @@ def create_app() -> Flask:
                 "needs_calibration": cls().needs_calibration,
                 "task_params": cls.task_params_schema(),
                 "live_params": cls.live_params(),
+                "monitor_view": getattr(cls, "monitor_view", None),
             }
         return jsonify(schemas)
 

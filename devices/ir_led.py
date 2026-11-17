@@ -179,7 +179,12 @@ class IRLed(Device):
         deadline = time.time() + 0.5                 # EEPROM write takes ~25-50 ms
         while True:
             time.sleep(0.01)
-            st = self._read_status()
+            try:
+                st = self._read_status()
+            except OSError:                          # tolerate a NACK while the cell is written
+                if time.time() > deadline:
+                    raise
+                continue
             if st["ready"] or time.time() > deadline:
                 break
         self._eeprom = st["eeprom"]

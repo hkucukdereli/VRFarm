@@ -131,6 +131,7 @@ def create_app() -> Flask:
                 "required_packages": cls.info.required_packages,
                 "needs_calibration": cls().needs_calibration,
                 "task_params": cls.task_params_schema(),
+                "live_params": cls.live_params(),
             }
         return jsonify(schemas)
 

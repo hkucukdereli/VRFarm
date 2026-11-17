@@ -150,7 +150,8 @@ Devices self-register: `devices/<type>.py` defines a class with `@register_devic
 - **pi_api**: `POST /api/init_device {name, type, config}` (imports `devices/<type>.py`,
   constructs from the registry, `init(config, {})`, stores it);
   `POST /api/monitor_device {name}` / `GET /api/device_data?name=` /
-  `POST /api/stop_monitor_device {name}` — per-name event buffers for the Setup monitor.
+  `POST /api/stop_monitor_device {name}` — per-name event buffers for the Setup monitor;
+  `POST /api/device_set {name, param, value}` — a live parameter on the initialised instance.
 - **Camera-like devices** (rig config sets `video: true`): driven through the device-name-
   keyed camera endpoints — `POST /api/camera_preview_start {device, type, config,
   session_id?, video_dir?, downsample?}` (a session_id records; else preview),
@@ -162,6 +163,9 @@ Devices self-register: `devices/<type>.py` defines a class with `@register_devic
   and writes `hdf5_datasets()` per trial + `hdf5_session_data()` at session end.
 - **Setup tab**: device cards are fully generic — editable rig-config fields + a Live
   monitor (video devices get the MJPEG preview; everything else a JSON event readout).
+  Fields a type lists in the classmethod `live_params()` are sliders: bound to the rig field
+  (Save Rig keeps them) and applied to the running device through `set_live()` (`ir_led`
+  intensity — Live lights the LED, the slider dims it, Stop turns it off).
   The catalog comes from `/api/device_schemas`, which scans `devices/*.py`.
 - **Experiment tab**: one video panel per `video: true` device; a save-checkbox per enabled
   device (video unchecked = livestream only; other devices unchecked = HDF5 skipped).

@@ -76,6 +76,21 @@ class Device:
     def stop_stream(self):
         pass
 
+    # ── Live parameters (Setup-card sliders) ──
+
+    @classmethod
+    def live_params(cls) -> dict:
+        """Rig-config fields that can be changed on the RUNNING device from its Setup card:
+        {field: {"min", "max", "step", "unit"?, "default"?, "note"?}}. The card draws a slider
+        bound to the rig field (Save Rig persists it) and sends each new value through pi_api
+        /api/device_set to set_live(). Default: none."""
+        return {}
+
+    def set_live(self, param: str, value) -> dict:
+        """Apply one live parameter (a key of live_params()) now. Returns a small state dict; its
+        "message", if present, is what the Setup card shows next to the slider."""
+        raise NotImplementedError
+
     # ── HDF5 ──
 
     def hdf5_datasets(self) -> dict:

@@ -7,7 +7,7 @@ and a GENERIC device surface — devices self-register via @register_device
 (module name == device type), so adding a device needs no new endpoints:
   /api/init_device      {name, type, config}
   /api/monitor_device   {name}   /api/stop_monitor_device {name}
-  /api/device_data?name=
+  /api/device_data?name=   /api/device_set {name, param, value}  (Device.live_params)
 Camera-like devices (anything implementing start_preview/start_recording/
 mjpeg_stream) are driven through the device-name-keyed camera endpoints.
 Devices that override Device.safe_state are put to rest whenever their owner may
@@ -596,6 +596,27 @@ def stop_monitor_device():
     if dev:
         dev.stop_stream()
     return jsonify({"ok": True})
+
+
+@app.route("/api/device_set", methods=["POST"])
+def device_set():
+    """Apply one live parameter to an initialised device (the Setup card's sliders).
+    Body: {name, param, value}. Only keys the device class lists in live_params() pass."""
+    data = request.get_json(silent=True) or {}
+    name, param = data.get("name"), data.get("param")
+    with _devices_lock:
+        dev = _devices.get(name)
+    if dev is None:
+        return jsonify({"ok": False, "error": f"{name} not initialized "
+                                              "(Initialize it; during a session the engine owns it)"}), 400
+    if param not in (type(dev).live_params() or {}):
+        return jsonify({"ok": False, "error": f"{name} has no live parameter '{param}'"}), 400
+    if _is_session_recording(dev):
+        return jsonify({"ok": False, "error": "Session recording in progress; controls locked"}), 409
+    try:
+        return jsonify({"ok": True, "state": dev.set_live(param, data.get("value")) or {}})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/device_data")

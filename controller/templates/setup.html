@@ -70,6 +70,11 @@
   .device-fieldset:disabled { opacity: 0.55; }
   .device-field { display: inline-flex; align-items: center; gap: 4px; }
   .device-field label { margin: 0; font-size: 10px; white-space: nowrap; }
+  .live-field { flex-wrap: wrap; }
+  .device-field input[type=range] { width: 180px; max-width: 180px; padding: 0; }
+  .live-val { font-size: 11px; min-width: 40px; }
+  .live-ack { font-size: 10px; color: #888; }
+  .live-note { flex-basis: 100%; font-size: 10px; color: #c90; }
   .device-field input, .device-field select { width: auto; min-width: 60px; max-width: 140px;
     padding: 3px 6px; font-size: 12px; }
 
@@ -247,6 +252,7 @@ let uiBusy = false;
 fetch('/api/device_schemas').then(r => r.json()).then(schemas => {
   deviceSchemas = schemas;
   renderDeviceCatalog();
+  if (rig) renderDeviceList();   // live-parameter sliders come from the schemas
 });
 
 // ── Helpers ──
@@ -952,12 +958,17 @@ function renderDeviceCard(name, dev, pisReady) {
     </div>`;
 }
 
-// The device's rig-yaml fields as editable inputs (persisted by Save Rig).
+// The device's rig-yaml fields as editable inputs (persisted by Save Rig). Fields the device
+// type lists in live_params() are sliders that also apply to the running device (see below).
 function _genericFields(name, dev) {
+  const live = _liveParams(name);
+  const missingLive = Object.keys(live).filter(k => !(k in dev))
+    .map(k => _liveFieldHtml(name, k, live[k], undefined)).join('');
   return Object.entries(dev)
     .filter(([k, v]) => !['type', 'enabled'].includes(k)
                         && (v === null || typeof v !== 'object' || Array.isArray(v)))
     .map(([k, v]) => {
+      if (k in live) return _liveFieldHtml(name, k, live[k], v);
       if (typeof v === 'boolean') {
         return `<div class="device-field"><label>${k}</label>
           <input type="checkbox" ${v ? 'checked' : ''}
@@ -967,7 +978,73 @@ function _genericFields(name, dev) {
       return `<div class="device-field"><label>${k}</label>
         <input type="text" value='${String(val).replace(/'/g, "&#39;")}'
                onchange="updateDeviceField('${name}','${k}',this.value)"></div>`;
-    }).join('');
+    }).join('') + missingLive;
+}
+
+// ── Live parameters (Device.live_params, e.g. ir_led intensity_pct) ──
+// A slider bound to the rig field (Save Rig persists it) that also sends each new value to the
+// running device through pi_api /api/device_set. Latest value wins: one request in flight per
+// slider, and whatever the slider reads when it returns goes next — no flood while dragging.
+
+function _liveParams(name) {
+  const dev = (rig && rig.devices && rig.devices[name]) || {};
+  const s = deviceSchemas[dev.type || name];
+  return (s && s.live_params) || {};
+}
+
+function _liveFieldHtml(name, key, spec, value) {
+  const v = (value === undefined || value === null || value === '')
+    ? (spec.default ?? spec.min ?? 0) : value;
+  const unit = spec.unit ? ' ' + spec.unit : '';
+  return `<div class="device-field live-field"><label>${key}</label>
+    <input type="range" min="${spec.min ?? 0}" max="${spec.max ?? 100}" step="${spec.step ?? 1}"
+           value="${v}" oninput="liveParamInput('${name}','${key}',this.value)">
+    <span class="live-val" id="live-val-${name}-${key}">${v}${unit}</span>
+    <span class="live-ack" id="live-ack-${name}-${key}"></span>
+    ${spec.note ? `<span class="live-note">${spec.note}</span>` : ''}</div>`;
+}
+
+let liveSend = {};   // 'device/param' -> {busy, pending}
+
+function _liveAck(name, key, text) {
+  const el = document.getElementById(`live-ack-${name}-${key}`);
+  if (el) el.textContent = text;
+}
+
+function liveParamInput(name, key, raw) {
+  if (!rig || !rig.devices[name]) return;
+  const v = Number(raw);
+  rig.devices[name][key] = v;                       // Save Rig keeps it
+  const spec = _liveParams(name)[key] || {};
+  const valEl = document.getElementById(`live-val-${name}-${key}`);
+  if (valEl) valEl.textContent = v + (spec.unit ? ' ' + spec.unit : '');
+  if ((deviceState[name] || {}).initialized !== true) {
+    _liveAck(name, key, 'not initialized: applies on Initialize/Reinit after Save Rig');
+    return;
+  }
+  const k = name + '/' + key;
+  const st = liveSend[k] = liveSend[k] || {busy: false, pending: null};
+  st.pending = v;
+  if (!st.busy) _liveFlush(name, key);
+}
+
+async function _liveFlush(name, key) {
+  const st = liveSend[name + '/' + key];
+  const pi = getPiForDevice(name);
+  if (!pi) { st.pending = null; _liveAck(name, key, 'not assigned to a Pi'); return; }
+  st.busy = true;
+  try {
+    while (st.pending !== null) {
+      const v = st.pending;
+      st.pending = null;
+      const r = await proxyPi(pi.ip, '/api/device_set', {name, param: key, value: v});
+      const s = (r && r.state) || {};
+      _liveAck(name, key, r && r.ok ? (s.message || 'applied')
+                                     : 'not applied: ' + ((r && r.error) || 'no answer'));
+    }
+  } finally {
+    st.busy = false;
+  }
 }
 
 // Generic card body: editable fields plus Live monitoring — a video device streams MJPEG,

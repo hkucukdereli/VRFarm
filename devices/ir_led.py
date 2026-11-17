@@ -42,10 +42,12 @@ Bench bring-up (once per board, LED unplugged, LED supply off):
   python3 -c "import smbus2; smbus2.SMBus(1).write_i2c_block_data(0x60, 0x60, [0, 0])"
   (or just Connect the rig: init() does the same and reports 'EEPROM 0' in the device check)
 
-Lifecycle in VRFarm: Connect -> pi_api init (DAC 0, LED off). Setup "Live monitor" =
-start_stream -> LED on at the rig intensity (aiming/focusing); stopping the monitor turns it off.
-GO -> pi_api releases its instance (LED off) -> the engine inits its own -> session start
-switches it on (task `on_during_session`, default true) -> session end / STOP switches it off.
+Lifecycle in VRFarm: Connect -> pi_api init (DAC 0, LED off). Setup card: "Live" (the monitor)
+= start_stream -> LED on at the rig intensity (aiming/focusing), the intensity_pct slider changes
+it live (live_params / set_live via pi_api /api/device_set; Save Rig keeps the value), "Stop"
+turns it off. GO -> pi_api releases its instance (LED off) -> the engine inits its own ->
+session start switches it on (task `on_during_session`, default true) -> session end / STOP
+switches it off.
 """
 
 from __future__ import annotations
@@ -95,6 +97,7 @@ class IRLed(Device):
         self._on_t = None
         self._off_t = None
         self._eeprom = None
+        self._callback = None      # the active stream's callback (engine publisher / Setup monitor)
 
     @classmethod
     def task_params_schema(cls):
@@ -106,6 +109,16 @@ class IRLed(Device):
             "on_during_session": {
                 "type": "bool", "default": True,
                 "label": "IR on for the whole session",
+            },
+        }
+
+    @classmethod
+    def live_params(cls):
+        return {
+            "intensity_pct": {
+                "min": 0, "max": 100, "step": 1, "unit": "%", "default": 50,
+                "note": "Live lights the LED at this level; Stop switches it off. "
+                        "850 nm is invisible: never look into the LED.",
             },
         }
 
@@ -125,8 +138,8 @@ class IRLed(Device):
         # intensity: task override > rig default > schema default
         self.intensity_pct = self._clamp_pct(task_params.get(
             "intensity_pct", rig_config.get("intensity_pct", 50.0)))
-        self.on_during_session = bool(task_params.get(
-            "on_during_session", rig_config.get("on_during_session", True)))
+        # task-only: pi_api's Setup monitor passes no task params, so "Live" always lights it
+        self.on_during_session = bool(task_params.get("on_during_session", True))
 
         self.bus = smbus2.SMBus(self.i2c_bus)
         try:
@@ -248,6 +261,17 @@ class IRLed(Device):
             self.intensity_pct = self._clamp_pct(pct)
             if self._on:
                 self._write_dac(self.code_for_pct(self.intensity_pct))
+        self._emit()
+
+    def set_live(self, param: str, value) -> dict:
+        """Setup-card slider (Device.live_params): only intensity_pct."""
+        if param != "intensity_pct":
+            raise ValueError(f"ir_led has no live parameter '{param}'")
+        self.set_intensity(float(value))
+        st = self.status()
+        st["message"] = (f"{self.intensity_pct:.0f} % = {self.volts_for_pct(self.intensity_pct):.2f} V, "
+                         + ("LED ON" if self._on else "LED off (Live lights it)"))
+        return st
 
     def on(self):
         with self._lock:
@@ -292,16 +316,33 @@ class IRLed(Device):
 
     # ── session lifecycle (engine/leader.py; pi_api's Setup monitor uses the same calls) ──
 
+    def _event(self) -> dict:
+        return {"event": "ir_led", "t": time.time(), "on": self._on,
+                "intensity_pct": self.intensity_pct, "dac_code": self._code,
+                "dac_volts": round(self.volts(), 3)}
+
+    def _emit(self):
+        cb = self._callback
+        if cb is not None:
+            try:
+                cb(self._event())
+            except Exception:
+                pass
+
     def start_stream(self, callback):
-        """Session start (or Setup live monitor): switch on if wanted and announce it once."""
+        """Session start (or Setup live monitor): switch on if wanted and announce it. Every
+        later change (set_intensity, stop) is announced through the same callback."""
+        self._callback = callback
         if self.on_during_session:
             self.on()
-        callback({"event": "ir_led", "t": time.time(), "on": self._on,
-                  "intensity_pct": self.intensity_pct, "dac_code": self._code,
-                  "dac_volts": round(self.volts(), 3)})
+        self._emit()
 
     def stop_stream(self):
-        self.off()
+        try:
+            self.off()
+        finally:
+            self._emit()
+            self._callback = None
 
     def hdf5_session_data(self) -> dict:
         import numpy as np

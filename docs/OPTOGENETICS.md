@@ -143,7 +143,7 @@ kill -9 pin level in [LEADER_WIRING.md](LEADER_WIRING.md).
 
 | Item | State (2026-11-06) |
 |---|---|
-| Code | built on branch `dev-opto` (commits 707ecae, 128316b, d0e17cf); `main` untouched |
+| Code | built on branch `dev-opto` (commits 23e46cb, 0ac47ee, c324b39); in `main` since 2026-11-12 |
 | Software verification | `tools/test_opto.py` (fake lgpio: pattern math, spec validation, edge lock, fallback, lead, drop, reward guard, pulsed train, mask-only, cancel, close; generator statistics over 60 seeds; HDF5 round trip; consolidate + `analysis.loaders.Session`) — 0 failures · `tools/smoke_multirig.py` PASS · pyflakes clean · both pages' JavaScript parses after Jinja rendering |
 | Hardware | **nothing has run on a Pi**; no laser is wired on any rig; bench rows (a)–(g) pending |
 | Rig YAMLs | cheddar, morbier, pecorino carry `devices.opto` **disabled** with `opto` on the leader's device list; nothing changes until the card is enabled in Setup |

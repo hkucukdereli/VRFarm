@@ -117,9 +117,10 @@ def api_check_pi():
 DEVICE_PACKAGES: dict = {         # type -> pip packages, into the rig conda env
     "gyroscope_nano": ["pyserial"],
     "gyroscope_i2c": ["smbus2"],
+    "ir_led": ["smbus2"],          # MCP4725 DAC on the IRDriver board; no GPIO since rev 2.3
 }
 DEVICE_APT_PACKAGES: dict = {}    # type -> apt packages
-I2C_DEVICE_TYPES: set = {"gyroscope_i2c"}     # types that need the Pi's I2C bus enabled
+I2C_DEVICE_TYPES: set = {"gyroscope_i2c", "ir_led"}     # types that need the Pi's I2C bus enabled
 
 
 @bp.route("/install_pi", methods=["POST"])

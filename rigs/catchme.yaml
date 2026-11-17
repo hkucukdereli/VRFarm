@@ -15,6 +15,7 @@ pis:
   - naneye
   - gyroscope_nano
   - gyroscope_i2c
+  - ir_led
   ip: 192.168.10.103
   name: rpi-demo0
   role: leader
@@ -55,6 +56,14 @@ devices:
     i2c_bus: 1
     i2c_address: '0x68'
     sample_hz: 100
+  ir_led:
+    type: ir_led
+    enabled: false     # IRDriver rev 3.2 board not built yet — enable once it is on the Qwiic cable
+    # Qwiic cable to I2C-1 (header pins 9 GND, 1 3V3, 3 SDA, 5 SCL); LED supply 9-12 V on J1.
+    # Bench first, LED unplugged: Connect once so init() programs the DAC EEPROM to 0.
+    i2c_bus: 1
+    i2c_address: '0x60'
+    intensity_pct: 50  # % of the LDD's 0.5-2.5 V dimming range (task yaml may override)
 shepherd:
   enabled: false
 slack:

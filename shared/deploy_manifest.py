@@ -23,6 +23,7 @@ _COMMON = [
     ("devices/icm42670.py", "devices/icm42670.py"),
     ("devices/gyroscope_nano.py", "devices/gyroscope_nano.py"),
     ("devices/gyroscope_i2c.py", "devices/gyroscope_i2c.py"),
+    ("devices/ir_led.py", "devices/ir_led.py"),
     ("pi_api/api.py", "pi_api/api.py"),
 ]
 

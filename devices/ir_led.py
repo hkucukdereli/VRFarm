@@ -7,8 +7,12 @@ the IRDriver board rev 3.2 — Mean Well LDD-1000L constant-current module + on-
 Board handoff: docs/assets/IRDriver_HANDOFF.md (source: Dropbox/Hakan/lab/code/LED_Driver_RPi).
 
 Wiring: ONE 4-wire Qwiic / STEMMA QT cable (JST SH, pin 1 GND black, 2 3V3 red, 3 SDA blue,
-4 SCL yellow) to the leader's I2C-1 — e.g. a Qwiic-to-female-jumper cable on header pins
-9 (GND), 1 (3V3), 3 (SDA), 5 (SCL). The LED supply (9-12 V recommended, 6-36 V) goes to the
+4 SCL yellow) to the leader's I2C-1: on a Seeed Grove Base Hat, a Grove-to-Qwiic cable into one
+of its three I2C ports (Grove order 1 SCL yellow, 2 SDA white, 3 VCC red, 4 GND black — the cable
+crosses them, so match colours, white = blue = SDA); without the hat, a Qwiic-to-female-jumper
+cable on header pins 9 (GND), 1 (3V3), 3 (SDA), 5 (SCL). Plug cables with the Pi OFF (Seeed: the
+hat must not be hot-plugged). The hat's own MCU sits on the same bus at 0x04 (v1.0: 0x08).
+The LED supply (9-12 V recommended, 6-36 V) goes to the
 board's screw terminal J1. There is NO enable GPIO any more (rev >= 2.3): the Pi's 3V3 on the
 cable is the hardware gate.
 

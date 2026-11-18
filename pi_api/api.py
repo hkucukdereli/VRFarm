@@ -43,7 +43,6 @@ _devices_lock = threading.Lock()
 _camera_lock = threading.Lock()
 _lick_events: list = []
 _photodiode_events: list = []
-_photodiode_raw: list = []   # diagnostic raw transitions {t, level} for the setup-UI scope
 _encoder_events: list = []   # running-wheel {t, speed_cms, distance_cm} for the setup-UI monitor
 _reward_events: list = []
 
@@ -1023,6 +1022,44 @@ def opto_off():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# The rig-config keys devices/photodiode.py reads (the legacy glitch/debounce keys are dropped).
+_PHOTODIODE_CFG_KEYS = ("gpio", "gpiochip", "pulse_every_n_frames", "serial_port",
+                        "v_high", "v_low", "v_window_s", "v_realert_s",
+                        "verify_duration_s", "verify_enabled",
+                        "sync_corner", "sync_size_px", "sync_brightness")
+_photodiode_open_lock = threading.Lock()
+
+
+def _engine_running() -> bool:
+    return _process is not None and _process.poll() is None
+
+
+def _photodiode_or_open(data):
+    """(device, error): the initialized photodiode, or — for the Setup card's Debug window and
+    Update, which must work without a passed init — one opened here from the posted rig config,
+    with no flash check. Never while a session's engine runs: the engine has its own Photodiode
+    on the same GPIO line and serial port, and a second serial reader steals its bytes."""
+    with _photodiode_open_lock:
+        with _devices_lock:
+            dev = _devices.get("photodiode")
+        if dev is not None:
+            return dev, None
+        if _engine_running():
+            return None, "a session is running: its engine owns the photodiode and the Teensy serial port"
+        if "gpio" not in (data or {}):
+            return None, "photodiode not initialized"
+        _ensure_rig_path()
+        from devices.photodiode import Photodiode
+        try:
+            dev = Photodiode()
+            dev.init(rig_config={k: data[k] for k in _PHOTODIODE_CFG_KEYS if k in data}, task_params={})
+        except Exception as e:
+            return None, f"cannot open the photodiode: {e}"
+        with _devices_lock:
+            _devices["photodiode"] = dev
+        return dev, None
+
+
 @app.route("/api/init_photodiode", methods=["POST"])
 def init_photodiode():
     """Initialize the photodiode (leader) and run the UNIVERSAL sync verify: flash the FOLLOWER's
@@ -1032,18 +1069,22 @@ def init_photodiode():
     _ensure_rig_path()
     from devices.photodiode import Photodiode
     data = request.json or {}
+    with _devices_lock:
+        old = _devices.get("photodiode")
+    debug_on = bool(getattr(old, "_dbg_on", False))   # the Setup card's Debug window is reading
     _release_one("photodiode")   # free the old line so this (re)init can re-claim it (lgpio is exclusive)
     try:
         # Pass through everything the device needs (gpio + the new serial/V/verify fields). The
         # legacy glitch/debounce keys are ignored by the lgpio device, so they're dropped.
-        rig_cfg = {k: data[k] for k in (
-            "gpio", "gpiochip", "pulse_every_n_frames", "serial_port",
-            "v_high", "v_low", "v_window_s", "v_realert_s",
-            "verify_duration_s", "verify_enabled",
-            "sync_corner", "sync_size_px", "sync_brightness") if k in data}
+        rig_cfg = {k: data[k] for k in _PHOTODIODE_CFG_KEYS if k in data}
         rig_cfg.setdefault("gpio", data.get("gpio", 24))
         dev = Photodiode()
         dev.init(rig_config=rig_cfg, task_params={})
+        if debug_on:
+            try:
+                dev.debug_start()      # an open Debug window keeps reading: it shows this init's flash check
+            except Exception:
+                pass
         with _devices_lock:
             _devices["photodiode"] = dev
 
@@ -1089,11 +1130,16 @@ def init_photodiode():
 
             verify = dev.verify_sync(sync_burst)
             if not verify.get("ok"):
-                return jsonify({"ok": False, "verify": verify,
+                # A failed flash check is an init failure for the session, but the device is
+                # open (GPIO claimed, Teensy serial read): the Setup card's Debug window, Flash
+                # Test and Update work on it — that is how the cause is found.
+                return jsonify({"ok": False, "verify": verify, "device_open": True,
+                                "fw": dev.fw_info(),
                                 "error": (f"Photodiode cannot init: {verify.get('reason')}. "
                                           "Untick 'Photodiode stim sync' to run without it.")}), 500
         check = dev.check()
-        return jsonify({"ok": True, "message": check.get("message", "OK"), "verify": verify})
+        return jsonify({"ok": True, "message": check.get("message", "OK"), "verify": verify,
+                        "fw": dev.fw_info()})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -1499,52 +1545,79 @@ def photodiode_data():
     return jsonify({"events": _photodiode_events})
 
 
-@app.route("/api/photodiode_raw_start", methods=["POST"])
-def photodiode_raw_start():
-    """Start RAW transition capture (both edges, glitch filter OFF) for the setup-UI diagnostic
-    scope. Reuses the initialized photodiode device; lazily inits from the posted config if needed."""
-    global _photodiode_raw
-    _ensure_rig_path()
-    data = request.json or {}
-    with _devices_lock:
-        dev = _devices.get("photodiode")
-    if not dev:
-        from devices.photodiode import Photodiode
-        try:
-            dev = Photodiode()
-            dev.init(rig_config={
-                "gpio": data.get("gpio", 24),
-                "glitch_enabled": data.get("glitch_enabled", True),
-                "glitch_ms": data.get("glitch_ms", 0.5),
-                "debounce_enabled": data.get("debounce_enabled", True),
-                "debounce_ms": data.get("debounce_ms", 5),
-            }, task_params={})
-            with _devices_lock:
-                _devices["photodiode"] = dev
-        except Exception as e:
-            return jsonify({"ok": False, "error": str(e)}), 500
-    _photodiode_raw = []
-
-    def on_tr(evt):
-        _photodiode_raw.append(evt)
-        if len(_photodiode_raw) > 20000:      # cap: keep the most recent transitions
-            del _photodiode_raw[:len(_photodiode_raw) - 20000]
-
+@app.route("/api/photodiode_debug_start", methods=["POST"])
+def photodiode_debug_start():
+    """Setup UI's Debug window: start collecting the Teensy DEBUG build's analog stream and this
+    Pi's GPIO edges (devices/photodiode.py debug_start). Body: the rig's photodiode config, used
+    only when no photodiode is open yet. Answers with what firmware the Teensy reports."""
+    dev, err = _photodiode_or_open(request.json or {})
+    if dev is None:
+        return jsonify({"ok": False, "error": err}), 409
     try:
-        dev.start_raw_capture(on_tr)
+        return jsonify({"ok": True, "fw": dev.debug_start()})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/photodiode_debug_data")
+def photodiode_debug_data():
+    """What arrived since the caller's cursors (since / eseq / aseq / epoch, all from the previous
+    answer): samples t, v, hi, lo; `accepts` (the Teensy raised its output) and `edges` (this Pi's
+    GPIO saw it rise), in seconds on the Teensy's clock. See Photodiode.debug_read."""
+    with _devices_lock:
+        dev = _devices.get("photodiode")
+    if dev is None or not hasattr(dev, "debug_read"):
+        return jsonify({"ok": False, "on": False, "error": "photodiode not initialized"})
+    a = request.args
+    try:
+        return jsonify(dev.debug_read(since=a.get("since", 0, type=int),
+                                      edges_since=a.get("eseq", 0, type=int),
+                                      accepts_since=a.get("aseq", 0, type=int),
+                                      epoch=a.get("epoch", None, type=int)))
+    except Exception as e:
+        return jsonify({"ok": False, "on": False, "error": str(e)[:160]})
+
+
+@app.route("/api/photodiode_debug_stop", methods=["POST"])
+def photodiode_debug_stop():
+    """Stop collecting for the Debug window. The DEBUG firmware keeps running on the Teensy."""
+    with _devices_lock:
+        dev = _devices.get("photodiode")
+    if dev is not None and hasattr(dev, "debug_stop"):
+        try:
+            dev.debug_stop()
+        except Exception:
+            pass
     return jsonify({"ok": True})
 
 
-@app.route("/api/photodiode_raw_data")
-def photodiode_raw_data():
-    """Return-and-clear raw transitions buffered since the last poll (the scope accumulates them
-    client-side into a rolling window)."""
-    global _photodiode_raw
-    buf = _photodiode_raw
-    _photodiode_raw = []
-    return jsonify({"ok": True, "transitions": buf})
+@app.route("/api/photodiode_teensy_params", methods=["POST"])
+def photodiode_teensy_params():
+    """Send detection parameters to the Teensy's DEBUG build over serial (body: {params: {NAME:
+    value}}, plus the rig's photodiode config for the not-yet-open case). They live in the Teensy's
+    RAM until its next upload or power cycle. Answers {ok, error, fw, sent}."""
+    data = request.json or {}
+    dev, err = _photodiode_or_open(data)
+    if dev is None:
+        return jsonify({"ok": False, "error": err}), 409
+    try:
+        return jsonify(dev.teensy_set(data.get("params") or {}))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/photodiode_fw")
+def photodiode_fw():
+    """What firmware the Teensy reports (asked now, "?"): {ok, open, fw}. open=False when no
+    photodiode device is open here — then nothing reads the serial port and nothing is known."""
+    with _devices_lock:
+        dev = _devices.get("photodiode")
+    if dev is None or not hasattr(dev, "fw_query"):
+        return jsonify({"ok": True, "open": False, "fw": None})
+    try:
+        return jsonify({"ok": True, "open": True, "fw": dev.fw_query()})
+    except Exception as e:
+        return jsonify({"ok": False, "open": True, "fw": None, "error": str(e)[:160]})
 
 
 @app.route("/api/photodiode_v")
@@ -1559,19 +1632,6 @@ def photodiode_v():
         return jsonify(dev.get_v_status())
     except Exception as e:
         return jsonify({"available": False, "error": str(e)[:120]})
-
-
-@app.route("/api/photodiode_raw_stop", methods=["POST"])
-def photodiode_raw_stop():
-    """Stop raw capture and restore the device's configured glitch filter."""
-    with _devices_lock:
-        dev = _devices.get("photodiode")
-    if dev:
-        try:
-            dev.stop_raw_capture()
-        except Exception:
-            pass
-    return jsonify({"ok": True})
 
 
 @app.route("/api/photodiode_test_start", methods=["POST"])

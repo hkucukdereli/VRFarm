@@ -47,13 +47,16 @@ all the conditioning — the leader just timestamps the resulting clean edges.
 | **GND**         | ↔ Leader GND                  | Common ground is essential — tie Teensy GND to a Pi GND pin. |
 | USB             | power                          | Bench supply or a Pi USB port. |
 
-Firmware: [`teensy/photodiode_sync_v2_2/`](../teensy/photodiode_sync_v2_2/) — build, flash
-and tuning instructions in **[TEENSY_INSTRUCTIONS.md](TEENSY_INSTRUCTIONS.md)**. It is a
-Schmitt trigger plus the same two filters the old on-Pi model used (`STEADY_US = 150` glitch
-reject, `HOLDOFF_US = 5000` → one pulse per frame). Since v2_0 the two thresholds are
+Firmware: [`teensy/photodiode_sync_v2_3/`](../teensy/photodiode_sync_v2_3/) (each rig's own copy
+under `teensy/<rig>/`) — build, flash and tuning instructions in
+**[TEENSY_INSTRUCTIONS.md](TEENSY_INSTRUCTIONS.md)**. It is a Schmitt trigger plus the same two
+filters the old on-Pi model used (`STEADY_US = 150` glitch reject, `HOLDOFF_US = 30000` → one
+pulse per commanded flash, not per DLP colour sub-pulse). Since v2_0 the two thresholds are
 **adaptive** by default (`ADAPTIVE = true`): they ride a live baseline/peak estimate so they
 follow the diode's drifting idle level. Set `ADAPTIVE = false` for the fixed pair
-(`THRESHOLD_HI_V = 1.8` / `THRESHOLD_LO_V = 0.6`). Flash with `DEBUG = 0` for production.
+(`THRESHOLD_HI_V = 1.1` / `THRESHOLD_LO_V = 0.3`). Sessions run on the production build
+(`DEBUG 0`), which the Setup tab's photodiode card flashes with **Upload**; its **Debug**
+button flashes the `DEBUG 1` build for the live trace.
 
 This **replaces the old on-Pi debounce/glitch model**: the
 `debounce_*` / `glitch_*` keys still present in the rig YAML are now **inert**, and
@@ -196,8 +199,9 @@ Why the pins landed where they did — reuse these when adding hardware:
     `gpiochip:` if an early Pi 5 image enumerates the header as `gpiochip4`; confirm with
     `gpiodetect`. The pin map is identical. (Background: `PI5_LEADER_FEASIBILITY.md` in the
     local-only `docs/assets/` stash.)
-- **Teensy firmware**: flash `teensy/photodiode_sync/photodiode_sync.ino` with
-  Arduino + Teensyduino (`PD_PIN = A1`, `OUT_PIN = 16`, `DEBUG = 0`).
+- **Teensy firmware**: Setup tab → photodiode card → **Upload** flashes the rig's sketch
+  (`teensy/<rig>/photodiode_sync_v2_3/`; stock `PD_PIN = A1`, `OUT_PIN = 16`) as the production
+  build — see [TEENSY_INSTRUCTIONS.md](TEENSY_INSTRUCTIONS.md).
 
 ---
 

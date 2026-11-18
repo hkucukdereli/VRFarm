@@ -124,6 +124,31 @@
   .toggle input:checked + .track::before { transform: translateX(26px); }
   .toggle input:checked + .track::after { content: "ON"; left: 6px; right: auto; }
   .toggle input:disabled + .track { opacity: 0.45; cursor: not-allowed; }
+
+  /* Photodiode card: the Teensy rows (sketch, Upload / Debug, parameters) and the Debug window. */
+  .toggle.toggle-ro .track { cursor: default; }          /* an indicator: shows, does not switch */
+  .toggle.toggle-ro.unknown .track { opacity: 0.45; }    /* which build the Teensy runs is not known yet */
+  .pd-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .pd-lbl { font-size: 10px; color: #888; white-space: nowrap; }
+  .pd-row input.pd-path { flex: 1 1 240px; width: auto; min-width: 160px; max-width: 460px;
+                          padding: 3px 6px; font-family: monospace; font-size: 11px; }
+  .pd-par { display: inline-flex; align-items: center; gap: 4px; }
+  .pd-par label { margin: 0; font-size: 10px; font-family: monospace; white-space: nowrap; }
+  .pd-par input { width: 70px; padding: 3px 5px; font-size: 12px; }
+  .pd-par input.pd-edited { border-color: #ffb74d; }     /* differs from the sketch file */
+  .pd-browse { margin-top: 4px; padding: 6px 8px; max-height: 190px; overflow-y: auto;
+               background: #0a0a1a; border-radius: 4px; font-family: monospace; font-size: 11px; }
+  .pd-browse-dir { color: #888; margin-bottom: 4px; }
+  .pd-browse a { display: block; padding: 1px 0; color: #64b5f6; cursor: pointer; }
+  .pd-browse a.ino { color: #81c784; }
+  .pd-browse a:hover { text-decoration: underline; }
+  .pd-debug { margin-top: 8px; }
+  .pd-debug-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                  font-size: 11px; color: #888; margin-bottom: 4px; }
+  .pd-debug-bar select { width: auto; padding: 2px 6px; font-size: 11px; }
+  .pd-debug canvas { display: block; width: 100%; height: 230px; background: #0a0a1a; border-radius: 4px; }
+  .pd-debug-legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 10px; color: #888; margin-top: 3px; }
+  .pd-debug-legend i { display: inline-block; width: 12px; height: 2px; margin-right: 4px; vertical-align: middle; }
 </style>
 </head>
 <body>
@@ -369,6 +394,7 @@ async function loadRig() {
     const r = await fetch(SAPI + '/config');
     rig = await r.json();
     if (rig.error) { log('Error: ' + rig.error); return; }
+    pdResetState();
     deviceState = {};
     piState = {};
     devicesInitialized = false;
@@ -376,6 +402,7 @@ async function loadRig() {
     checkWarp();
     log('Loaded rig: ' + rig.name);
     await checkAllPis();
+    await pdLoadTeensy();
   } finally {
     _unlockUI();
   }
@@ -587,6 +614,9 @@ async function initDevices() {
     for (const [name, res] of Object.entries(results)) {
       deviceState[name] = deviceState[name] || {};
       deviceState[name].initialized = res.ok;
+      deviceState[name].error = res.ok ? '' : (res.message || '');
+      deviceState[name].open = !!res.device_open;      // photodiode: open although its flash check failed
+      if (name === 'photodiode' && res.fw) _pdSeeFw(res.fw);
     }
 
     devicesInitialized = true;
@@ -612,13 +642,16 @@ async function _reinitDeviceInner(name) {
     (data.steps || []).forEach(s => log('  ' + s));
     deviceState[name] = deviceState[name] || {};
     deviceState[name].initialized = !!data.ok;
+    deviceState[name].error = data.ok ? '' : (data.error || data.message || '');
+    deviceState[name].open = !!data.device_open;
+    if (name === 'photodiode' && data.fw) _pdSeeFw(data.fw);
     // Camera reinit releases the camera server-side (the MJPEG stream closes), so clear the
     // streaming flag and re-render — otherwise the card keeps a dead, frozen preview <img>.
     if (name === 'camera') {
       deviceState.camera.streaming = false;
       renderDeviceList();
     }
-    log(data.ok ? (name + ' reinitialized.') : (name + ' reinit failed: ' + (data.error || '')));
+    log(data.ok ? (name + ' reinitialized.') : (name + ' reinit failed: ' + pdEsc(data.error || data.message || '')));
     return !!data.ok;
   } catch (e) { log('Reinit error: ' + e); return false; }
 }
@@ -1337,15 +1370,32 @@ let lickEvents = [];
 let piClockOffset = null; // Mac_time - Pi_time (seconds)
 let lickAnimFrame = null;
 
-let photodiodeEvents = [];
-let photodiodeClockOffset = null;
-let photodidePollInterval = null;
-let photodiodeAnimFrame = null;
-let photodiodeRaw = [];         // rolling raw transitions {t, level} (~last 2s) for the scope
-let photodiodeTrigger = null;   // latest raw rising-edge time = scope trigger
-let photodiodeVData = null;     // latest {available, v, p1, p99, v_high, v_low} from the Teensy V stream
-let photodiodeEdgeCount = 0;    // total raw rising edges since monitor start
-let _pdPolling = false;         // in-flight guard so overlapping polls can't race the raw buffer
+// Photodiode card (functions under "Photodiode card" below). The Teensy's tunables carry the
+// names of the sketch's constants, which are also the names firmware v2_3 reports and takes
+// over serial (devices/photodiode.py TEENSY_PARAMS).
+const PD_PARAMS = ['MIN_PULSE_V', 'START_FRAC', 'END_FRAC', 'STEADY_US', 'HOLDOFF_US'];
+const PD_PARAM_UI = {
+  MIN_PULSE_V: {step: 0.01, tip: 'a pulse must rise at least this many volts above the dark baseline'},
+  START_FRAC:  {step: 0.05, tip: 'a pulse starts when V crosses this fraction of the way from baseline to peak'},
+  END_FRAC:    {step: 0.05, tip: 'a pulse ends when V falls below this fraction of the way from baseline to peak (must be below START_FRAC)'},
+  STEADY_US:   {step: 10,   tip: 'V must stay past a threshold this long (µs) before the state changes'},
+  HOLDOFF_US:  {step: 1000, tip: 'minimum time between accepted pulses (µs); 30000 = one edge per commanded flash'},
+};
+const PD_VIEWS = [            // the Debug window's time axes
+  {label: 'Scroll 5 s',   span: 5,    mode: 'scroll'},
+  {label: 'Scroll 1 s',   span: 1,    mode: 'scroll'},
+  {label: 'Pulse 200 ms', span: 0.2,  mode: 'pulse'},     // holds on the newest pulse, like a scope trigger
+  {label: 'Pulse 50 ms',  span: 0.05, mode: 'pulse'},
+  {label: 'Pulse 20 ms',  span: 0.02, mode: 'pulse'},
+];
+const PD_KEEP_S = 6.5;        // seconds of trace the page keeps (the longest view + margin)
+const PD_GAP_S = 0.005;       // samples further apart than this are not joined by a line
+// pdTeensy: the sketch the card works on and what the Teensy reports. pdDebug: the Debug
+// window's buffers. Both live here, not in the DOM — renderDeviceList() rebuilds the card.
+let pdTeensy = _pdNewTeensy();
+let pdDebug = _pdNewDebug();
+let pdTestTimer = null;       // 1 Hz pulse readout while Flash Test runs
+let pdTestText = '';
 
 let rewardEvents = [];
 let rewardClockOffset = null;
@@ -1611,250 +1661,875 @@ function drawRewardRaster() {
   }
 }
 
-// ── Photodiode monitoring ──
+// ── Photodiode card: Teensy sketch, Debug window, Flash Test ──
+// The Teensy turns the photodiode's analog signal into one clean pulse per sync flash and the
+// Pi only timestamps the edge, so the card carries the Teensy's side too:
+//   Upload      writes the card's Teensy parameters into the sketch file, then compiles and
+//               flashes the production build on the Pi that owns the photodiode. Debug Mode off.
+//   Debug       Debug Mode off: compiles and flashes the DEBUG build of the same sketch with the
+//               card's parameters (the file is not changed), then opens the Debug window.
+//               Debug Mode on: shows / hides the window. The DEBUG build stays on the Teensy
+//               until the next Upload.
+//   Update      (window open) sends the card's Teensy parameters to the running DEBUG build over
+//               serial: in its RAM only, Upload makes them permanent.
+//   Flash Test  flashes the sync square on the display, with or without the window.
+// The Debug window draws what the DEBUG build streams over serial (V and its two thresholds,
+// ~4.4 kHz) and a vertical line for every rising edge the Pi's GPIO saw. Debug Mode is what
+// the Teensy itself reports (firmware v2_3's "I" line); until it has been asked, what the
+// controller remembers of its last upload.
 
-async function startPhotodiodeMonitor() {
+function _pdNewTeensy() {
+  return {loaded: false, path: '', exists: false, error: '',
+          params: {},          // the card's values (what Upload writes and Update sends)
+          fileParams: {},      // what the sketch file holds
+          spec: {}, missing: [], version: null, hasDebug: false, defaultPath: '',
+          debugMode: null,     // null = not known yet, else: the Teensy runs the DEBUG build
+          fw: null,            // the Teensy's own report (Photodiode.fw_info on the Pi)
+          browse: null,        // {dir, parent, dirs, files} while the Browse panel is open
+          busy: false};        // an Update is on its way
+}
+
+function _pdNewDebug() {
+  return {open: false, ip: null, piName: '', gen: 0, timer: null, raf: null, paused: false,
+          t: [], v: [], hi: [], lo: [], edges: [], accepts: [],     // seconds on the Teensy clock
+          seq: 0, eseq: 0, aseq: 0, epoch: null,                    // cursors into the Pi's ring
+          lastT: null, lastRx: 0, vMax: 0, view: 0, frozen: null,
+          trig: null, trigAt: 0, trigView: 0,
+          info: null, err: '', lastStart: 0, fwKey: '', drawErr: false};
+}
+
+// Reload: forget the card's state, and stop what the old page left running on the Pis.
+function pdResetState() {
+  const gen = pdDebug.gen + 1;
+  clearTimeout(pdDebug.timer);
+  cancelAnimationFrame(pdDebug.raf);
+  if (pdDebug.open && pdDebug.ip) _pdProxy(pdDebug.ip, '/api/photodiode_debug_stop', 'POST');
+  if (pdTestTimer) { clearInterval(pdTestTimer); pdTestTimer = null; }
+  if ((deviceState.photodiode || {}).testing) {
+    const dpi = getPiForDevice('display');
+    if (dpi) _pdProxy(dpi.ip, '/api/photodiode_test_stop', 'POST');
+  }
+  pdTestText = '';
+  pdTeensy = _pdNewTeensy();
+  pdDebug = _pdNewDebug();
+  pdDebug.gen = gen;            // a poll of the old window still in flight sees it is over
+}
+
+// Server and Pi text goes into the log and the card as HTML: escape it.
+function pdEsc(s) {
+  const map = {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'};
+  return String(s ?? '').replace(/[&<>"']/g, c => map[c]);
+}
+
+const _pdSleep = ms => new Promise(res => setTimeout(res, ms));
+
+// proxyPi without the log line on a failed fetch: the Debug window polls ten times a second.
+async function _pdProxy(ip, endpoint, method = 'GET', payload = {}, timeout = 5) {
+  try {
+    const r = await fetch(SAPI + '/proxy', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ip, port: rig.network.api_port, endpoint, method, payload, timeout})
+    });
+    return await r.json();
+  } catch (e) {
+    return {ok: false, error: String(e)};
+  }
+}
+
+function _pdFmt(name, v) {
+  if (v === null || v === undefined || !isFinite(Number(v))) return '';
+  const spec = pdTeensy.spec[name];
+  const isInt = spec ? spec.type === 'int' : name.endsWith('_US');
+  return isInt ? String(Math.round(Number(v))) : String(parseFloat(Number(v).toFixed(3)));
+}
+
+function _pdSame(a, b) {
+  return a !== null && a !== undefined && b !== null && b !== undefined
+    && Math.abs(Number(a) - Number(b)) < 0.0006;
+}
+
+// The rig's photodiode config: pi_api opens the photodiode from it when none is open yet
+// (the Debug window and Update work without a passed init).
+function _pdConfig() {
+  const pd = (rig.devices || {}).photodiode || {};
+  return {...pd, gpio: pd.gpio ?? 24};
+}
+
+function _pdCardParams() {
+  const out = {};
+  PD_PARAMS.forEach(n => {
+    if (n in pdTeensy.params && isFinite(Number(pdTeensy.params[n]))) out[n] = pdTeensy.params[n];
+  });
+  return out;
+}
+
+// A parameter the sketch file does not hold still gets a field when the Teensy reports it.
+function _pdFillFromRunning() {
+  const fw = pdTeensy.fw;
+  if (!(fw && fw.known && fw.params)) return;
+  PD_PARAMS.forEach(n => {
+    if (!(n in pdTeensy.params) && n in fw.params) pdTeensy.params[n] = fw.params[n];
+  });
+}
+
+function _pdApplySketch(info) {
+  pdTeensy.loaded = true;
+  pdTeensy.path = info.path || '';
+  pdTeensy.exists = !!info.exists;
+  pdTeensy.error = info.ok ? '' : (info.error || 'cannot read the sketch');
+  pdTeensy.spec = info.spec || pdTeensy.spec;
+  pdTeensy.fileParams = {...(info.params || {})};
+  pdTeensy.params = {...(info.params || {})};
+  pdTeensy.missing = info.missing || [];
+  pdTeensy.version = info.version || null;
+  pdTeensy.hasDebug = !!info.has_debug;
+  pdTeensy.defaultPath = info.default || '';
+  _pdFillFromRunning();
+}
+
+// Take in what the Teensy says it runs. Firmware v2_3 names its build, so that is Debug Mode.
+function _pdSeeFw(fw) {
+  pdTeensy.fw = fw || null;
+  if (fw && fw.known) pdTeensy.debugMode = fw.debug === true;
+  _pdFillFromRunning();
+}
+
+function _pdIsDebugBuild(fw) {
+  return (fw && fw.known) ? fw.debug === true : pdTeensy.debugMode === true;
+}
+
+// The photodiode's port was only just opened: give the Teensy a moment to answer "?" before
+// deciding which build it runs (a wrong "production" here would flash the DEBUG build for nothing).
+async function _pdAskFw(pi, fw, tries = 6) {
+  for (let i = 0; i < tries && !(fw && fw.known); i++) {
+    if (fw && fw.serial_open && fw.version) break;      // firmware older than v2_3: it never answers
+    await _pdSleep(500);
+    const r = await _pdProxy(pi.ip, '/api/photodiode_fw');
+    if (r && r.status === 404) break;
+    if (r && r.ok && r.open) fw = r.fw;
+  }
+  return fw;
+}
+
+// The line under the parameter row: what the Teensy runs. Values that differ from the card's
+// are amber (the Teensy runs something the card would change on Update / Upload).
+function _pdRunsHtml() {
+  const fw = pdTeensy.fw;
+  if (!fw) return 'Teensy: not asked yet (Initialize or Debug opens the photodiode and asks it)';
+  if (!fw.serial_open) {
+    return '<span style="color:#ef9a9a">Teensy serial port not open'
+      + (fw.serial_error ? ': ' + pdEsc(fw.serial_error) : '') + '</span>';
+  }
+  if (!fw.known) {
+    return fw.version
+      ? '<span style="color:#ffb74d">Teensy runs a firmware older than v2_3 (no Debug window, no Update) — Upload the v2_3 sketch</span>'
+      : 'Teensy does not answer on serial yet';
+  }
+  let differs = false;
+  const parts = PD_PARAMS.filter(n => fw.params && n in fw.params).map(n => {
+    const text = n + ' ' + _pdFmt(n, fw.params[n]);
+    if (!(n in pdTeensy.params) || _pdSame(fw.params[n], pdTeensy.params[n])) return text;
+    differs = true;
+    return `<span style="color:#ffb74d" title="the card has ${_pdFmt(n, pdTeensy.params[n])}">${text}</span>`;
+  });
+  return `Teensy runs ${pdEsc(fw.version)} ${fw.debug ? 'DEBUG' : 'production'} build: ${parts.join(' · ')}`
+    + (differs ? ' <span style="color:#ffb74d">(amber: not the card\'s value)</span>' : '');
+}
+
+// The small things a poll may change, set in place: a poll never re-renders the card.
+function _pdRefreshLive() {
+  const cb = document.getElementById('pd-debug-mode');
+  if (cb) {
+    cb.checked = pdTeensy.debugMode === true;
+    cb.parentElement.classList.toggle('unknown', pdTeensy.debugMode === null);
+  }
+  const runs = document.getElementById('pd-teensy-runs');
+  if (runs) runs.innerHTML = _pdRunsHtml();
+  const up = document.getElementById('pd-update-btn');
+  if (up) up.disabled = !pdDebug.open || uiBusy || pdTeensy.busy;
+}
+
+// Page load: the sketch the rig remembers (rig YAML devices.photodiode.teensy_sketch, else the
+// rig's default) and, when a photodiode is open on its Pi, what the Teensy runs.
+async function pdLoadTeensy() {
+  if (!rig || !(rig.devices || {}).photodiode) return;
+  let info;
+  try { info = await fetch(SAPI + '/teensy_sketch').then(r => r.json()); }
+  catch (e) { info = {ok: false, error: String(e)}; }
+  _pdApplySketch(info);
+  if (info.debug_mode !== null && info.debug_mode !== undefined) pdTeensy.debugMode = info.debug_mode;
+  const pi = getPiForDevice('photodiode');
+  if (pi && (piState[pi.ip] || {}).ok) {
+    const r = await _pdProxy(pi.ip, '/api/photodiode_fw');
+    if (r && r.ok && r.open) { _pdSeeFw(r.fw); _pdAdoptRunning(); }
+  }
+  renderDeviceList();
+}
+
+// A DEBUG build tuned with Update runs values the sketch file does not hold. After a page
+// reload the card shows those, not the file's: an Upload must not quietly flash the old ones.
+function _pdAdoptRunning() {
+  const fw = pdTeensy.fw;
+  if (!(fw && fw.known && fw.debug && fw.params)) return;
+  const diff = PD_PARAMS.filter(n => n in fw.params && n in pdTeensy.fileParams
+                                     && !_pdSame(fw.params[n], pdTeensy.fileParams[n]));
+  if (!diff.length) return;
+  diff.forEach(n => { pdTeensy.params[n] = fw.params[n]; });
+  log('The Teensy runs the DEBUG build with ' + diff.map(n => n + ' ' + _pdFmt(n, fw.params[n])).join(', ')
+      + ' — not what the sketch file holds. The card shows the running values; Upload writes them into the sketch.');
+}
+
+// Choose the sketch (the path field or Browse). The server stores it in the rig YAML at once;
+// the page's copy of the rig gets it too, or the next Save Rig would write the old one back.
+async function pdSetSketch(path) {
+  if (uiBusy) return;
+  path = String(path || '').trim();
+  let info;
+  try {
+    info = await fetch(SAPI + '/teensy_sketch', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path})
+    }).then(r => r.json());
+  } catch (e) { info = {ok: false, path, error: String(e)}; }
+  _pdApplySketch(info);
+  if (info.ok) {
+    pdTeensy.browse = null;
+    if (rig.devices.photodiode) rig.devices.photodiode.teensy_sketch = info.path;
+    log('Teensy sketch: ' + pdEsc(info.path)
+        + (info.stored ? ' (saved in the rig YAML)' : info.saved !== info.path ? ' (not saved yet — Save Rig stores it)' : ''));
+    if (pdTeensy.missing.length) {
+      log('  this sketch has no constant line for ' + pdEsc(pdTeensy.missing.join(', '))
+          + ' — the card\'s Teensy parameters need the v2_3 sketch.');
+    }
+  } else {
+    log('Teensy sketch: ' + pdEsc(info.error || 'cannot read it'));
+  }
+  renderDeviceList();
+}
+
+// Browse: the controller lists its own folders (the sketch lives there, and the browser may be
+// on another machine). No argument with the panel open closes it.
+async function pdBrowse(dir) {
+  if (uiBusy) return;
+  if (dir === undefined && pdTeensy.browse) { pdTeensy.browse = null; renderDeviceList(); return; }
+  if (dir === undefined && pdTeensy.exists && pdTeensy.path.includes('/')) {
+    dir = pdTeensy.path.replace(/\/[^\/]*$/, '');
+  }
+  let r;
+  try {
+    r = await fetch(SAPI + '/teensy_browse' + (dir ? '?dir=' + encodeURIComponent(dir) : '')).then(x => x.json());
+  } catch (e) { r = {ok: false, error: String(e)}; }
+  if (!r.ok) { log('Browse: ' + pdEsc(r.error || 'failed')); return; }
+  pdTeensy.browse = {dir: r.dir, parent: r.parent, dirs: r.dirs || [], files: r.files || []};
+  renderDeviceList();
+}
+
+function pdBrowseUp() {
+  const b = pdTeensy.browse;
+  if (b && b.parent) pdBrowse(b.parent);
+}
+
+function pdBrowseInto(i) {
+  const b = pdTeensy.browse;
+  if (b && b.dirs[i] !== undefined) pdBrowse(b.dir + '/' + b.dirs[i]);
+}
+
+function pdBrowsePick(i) {
+  const b = pdTeensy.browse;
+  if (b && b.files[i] !== undefined) pdSetSketch(b.dir + '/' + b.files[i]);
+}
+
+// A parameter field changed: keep it inside the firmware's range and on the card. In place —
+// a re-render would take the focus from the next field.
+function pdParamChanged(name, el) {
+  const spec = pdTeensy.spec[name] || {};
+  let v = parseFloat(el.value);
+  if (!isFinite(v)) v = Number(pdTeensy.params[name] ?? pdTeensy.fileParams[name] ?? 0);
+  if (spec.min !== undefined) v = Math.max(spec.min, Math.min(spec.max, v));
+  v = spec.type === 'int' ? Math.round(v) : parseFloat(v.toFixed(3));
+  pdTeensy.params[name] = v;
+  el.value = _pdFmt(name, v);
+  el.classList.toggle('pd-edited', name in pdTeensy.fileParams && !_pdSame(v, pdTeensy.fileParams[name]));
+  const runs = document.getElementById('pd-teensy-runs');
+  if (runs) runs.innerHTML = _pdRunsHtml();
+}
+
+// Update: the card's parameters to the running DEBUG build, over serial. No lock: the trace
+// keeps running, which is the point — change a value, watch the thresholds move.
+async function pdUpdateTeensy() {
+  if (!pdDebug.open || uiBusy || pdTeensy.busy) return;
+  const pi = getPiForDevice('photodiode');
+  if (!pi) return;
+  const params = _pdCardParams();
+  if (!Object.keys(params).length) { log('Update: no Teensy parameters on the card.'); return; }
+  pdTeensy.busy = true;
+  _pdRefreshLive();
+  try {
+    const r = await proxyPi(pi.ip, '/api/photodiode_teensy_params', {..._pdConfig(), params});
+    if (r.fw) _pdSeeFw(r.fw);
+    if (r.ok) {
+      log('Teensy updated: ' + PD_PARAMS.filter(n => n in (r.sent || {})).map(n => n + ' ' + _pdFmt(n, r.sent[n])).join(', ')
+          + ' — in its RAM until the next upload or power cycle; Upload writes them into the sketch.');
+    } else if (r.status === 404) {
+      log('Update failed: ' + pdEsc(pi.name) + '\'s pi_api has no Update yet — Deploy this rig.');
+    } else {
+      log('Update failed: ' + pdEsc(r.error || ''));
+    }
+  } finally {
+    pdTeensy.busy = false;
+    _pdRefreshLive();
+  }
+}
+
+// Compile + flash on the photodiode Pi (the Teensy is on its USB; the server installs the
+// toolchain there first if it is missing). debug false: the card's parameters go into the
+// sketch file and the production build is flashed. debug true: the DEBUG build of the same
+// sketch with the card's parameters, file untouched. The caller holds the UI lock.
+async function _pdUpload(debug) {
+  if (!(pdTeensy.path && pdTeensy.exists)) {
+    log((debug ? 'Debug' : 'Upload') + ': choose the Teensy sketch first (the path field or Browse)'
+        + (pdTeensy.error ? ' — ' + pdEsc(pdTeensy.error) : '') + '.');
+    return false;
+  }
+  if (debug && !pdTeensy.hasDebug) {
+    log('Debug: ' + pdEsc(pdTeensy.path) + ' has no "#define DEBUG" line, so it has no DEBUG build — choose the v2_3 sketch.');
+    return false;
+  }
+  log(`Teensy upload: ${pdEsc(pdTeensy.path)} (${debug ? 'DEBUG' : 'production'} build)...`);
+  try {
+    // What the flash will meet on the photodiode Pi: toolchain there? Teensy seen? serial mode?
+    const st = await fetch(SAPI + '/teensy_status').then(x => x.json()).catch(e => ({ok: false, error: String(e)}));
+    if (st.ok) {
+      log(`  ${pdEsc(st.pi)}: toolchain ${st.toolchain_ok ? 'present' : st.usb_pids.length ? 'MISSING — installing first (several minutes on WiFi)' : 'missing'}; `
+          + `Teensy USB ${st.usb_pids.length ? '16c0:' + st.usb_pids.join(',') : 'NOT FOUND'}`);
+      if (!st.usb_pids.length) { log('Teensy upload failed: no Teensy on ' + pdEsc(st.pi) + "'s USB"); return false; }
+      if (!st.serial_mode) log('  Teensy is not in Serial mode (fresh board): it will be rebooted over HID after the '
+                               + 'compile; if the log then asks for it, press the Teensy button once (loader waits ~2 min).');
+    } else {
+      log('  (status check failed: ' + pdEsc(st.error || '') + ' — trying the upload anyway)');
+    }
+    const r = await fetch(SAPI + '/teensy_upload', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({path: pdTeensy.path, params: _pdCardParams(), debug})
+    });
+    const data = await r.json();
+    (data.steps || []).forEach(s => log('  ' + pdEsc(s)));
+    if (!data.ok) {
+      if (data.debug_mode !== null && data.debug_mode !== undefined) pdTeensy.debugMode = data.debug_mode;
+      if (data.file_params) pdTeensy.fileParams = {...data.file_params};   // Upload writes the file before it compiles
+      log('Teensy upload failed: ' + pdEsc(data.error || ''));
+      return false;
+    }
+    pdTeensy.debugMode = debug;
+    pdTeensy.path = data.path || pdTeensy.path;
+    pdTeensy.fileParams = {...(data.file_params || pdTeensy.fileParams)};
+    // The Teensy's own word when the new build has reported; else nothing rather than the
+    // report of the build that was just replaced.
+    if (data.fw_how === 'ok') _pdSeeFw(data.fw);
+    else pdTeensy.fw = data.fw_how === 'older' ? data.fw : null;
+    if (rig.devices.photodiode) rig.devices.photodiode.teensy_sketch = pdTeensy.path;
+    log(debug ? 'DEBUG build uploaded — Debug Mode on.'
+              : 'Teensy firmware uploaded — Debug Mode off. Reinit the photodiode to run its flash check on this build.');
+    return true;
+  } catch (e) {
+    log('Teensy upload failed: ' + pdEsc(e));
+    return false;
+  }
+}
+
+async function pdUploadClick() {
+  if (uiBusy) return;
+  _lockUI();
+  try {
+    await pdCloseDebug(false);
+    await _pdUpload(false);
+  } finally { _unlockUI(); }
+}
+
+// Debug: with the DEBUG build on the Teensy, show / hide the window. Without it, flash it first.
+async function pdDebugClick() {
+  if (uiBusy) return;
+  if (pdDebug.open) { await pdCloseDebug(); return; }
   const pi = getPiForDevice('photodiode');
   if (!pi) { log('Photodiode not assigned to a Pi'); return; }
-  const pd = rig.devices.photodiode || {};
-  const result = await proxyPi(pi.ip, '/api/photodiode_raw_start', {gpio: pd.gpio || 24});
-  if (result.ok) {
-    deviceState.photodiode = deviceState.photodiode || {};
-    deviceState.photodiode.monitoring = true;
-    photodiodeRaw = []; photodiodeTrigger = null; photodiodeEdgeCount = 0;
-    renderDeviceList();
-    photodidePollInterval = setInterval(() => pollPhotodiodeRaw(pi.ip), 200);
-    startPhotodiodeAnimation();
-    log('Photodiode scope started (raw transitions; glitch filter off during capture).');
-  } else { log('Failed: ' + (result.error || '')); }
+  _lockUI();
+  try {
+    let r = await proxyPi(pi.ip, '/api/photodiode_debug_start', _pdConfig());
+    if (r.status === 404) { log(pdEsc(pi.name) + '\'s pi_api has no Debug window yet — Deploy this rig first.'); return; }
+    if (!r.ok) { log('Debug: ' + pdEsc(r.error || 'the photodiode did not open')); return; }
+    let fw = await _pdAskFw(pi, r.fw);
+    _pdSeeFw(fw);
+    if (!_pdIsDebugBuild(fw)) {
+      await _pdProxy(pi.ip, '/api/photodiode_debug_stop', 'POST');
+      log('Debug Mode is off — uploading the DEBUG build of the sketch...');
+      if (!await _pdUpload(true)) return;
+      // The Teensy re-enumerates after the flash and the Pi reopens its port: start collecting
+      // once the DEBUG build answers there.
+      fw = null;
+      for (let i = 0; i < 16 && !(fw && fw.known && fw.debug); i++) {
+        if (i) await _pdSleep(500);
+        r = await _pdProxy(pi.ip, '/api/photodiode_debug_start', 'POST', _pdConfig());
+        fw = r.ok ? r.fw : null;
+      }
+      if (fw && fw.known && fw.debug) _pdSeeFw(fw);
+      else log('The DEBUG build has not reported over serial yet — the window fills once it does.');
+    }
+    _pdOpenDebug(pi);
+  } finally { _unlockUI(); }
 }
 
-async function stopPhotodiodeMonitor() {
-  if (deviceState.photodiode && deviceState.photodiode.testing) await stopPhotodiodeTest();
-  const pi = getPiForDevice('photodiode');
-  if (pi) await proxyPi(pi.ip, '/api/photodiode_raw_stop');
-  deviceState.photodiode = deviceState.photodiode || {};
-  deviceState.photodiode.monitoring = false;
-  if (photodidePollInterval) { clearInterval(photodidePollInterval); photodidePollInterval = null; }
-  stopPhotodiodeAnimation();
-  renderDeviceList();
-  log('Photodiode scope stopped.');
+// ── Photodiode card: the Debug window ──
+// The Pi collects the DEBUG build's samples in a ring (devices/photodiode.py debug_read); the
+// page asks for what is new ten times a second and draws from its own copy. Everything is on
+// one time axis, the Teensy's clock; the Pi puts its GPIO edges on it.
+
+function _pdOpenDebug(pi) {
+  const gen = pdDebug.gen + 1;
+  clearTimeout(pdDebug.timer);
+  cancelAnimationFrame(pdDebug.raf);
+  const keep = {view: pdDebug.view, paused: pdDebug.paused};
+  pdDebug = _pdNewDebug();
+  Object.assign(pdDebug, keep, {open: true, ip: pi.ip, piName: pi.name, gen, lastStart: performance.now()});
+  _pdPollDebug(gen);
+  pdDebug.raf = requestAnimationFrame(() => _pdDrawLoop(gen));
 }
 
-// Test: flash the red sync square every N frames on the follower display so the photodiode sees
-// real pulses (opens the scope too). Simulates the stimulus sync square during an experiment.
-async function startPhotodiodeTest() {
-  // The flash runs on the display Pi and needs only the display. Edge monitoring needs the
-  // photodiode initialized — skip it when it isn't, so the square can still be flashed to
-  // troubleshoot a photodiode (or Teensy) that won't come up.
-  const pdReady = deviceState.photodiode && deviceState.photodiode.initialized === true;
-  if (pdReady && !deviceState.photodiode.monitoring) {
-    try { await startPhotodiodeMonitor(); }
-    catch (e) { log('Photodiode monitor did not start (' + e + ') — flashing anyway.'); }
-  } else if (!pdReady) {
-    log('Photodiode not initialized — flashing the sync square only, no edge monitoring.');
+// Hide the window. The DEBUG build keeps running on the Teensy: Debug Mode stays on.
+async function pdCloseDebug(render = true) {
+  if (!pdDebug.open) return;
+  const ip = pdDebug.ip;
+  pdDebug.open = false;
+  pdDebug.gen++;
+  clearTimeout(pdDebug.timer);
+  cancelAnimationFrame(pdDebug.raf);
+  pdDebug.frozen = null;
+  if (render) renderDeviceList();
+  if (ip) await _pdProxy(ip, '/api/photodiode_debug_stop', 'POST');
+}
+
+function pdSetView(v) {
+  pdDebug.view = Math.max(0, Math.min(PD_VIEWS.length - 1, parseInt(v) || 0));
+}
+
+// Freeze: hold the picture (the buffers keep filling behind it), press again to go on.
+function pdToggleFreeze() {
+  const D = pdDebug;
+  if (!D.open) return;
+  if (D.frozen) {
+    D.frozen = null;
+  } else {
+    D.frozen = {t: D.t.slice(), v: D.v.slice(), hi: D.hi.slice(), lo: D.lo.slice(),
+                edges: D.edges.slice(), accepts: D.accepts.slice(),
+                lastT: D.lastT, vMax: D.vMax, tEnd: _pdScrollEnd(D),
+                trig: D.trig, trigAt: D.trigAt, trigView: D.trigView};
   }
+  const b = document.getElementById('pd-freeze-btn');
+  if (b) b.textContent = D.frozen ? 'Resume' : 'Freeze';
+}
+
+// One poll, then the next: a setTimeout chain, so a slow answer can never pile up requests.
+async function _pdPollDebug(gen) {
+  const D = pdDebug;
+  if (gen !== D.gen || !D.open) return;
+  let delay = 100;
+  if (D.paused) {
+    delay = 300;                 // the Setup tab is hidden: ask nothing (the Pi stops by itself)
+  } else {
+    let q = '/api/photodiode_debug_data?since=' + D.seq + '&eseq=' + D.eseq + '&aseq=' + D.aseq;
+    if (D.epoch !== null) q += '&epoch=' + D.epoch;
+    const r = await _pdProxy(D.ip, q);
+    if (D !== pdDebug || gen !== D.gen || !D.open) return;     // closed or replaced meanwhile
+    if (r && r.ok) {
+      D.err = '';
+      _pdTakeDebug(r);
+      if (r.on === false) _pdRestartCapture();
+    } else {
+      delay = 1000;
+      const e = String((r && r.error) || 'no answer');
+      if (r && r.status === 404) {
+        D.err = D.piName + '\'s pi_api has no Debug window — Deploy this rig';
+      } else if (/not initialized/.test(e)) {
+        D.err = 'the photodiode is not open on ' + D.piName;
+        _pdRestartCapture();
+      } else {
+        D.err = 'no answer from ' + D.piName + ' (' + e.slice(0, 100) + ')';
+      }
+    }
+    const st = document.getElementById('pd-debug-status');
+    if (st) st.innerHTML = _pdStatusHtml();
+  }
+  D.timer = setTimeout(() => _pdPollDebug(gen), delay);
+}
+
+// The Pi's capture ended (nobody read for 10 s, or Initialize / Reinit replaced the device):
+// start it again. Never during a locked operation — an Initialize releases and re-creates the
+// photodiode, and opening one from here in between would race it for the GPIO line.
+function _pdRestartCapture() {
+  const D = pdDebug;
+  const now = performance.now();
+  if (uiBusy || !D.open || now - D.lastStart < 2000) return;
+  D.lastStart = now;
+  _pdProxy(D.ip, '/api/photodiode_debug_start', 'POST', _pdConfig());
+}
+
+function _pdTakeDebug(r) {
+  const D = pdDebug;
+  if (r.epoch !== D.epoch) {        // the Pi cleared its ring (Teensy restart, reconnect): new axis
+    D.t = []; D.v = []; D.hi = []; D.lo = []; D.edges = []; D.accepts = [];
+    D.lastT = null; D.vMax = 0; D.trig = null;
+    D.epoch = r.epoch;
+  }
+  const t = r.t || [], n = t.length;
+  for (let i = 0; i < n; i++) { D.t.push(t[i]); D.v.push(r.v[i]); D.hi.push(r.hi[i]); D.lo.push(r.lo[i]); }
+  (r.edges || []).forEach(e => D.edges.push(e));
+  (r.accepts || []).forEach(a => D.accepts.push(a));
+  D.seq = r.seq; D.eseq = r.eseq; D.aseq = r.aseq;
+  if (n) { D.lastT = D.t[D.t.length - 1]; D.lastRx = performance.now(); }
+  if (D.lastT !== null) {
+    const cut = D.lastT - PD_KEEP_S;
+    const k = _pdLowerBound(D.t, cut);
+    if (k > 4000) { D.t.splice(0, k); D.v.splice(0, k); D.hi.splice(0, k); D.lo.splice(0, k); }
+    while (D.edges.length && D.edges[0] < cut) D.edges.shift();
+    while (D.accepts.length && D.accepts[0] < cut) D.accepts.shift();
+  }
+  let m = 0;
+  for (let i = 0; i < D.v.length; i++) { if (D.v[i] > m) m = D.v[i]; if (D.hi[i] > m) m = D.hi[i]; }
+  D.vMax = m;
+  D.info = {sync: r.sync, accepts1: r.accepts_1s || 0, edges1: r.edges_1s || 0, on: r.on};
+  const fw = r.fw || {};
+  const key = JSON.stringify([fw.serial_open, fw.serial_error, fw.known, fw.version, fw.debug, fw.params]);
+  if (key !== D.fwKey) {            // the Teensy's report changed (an Update, a reflash, a replug)
+    D.fwKey = key;
+    _pdSeeFw(r.fw);
+    _pdRefreshLive();
+  }
+}
+
+// Why the window is empty: a short text for the canvas, a longer one for the line above it.
+function _pdNoTrace(long) {
+  const D = pdDebug;
+  if (D.t.length) return '';
+  if (D.err) return long ? '' : D.err;
+  const fw = pdTeensy.fw;
+  if (fw && !fw.serial_open) {
+    return long ? 'the Teensy serial port is not open on ' + D.piName + (fw.serial_error ? ' (' + fw.serial_error + ')' : '')
+                : 'Teensy serial port not open';
+  }
+  if (fw && fw.known && !fw.debug) {
+    return long ? 'the Teensy runs the production build, which streams no trace — close this window and press Debug to upload the DEBUG build'
+                : 'production build on the Teensy — no trace';
+  }
+  if (fw && !fw.known && fw.version) {
+    return long ? 'the Teensy runs a firmware older than v2_3, which streams no trace — choose the v2_3 sketch, then Debug'
+                : 'firmware older than v2_3 — no trace';
+  }
+  return long ? '' : 'waiting for samples from the Teensy…';
+}
+
+function _pdStatusHtml() {
+  const D = pdDebug;
+  if (D.err) return '<span style="color:#ef9a9a">' + pdEsc(D.err) + '</span>';
+  if (!D.info) return 'connecting…';
+  const i = D.info;
+  const off = Math.abs(i.accepts1 - i.edges1) > 1;      // the Teensy pulses and the Pi does not see them, or the reverse
+  let s = 'Teensy accepted ' + i.accepts1 + ' pulses/s · '
+    + '<span' + (off ? ' style="color:#ffb74d"' : '') + '>Pi GPIO' + _pdConfig().gpio + ' saw ' + i.edges1 + ' edges/s</span>';
+  if (D.v.length) s += ' · V ' + D.v[D.v.length - 1].toFixed(3);
+  if (i.sync === 'gpio') s += ' · lines placed from matched pulses (exact)';
+  else if (i.sync === 'serial') s += ' · lines placed by serial timing (± ~1 ms)';
+  const why = _pdNoTrace(true);
+  if (why) s += ' · <span style="color:#ffb74d">' + pdEsc(why) + '</span>';
+  return s;
+}
+
+function _pdNiceTop(v) {
+  for (const s of [0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1, 1.5, 2, 2.5, 3.3]) if (v <= s) return s;
+  return 3.5;
+}
+
+function _pdLowerBound(arr, x) {     // first index whose value is >= x
+  let lo = 0, hi = arr.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m] < x) lo = m + 1; else hi = m; }
+  return lo;
+}
+
+// The right edge of a scrolling view: a quarter second behind the newest sample and moving at
+// clock speed between two polls, so the trace glides and does not jump by a poll at a time.
+function _pdScrollEnd(D) {
+  if (D.lastT === null) return 0;
+  return Math.min(D.lastT, D.lastT - 0.25 + (performance.now() - D.lastRx) / 1000);
+}
+
+// The pulse a "Pulse" view holds on: the newest one whose whole window has arrived. At least
+// 80 ms old, so the Pi has handed out its GPIO edge too (it settles them for 60 ms).
+function _pdFindTrigger(S, span) {
+  if (S.lastT === null) return null;
+  const limit = S.lastT - Math.max(0.75 * span, 0.08);
+  let best = null;
+  for (const arr of [S.edges, S.accepts]) {
+    for (let i = arr.length - 1; i >= 0 && i >= arr.length - 400; i--) {
+      if (arr[i] <= limit && (best === null || arr[i] > best)) best = arr[i];
+    }
+  }
+  return best;
+}
+
+function _pdDrawLoop(gen) {
+  const D = pdDebug;
+  if (gen !== D.gen || !D.open) return;
+  if (!D.paused) {
+    try { _pdDraw(); }
+    catch (e) { if (!D.drawErr) { D.drawErr = true; log('Debug window: draw error: ' + pdEsc(e)); } }
+  }
+  D.raf = requestAnimationFrame(() => _pdDrawLoop(gen));
+}
+
+function _pdDraw() {
+  const D = pdDebug;
+  const canvas = document.getElementById('pd-debug-canvas');    // looked up each frame: a re-render makes a new one
+  if (!canvas) return;
+  const cw = canvas.clientWidth, ch = canvas.clientHeight;
+  if (!cw || !ch) return;                                       // the photodiode tab is not the visible one
+  const dpr = window.devicePixelRatio || 1;
+  if (canvas.width !== Math.round(cw * dpr) || canvas.height !== Math.round(ch * dpr)) {
+    canvas.width = Math.round(cw * dpr);
+    canvas.height = Math.round(ch * dpr);
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#0a0a1a';
+  ctx.fillRect(0, 0, cw, ch);
+
+  const L = 34, R = 6, T = 12, B = 16;
+  const pw = cw - L - R, ph = ch - T - B;
+  if (pw < 40 || ph < 40) return;
+  const S = D.frozen || D;
+  const view = PD_VIEWS[D.view] || PD_VIEWS[0];
+  const span = view.span;
+  const now = performance.now();
+  ctx.font = '9px monospace';
+  ctx.lineWidth = 1;
+
+  // Volts: 0 at the bottom, the top follows the largest value in the buffer.
+  const top = _pdNiceTop(Math.max(S.vMax, 0.02) * 1.1);
+  const Y = v => T + ph - Math.max(0, Math.min(1, v / top)) * ph;
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i <= 4; i++) {
+    const y = Math.round(T + ph - (i / 4) * ph) + 0.5;
+    ctx.strokeStyle = '#1c2340';
+    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(L + pw, y); ctx.stroke();
+    ctx.fillStyle = '#667';
+    ctx.fillText((top * i / 4).toFixed(top < 0.2 ? 3 : 2), L - 4, y);
+  }
+
+  // Time: a scrolling window that ends at the newest samples, or one held on a pulse.
+  let t0, t1, trig = null;
+  if (view.mode === 'scroll') {
+    t1 = D.frozen ? S.tEnd : _pdScrollEnd(S);
+    t0 = t1 - span;
+  } else {
+    if (S.trig === null || S.trigView !== D.view || (!D.frozen && now - S.trigAt > 250)) {
+      S.trig = _pdFindTrigger(S, span);
+      S.trigAt = now;
+      S.trigView = D.view;
+    }
+    trig = S.trig;
+    if (trig !== null) t0 = trig - 0.25 * span;
+    else t0 = Math.floor((S.lastT || 0) / 0.5) * 0.5 - span;    // no pulse yet: a window that steps
+    t1 = t0 + span;
+  }
+  const X = t => L + (t - t0) / span * pw;
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#667';
+  if (view.mode === 'scroll') {
+    for (let i = 0; i <= 5; i++) {
+      const x = L + pw * i / 5;
+      ctx.textAlign = i === 5 ? 'right' : i === 0 ? 'left' : 'center';
+      const s = span * (5 - i) / 5;
+      ctx.fillText(i === 5 ? 'now' : '-' + (span >= 5 ? s.toFixed(0) : s.toFixed(1)) + ' s', x, ch - 4);
+    }
+  } else {
+    const whole = Number.isInteger(span * 1000 / 4);
+    for (let i = 0; i <= 4; i++) {
+      const x = L + pw * i / 4;
+      ctx.textAlign = i === 4 ? 'right' : i === 0 ? 'left' : 'center';
+      const ms = (i / 4 - 0.25) * span * 1000;
+      ctx.fillText(trig === null ? '' : (ms > 0 ? '+' : '') + (whole ? ms.toFixed(0) : ms.toFixed(1)) + ' ms', x, ch - 4);
+      ctx.strokeStyle = '#1c2340';
+      ctx.beginPath(); ctx.moveTo(Math.round(x) + 0.5, T); ctx.lineTo(Math.round(x) + 0.5, T + ph); ctx.stroke();
+    }
+  }
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(L, T - 1, pw, ph + 2);
+  ctx.clip();
+
+  // The pulse as the Pi saw it: a rising edge on its GPIO.
+  ctx.strokeStyle = 'rgba(102,187,106,0.8)';
+  ctx.lineWidth = view.mode === 'pulse' ? 2 : 1;
+  ctx.beginPath();
+  for (const e of S.edges) {
+    if (e < t0 || e > t1) continue;
+    const x = Math.round(X(e)) + 0.5;
+    ctx.moveTo(x, T); ctx.lineTo(x, T + ph);
+  }
+  ctx.stroke();
+  ctx.lineWidth = 1;
+
+  const n = S.t.length;
+  const i0 = Math.max(0, _pdLowerBound(S.t, t0) - 1);
+  const i1 = Math.min(n, _pdLowerBound(S.t, t1) + 1);
+  const count = i1 - i0;
+  if (count > 1) {
+    // The two thresholds the Teensy works with (they follow baseline and peak, slowly).
+    const stride = Math.max(1, Math.floor(count / pw));
+    for (const [arr, color, dash] of [[S.hi, '#ffb74d', []], [S.lo, '#ba68c8', [4, 3]]]) {
+      ctx.strokeStyle = color;
+      ctx.setLineDash(dash);
+      ctx.beginPath();
+      let prev = null;
+      for (let i = i0; i < i1; i += stride) {
+        const x = X(S.t[i]), y = Y(arr[i]);
+        if (prev === null || S.t[i] - prev > PD_GAP_S * stride) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        prev = S.t[i];
+      }
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    // V. Few samples: a line through them. More samples than pixels: per pixel column its
+    // lowest to highest value, so a 1 ms pulse is never lost between two drawn points.
+    ctx.strokeStyle = '#4fc3f7';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    if (count <= 2 * pw) {
+      let prev = null;
+      for (let i = i0; i < i1; i++) {
+        const x = X(S.t[i]), y = Y(S.v[i]);
+        if (prev === null || S.t[i] - prev > PD_GAP_S) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        prev = S.t[i];
+      }
+    } else {
+      let col = null, mn = 0, mx = 0, last = 0, join = null, prevT = null;
+      const flush = () => {
+        if (col === null) return;
+        let a = mn, b = mx;
+        if (join !== null) { a = Math.min(a, join); b = Math.max(b, join); }
+        let ya = Y(b), yb = Y(a);
+        if (yb - ya < 1) yb = ya + 1;              // a flat stretch still shows
+        ctx.moveTo(col + 0.5, ya); ctx.lineTo(col + 0.5, yb);
+      };
+      for (let i = i0; i < i1; i++) {
+        const c = Math.floor(X(S.t[i])), v = S.v[i];
+        const gap = prevT !== null && S.t[i] - prevT > PD_GAP_S;
+        if (c !== col || gap) {
+          flush();
+          join = (col === null || gap) ? null : last;     // reach back to where the last column ended
+          col = c; mn = v; mx = v;
+        } else {
+          if (v < mn) mn = v;
+          if (v > mx) mx = v;
+        }
+        last = v;
+        prevT = S.t[i];
+      }
+      flush();
+    }
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+  ctx.restore();
+
+  // The pulse as the Teensy reports it: the moment it raised its output.
+  ctx.fillStyle = '#ffd54f';
+  for (const a of S.accepts) {
+    if (a < t0 || a > t1) continue;
+    const x = X(a);
+    ctx.beginPath(); ctx.moveTo(x - 4, 2); ctx.lineTo(x + 4, 2); ctx.lineTo(x, T - 1); ctx.closePath(); ctx.fill();
+  }
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  if (!n) {
+    ctx.fillStyle = '#888';
+    ctx.font = '11px monospace';
+    ctx.fillText(_pdNoTrace(false).slice(0, Math.floor(pw / 7)), L + pw / 2, T + ph / 2);
+  } else if (D.frozen) {
+    ctx.fillStyle = '#ffb74d';
+    ctx.textAlign = 'right';
+    ctx.fillText('frozen', L + pw - 4, T + 8);
+  } else if (now - D.lastRx > 1500) {
+    ctx.fillStyle = '#ffb74d';
+    ctx.textAlign = 'right';
+    ctx.fillText('no new samples for ' + Math.round((now - D.lastRx) / 1000) + ' s', L + pw - 4, T + 8);
+  }
+}
+
+// ── Photodiode card: Flash Test ──
+// Flashes the sync square on the display (the follower's displayd), with or without the Debug
+// window. While it runs, a small readout next to the button says whether the Teensy sees the
+// flashes — its "P" line, which the production build sends too.
+
+async function startPhotodiodeTest() {
+  if (uiBusy) return;
   const dpi = getPiForDevice('display');
   if (!dpi) { log('Display not assigned to a Pi'); return; }
   const pd = rig.devices.photodiode || {};
   const everyN = pd.pulse_every_n_frames || 5;
   const r = await retryProxy(dpi.ip, '/api/photodiode_test_start', {
     every_n: everyN,
-    sync_corner: pd.sync_corner || 'top-left',   // carry the controls so Test reflects them live
+    sync_corner: pd.sync_corner || 'top-left',
     sync_size_px: pd.sync_size_px || 0,
     sync_brightness: pd.sync_brightness ?? 1,
   });
-  if (r && r.ok) {
-    deviceState.photodiode = deviceState.photodiode || {};
-    deviceState.photodiode.testing = true;
-    renderDeviceList();
-    log('Photodiode test: flashing sync square every ' + everyN + ' frames.');
-  } else {
-    log('Test failed: ' + ((r && r.error) || 'is the display initialized on the follower?'));
+  if (!(r && r.ok)) {
+    log('Test failed: ' + pdEsc((r && r.error) || 'is the display initialized on the follower?'));
+    return;
   }
+  deviceState.photodiode = deviceState.photodiode || {};
+  deviceState.photodiode.testing = true;
+  pdTestText = '';
+  let lastT = null, first = true;
+  if (pdTestTimer) clearInterval(pdTestTimer);
+  pdTestTimer = setInterval(async () => {
+    if (uiBusy) return;
+    const pi = getPiForDevice('photodiode');
+    if (!pi) return;
+    const s = await _pdProxy(pi.ip, '/api/photodiode_v');
+    if (!(deviceState.photodiode || {}).testing) return;
+    const lp = s && s.last_pulse;
+    if (!s || s.ok === false) {
+      pdTestText = '<span style="color:#888">no answer from ' + pdEsc(pi.name) + ' — no readout</span>';
+    } else if (s.available === false) {      // no photodiode open there, or one without the Teensy's serial
+      pdTestText = '<span style="color:#888">photodiode not open on ' + pdEsc(pi.name) + ' — no readout</span>';
+    } else if (first) {
+      pdTestText = '';                      // the first answer only says where the Teensy stands
+    } else if (lp && lp.t !== lastT) {
+      pdTestText = '<span style="color:#81c784">pulse +' + (lp.median_V - lp.baseline_V).toFixed(3) + ' V above '
+        + Number(lp.baseline_V).toFixed(3) + ' V, ' + lp.width_us + ' µs</span>';
+    } else {
+      pdTestText = '<span style="color:#ffb74d">no pulse in the last second</span>';
+    }
+    first = false;
+    lastT = lp ? lp.t : null;
+    const el = document.getElementById('pd-test-read');
+    if (el) el.innerHTML = pdTestText;
+  }, 1000);
+  renderDeviceList();
+  log('Photodiode test: flashing sync square every ' + everyN + ' frames.');
 }
 
 async function stopPhotodiodeTest() {
+  if (pdTestTimer) { clearInterval(pdTestTimer); pdTestTimer = null; }
+  pdTestText = '';
   const dpi = getPiForDevice('display');
   if (dpi) await proxyPi(dpi.ip, '/api/photodiode_test_stop');
   deviceState.photodiode = deviceState.photodiode || {};
   deviceState.photodiode.testing = false;
   renderDeviceList();
   log('Photodiode test stopped.');
-}
-
-async function pollPhotodiodeRaw(ip) {
-  if (_pdPolling) return;                                       // don't overlap polls (raw buffer race)
-  _pdPolling = true;
-  try {
-    const result = await proxyPi(ip, '/api/photodiode_raw_data', {}, 'GET');
-    const trs = (result && result.transitions) || [];
-    if (trs.length) {
-      for (const e of trs) photodiodeRaw.push(e);
-      const newest = photodiodeRaw[photodiodeRaw.length - 1].t;
-      const cutoff = newest - 2;                                // keep ~last 2s
-      while (photodiodeRaw.length && photodiodeRaw[0].t < cutoff) photodiodeRaw.shift();
-      for (let i = photodiodeRaw.length - 1; i >= 0; i--) {     // latest rising edge = trigger
-        if (photodiodeRaw[i].level === 1) { photodiodeTrigger = photodiodeRaw[i].t; break; }
-      }
-      photodiodeEdgeCount += trs.filter(e => e.level === 1).length;
-      const lastEl = document.getElementById('last-pulse-time');
-      if (lastEl) {
-        const d = new Date(newest * 1000);
-        lastEl.textContent = d.toLocaleTimeString() + '.' + String(d.getMilliseconds()).padStart(3, '0');
-      }
-    }
-    const countEl = document.getElementById('pulse-count');
-    if (countEl) countEl.textContent = photodiodeEdgeCount;
-
-    // Live V from the Teensy serial stream (n/a if pyserial / Teensy absent — degrades quietly).
-    const vr = await proxyPi(ip, '/api/photodiode_v', {}, 'GET');
-    photodiodeVData = vr;
-    const vEl = document.getElementById('pd-v');
-    const e1 = document.getElementById('pd-v1'), e99 = document.getElementById('pd-v99');
-    if (vEl) {
-      if (vr && vr.available && vr.v != null) {
-        const bad = (vr.p99 != null && vr.p99 >= (vr.v_high ?? 3.0)) ||
-                    (vr.p1  != null && vr.p1  <= (vr.v_low  ?? 0.3));
-        vEl.textContent = vr.v.toFixed(2) + 'V';
-        vEl.style.color = bad ? '#ffa64d' : '#66bb6a';
-        if (e1)  e1.textContent  = vr.p1  != null ? vr.p1.toFixed(2)  : '--';
-        if (e99) e99.textContent = vr.p99 != null ? vr.p99.toFixed(2) : '--';
-      } else {
-        vEl.textContent = 'n/a'; vEl.style.color = '#556';
-        if (e1) e1.textContent = '--'; if (e99) e99.textContent = '--';
-      }
-    }
-  } finally {
-    _pdPolling = false;
-  }
-}
-
-function startPhotodiodeAnimation() {
-  function frame() {
-    drawPhotodiodeScope();
-    photodiodeAnimFrame = requestAnimationFrame(frame);
-  }
-  photodiodeAnimFrame = requestAnimationFrame(frame);
-}
-
-function stopPhotodiodeAnimation() {
-  if (photodiodeAnimFrame) { cancelAnimationFrame(photodiodeAnimFrame); photodiodeAnimFrame = null; }
-}
-
-// DEPRECATED (unused): browser model of the OLD on-Pi steady/hold-off filters, kept only for the
-// stashed devices/photodiode_filtered.py. The active Teensy photodiode delivers one clean pulse per
-// sync (filtering runs on the Teensy), so drawPhotodiodeScope below no longer calls this — every raw
-// rising edge IS a detected onset. Restore the call from git if you revert to the filtered device.
-// Re-apply steady (glitch) + hold-off to raw transitions IN THE BROWSER, mirroring the device:
-//  - STEADY: a rising edge is confirmed only if the level holds high >= steadyMs (else it's a
-//    glitch); pigpio reports it delayed by steadyMs, so we mark it at t_rise + steadyMs.
-//  - HOLD-OFF: after an accepted edge, ignore confirmed edges within holdMs.
-// steadyMs/holdMs of 0 disable that stage (matches "0 = off" on the device).
-function _computeDetectedEdges(trs, steadyMs, holdMs) {
-  const steadyS = steadyMs / 1000, holdS = holdMs / 1000;
-  // STEADY = the pigpio glitch filter modelled as a TWO-EDGE level debounce: a raw level change
-  // is "confirmed" (flips the filtered level) only if the new level holds >= steadyS. A confirmed
-  // 0->1 flip is a detected rising edge (reported delayed by steadyS, like pigpio). A short low
-  // dip inside a high plateau is thus suppressed and yields NO extra rising edge — matching the
-  // hardware, unlike a one-sided high-dwell test.
-  const confirmed = [];
-  let filt = trs.length ? (trs[0].level === 1 ? 0 : 1) : 0;    // filtered level before trs[0]
-  for (let i = 0; i < trs.length; i++) {
-    const lvl = trs[i].level;
-    if (lvl === filt) continue;                                // no change vs the filtered baseline
-    const next = trs[i + 1];
-    const dwell = next ? (next.t - trs[i].t) : Infinity;       // how long the new level holds
-    if (dwell >= steadyS) {                                    // stable enough -> confirmed change
-      if (lvl === 1) confirmed.push(trs[i].t + steadyS);       // 0->1 = detected rising edge
-      filt = lvl;
-    }
-    // else: glitch too brief -> filtered level unchanged; its reversing edge is skipped (lvl===filt)
-  }
-  const accepted = [];
-  let last = -Infinity;
-  for (const t of confirmed) {
-    if (t - last >= holdS) { accepted.push(t); last = t; }     // hold-off lockout
-  }
-  return { confirmed, accepted };
-}
-
-// Triggered digital scope: the latest raw rising edge is t=0; ms timebase so the ~1–2ms pulse shape
-// is visible. The Teensy delivers ONE clean rising edge per sync pulse (steady/hold-off filtering runs
-// on the Teensy), so there is no on-Pi filtering to model — every raw rising edge IS a detected onset,
-// drawn as a single series. No steady/hold-off is read or reported here.
-function drawPhotodiodeScope() {
-  const canvas = document.getElementById('photodiode-canvas');
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const w = canvas.width, h = canvas.height;
-  ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, w, h);
-
-  // live V overlay (Teensy serial), top-right — shown even before any edges arrive
-  const vd = photodiodeVData;
-  if (vd && vd.available && vd.v != null) {
-    const badV = (vd.p99 != null && vd.p99 >= (vd.v_high ?? 3.0)) ||
-                 (vd.p1  != null && vd.p1  <= (vd.v_low  ?? 0.3));
-    ctx.textAlign = 'right';
-    ctx.font = 'bold 13px monospace'; ctx.fillStyle = badV ? '#ffa64d' : '#66bb6a';
-    ctx.fillText(`V ${vd.v.toFixed(2)}`, w - 6, 13);
-    ctx.font = '9px monospace'; ctx.fillStyle = '#889';
-    ctx.fillText(`1% ${vd.p1 != null ? vd.p1.toFixed(2) : '--'} · 99% ${vd.p99 != null ? vd.p99.toFixed(2) : '--'}`, w - 6, 25);
-    ctx.textAlign = 'left';
-  }
-
-  const preMs = 2, postMs = 14;
-  const totalS = (preMs + postMs) / 1000;
-
-  if (photodiodeTrigger === null) {
-    ctx.fillStyle = '#556'; ctx.font = '11px monospace';
-    ctx.fillText('waiting for a rising edge…', 10, h / 2);
-    return;
-  }
-  const t0 = photodiodeTrigger;
-  const winStart = t0 - preMs / 1000, winEnd = t0 + postMs / 1000;
-  const xOf = t => ((t - winStart) / totalS) * w;
-  const yHigh = 14, yLow = h - 22;
-
-  // level just before the window (for the step trace start)
-  let lvl = 0, haveBefore = false;
-  for (let i = photodiodeRaw.length - 1; i >= 0; i--) {
-    if (photodiodeRaw[i].t < winStart) { lvl = photodiodeRaw[i].level; haveBefore = true; break; }
-  }
-  const trs = photodiodeRaw.filter(e => e.t >= winStart && e.t <= winEnd);
-  if (!haveBefore && trs.length) lvl = trs[0].level === 1 ? 0 : 1;
-
-  // digital step waveform
-  ctx.strokeStyle = '#4fc3f7'; ctx.lineWidth = 1.5; ctx.beginPath();
-  let py = lvl ? yHigh : yLow; ctx.moveTo(0, py);
-  for (const e of trs) {
-    const x = xOf(e.t); ctx.lineTo(x, py); py = e.level ? yHigh : yLow; ctx.lineTo(x, py);
-  }
-  ctx.lineTo(w, py); ctx.stroke();
-
-  // trigger marker
-  ctx.strokeStyle = '#555'; ctx.setLineDash([3, 3]); ctx.beginPath();
-  ctx.moveTo(xOf(t0), 0); ctx.lineTo(xOf(t0), h - 12); ctx.stroke(); ctx.setLineDash([]);
-
-  // rising edges = detected pulse onsets (no filtering — clean Teensy signal)
-  let nEdges = 0;
-  ctx.strokeStyle = '#66bb6a'; ctx.lineWidth = 2;
-  for (const e of trs) {
-    if (e.level !== 1) continue;
-    const x = xOf(e.t); nEdges++;
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h - 12); ctx.stroke();
-  }
-
-  // ms axis labels relative to trigger
-  ctx.fillStyle = '#556'; ctx.font = '9px monospace';
-  const step = Math.max(2, Math.round((preMs + postMs) / 6));
-  for (let ms = -preMs; ms <= postMs; ms += step) {
-    ctx.fillText((ms > 0 ? '+' : '') + ms, xOf(t0 + ms / 1000) + 1, h - 2);
-  }
-  // legend
-  ctx.font = '9px monospace';
-  ctx.fillStyle = '#66bb6a';
-  ctx.fillText(`rising edges (Teensy — pre-filtered) · ${nEdges} in view`, 4, 10);
 }
 
 function updateRewardMs() {
@@ -2117,8 +2792,11 @@ function renderDeviceCard(name, dev, pisReady) {
         ${assignHtml}
         ${reinitBtn}
       </h4>
+      ${showControls && ds.initialized === false && ds.error
+        ? `<div style="font-size:11px; color:#ef5350; margin-top:4px">Init failed: ${pdEsc(ds.error)}${name === 'photodiode' && ds.open ? ' — the photodiode is open all the same: Debug, Flash Test and Update work.' : ''}</div>`
+        : ''}
       ${showControls ? `<fieldset class="device-fieldset" ${devicesInitialized ? '' : 'disabled'}>${controlsHtml}</fieldset>` : ''}
-      ${showControls && name === 'photodiode' ? renderTeensyFirmware() : ''}
+      ${showControls && name === 'photodiode' ? renderPhotodiodeTeensy() : ''}
       ${showControls && !devicesInitialized ? '<div style="font-size:10px; color:#888; margin-top:4px">Press Initialize to enable device controls.</div>' : ''}
       ${!pisReady && enabled ? '<div style="font-size:10px; color:#f44336; margin-top:4px">Waiting for Pi check...</div>' : ''}
     </div>`;
@@ -2584,6 +3262,8 @@ function renderEncoderControls(dev) {
     <div style="font-size:10px; color:#666; margin-top:2px">AS5600 magnetic angle sensor (I2C ${addr}) &mdash; spin the wheel; distance uses wheel &oslash;.</div>`;
 }
 
+// The photodiode card, top to bottom: the rig's own parameters (rig YAML; live once the devices
+// are initialized), then the Teensy rows and the Debug window (renderPhotodiodeTeensy, below).
 function renderPhotodiodeControls(dev) {
   const gpio = dev.gpio || 24;
   const every_n = dev.pulse_every_n_frames || 5;
@@ -2593,8 +3273,6 @@ function renderPhotodiodeControls(dev) {
   const sizeCap = (geoData && geoData.calibration && geoData.calibration.frame_x) || 400;
   const sizePx = dev.sync_size_px || 0;   // 0 = auto (full dead-band width)
   const brightness = dev.sync_brightness ?? 1;   // red LED level 0..1
-  const ds = deviceState.photodiode || {};
-  const monitoring = ds.monitoring;
 
   return `
     <div class="device-controls">
@@ -2627,89 +3305,131 @@ function renderPhotodiodeControls(dev) {
                title="Red LED level in the sync square, 0..1 (0 = off/black, 1 = full red). Location, size, and brightness are all read from here into the display."
                onchange="this.value = Math.max(0, Math.min(1, parseFloat(this.value) || 0)); rig.devices.photodiode.sync_brightness = parseFloat(this.value); renderDeviceList()">
       </div>
-      <!-- DEPRECATED photodiode filter controls (Steady filter + Hold-off): filtering now runs on the
-           Teensy (teensy/photodiode_sync.ino), so these are removed from the card. The self-filtering
-           device is stashed at devices/photodiode_filtered.py. To revert, restore this block + the
-           glitchOn/glitchMs/holdOn/holdMs consts + the live sliders below from git history. -->
-      ${monitoring
-        ? `<button class="btn btn-red btn-sm" onclick="stopPhotodiodeMonitor()">Stop</button>`
-        : `<button class="btn btn-blue btn-sm" onclick="startPhotodiodeMonitor()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
-      ${ds.testing
-        ? `<button class="btn btn-red btn-sm" onclick="stopPhotodiodeTest()">Stop test</button>`
-        : `<button class="btn btn-sm" onclick="startPhotodiodeTest()" title="Flash the red sync square every N frames on the display (simulates the stimulus sync pulse). Needs only the display: with the photodiode initialized it also opens the scope and counts edges; without it, it just flashes (for troubleshooting)">Test</button>`}
-      ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">Edges: <span id="pulse-count">0</span> | Last: <span id="last-pulse-time">--</span></span>` : ''}
-      ${monitoring ? `<span style="font-size:11px; color:#888; margin-left:4px">| V <span id="pd-v" style="font-weight:600">--</span> <span style="color:#556">[1% <span id="pd-v1">--</span> · 99% <span id="pd-v99">--</span>]</span></span>` : ''}
-    </div>
-    ${monitoring ? `<canvas id="photodiode-canvas" class="lick-canvas" width="460" height="120" style="width:460px;height:120px;max-width:100%"></canvas>` : ''}
-    <div style="font-size:10px; color:#666; margin-top:2px">Rising edge detection on GPIO${gpio} (clean pulses from the Teensy — filtering runs on the Teensy) — red sync square at ${corner}, ${sizePx ? sizePx + 'px' : 'auto (' + sizeCap + 'px = dead-band width)'}, brightness ${brightness}</div>`;
-}
-
-// ── Photodiode: Teensy firmware upload ──────────────────────────────────────
-// Compiles + flashes the sketch over SSH on the Pi that owns the photodiode device
-// (the Teensy is USB-attached there); the server installs the toolchain there first if
-// it is missing. Rendered OUTSIDE the init-gated fieldset so firmware can be flashed
-// before/without device init. Browse picks a local .ino; with no file chosen the
-// server uses the newest sketch under teensy/<rig>/ (per-rig pins/thresholds) or, without
-// one, the newest shared teensy/ sketch. A fresh Teensy (RawHID, no serial
-// yet) cannot be soft-rebooted by the loader; the server reboots it over HID first
-// (teensy/teensy_hid_reboot.py) and only falls back to asking for the button.
-let teensyInoFile = null;   // {name, text} from Browse
-
-function renderTeensyFirmware() {
-  return `
-    <div class="device-controls" style="margin-top:6px; align-items:center">
-      <span style="font-size:11px; color:#888">Teensy firmware${(getPiForDevice('photodiode') || {}).name ? ' (flashed on ' + getPiForDevice('photodiode').name + ')' : ''}:</span>
-      <button class="btn btn-sm" onclick="document.getElementById('teensy-ino-file').click()">Browse</button>
-      <input type="file" id="teensy-ino-file" accept=".ino" style="display:none" onchange="teensyPickIno(this)">
-      <span id="teensy-ino-name" style="font-size:11px; color:#888" title="With no file chosen the server flashes the newest sketch under teensy/${RIG}/ (this rig's pins and thresholds), else the newest shared teensy/ sketch">${teensyInoFile ? teensyInoFile.name : 'newest repo sketch for ' + RIG}</span>
-      <label style="font-size:11px; display:flex; align-items:center; gap:3px">
-        <input type="checkbox" id="teensy-debug" ${teensyDebugChecked ? 'checked' : ''}
-               onchange="teensyDebugChecked = this.checked"> Debug</label>
-      <button class="btn btn-orange btn-sm" onclick="uploadTeensyFirmware()"
-              title="Patch #define DEBUG, compile with arduino-cli on the photodiode Pi, flash via teensy_loader_cli (installs the toolchain there if missing). No button press: Serial boards soft-reboot, a fresh RawHID board is rebooted over HID">Upload</button>
     </div>`;
 }
-let teensyDebugChecked = false;
 
-function teensyPickIno(inp) {
-  const f = inp.files && inp.files[0];
-  if (!f) return;
-  const rd = new FileReader();
-  rd.onload = () => {
-    teensyInoFile = {name: f.name, text: rd.result};
-    const el = document.getElementById('teensy-ino-name');
-    if (el) el.textContent = f.name;
-    log('Teensy sketch selected: ' + f.name);
-  };
-  rd.readAsText(f);
-}
+// The Teensy rows: sketch path · Browse · Upload · Debug · Debug Mode · Flash Test, then the
+// Teensy's parameters with Update. Outside the init-gated fieldset: the firmware can be flashed
+// and watched before, without, or after a failed Initialize (the Pi opens the photodiode for
+// the Debug window by itself). What the buttons do: "Photodiode card" above.
+function renderPhotodiodeTeensy() {
+  const T = pdTeensy, D = pdDebug;
+  const dev = rig.devices.photodiode || {};
+  const ds = deviceState.photodiode || {};
+  const pi = getPiForDevice('photodiode');
+  const piName = pi ? pi.name : 'the photodiode Pi';
+  const gpio = dev.gpio || 24;
+  const corner = dev.sync_corner || 'top-left';
+  const sizeCap = (geoData && geoData.calibration && geoData.calibration.frame_x) || 400;
+  const sizePx = dev.sync_size_px || 0;
+  const brightness = dev.sync_brightness ?? 1;
 
-async function uploadTeensyFirmware() {
-  const debug = document.getElementById('teensy-debug')?.checked || false;
-  log(`Teensy upload: ${teensyInoFile ? teensyInoFile.name : 'newest repo sketch for ' + RIG} (DEBUG=${debug ? 1 : 0})...`);
-  _lockUI();
-  try {
-    // What the flash will meet on the photodiode Pi: toolchain there? Teensy seen? serial mode?
-    const st = await fetch(SAPI + '/teensy_status').then(x => x.json()).catch(e => ({ok: false, error: String(e)}));
-    if (st.ok) {
-      log(`  ${st.pi}: toolchain ${st.toolchain_ok ? 'present' : 'MISSING — installing first (several minutes on WiFi)'}; `
-          + `Teensy USB ${st.usb_pids.length ? '16c0:' + st.usb_pids.join(',') : 'NOT FOUND'}`);
-      if (!st.usb_pids.length) { log('Teensy upload failed: no Teensy on ' + st.pi + "'s USB"); return; }
-      if (!st.serial_mode) log('  Teensy is not in Serial mode (fresh board): it will be rebooted over HID after the '
-                               + 'compile; if the log then asks for it, press the Teensy button once (loader waits ~2 min).');
-    } else {
-      log('  (status check failed: ' + (st.error || '') + ' — trying the upload anyway)');
-    }
-    const r = await fetch(SAPI + '/teensy_upload', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ino_name: teensyInoFile?.name, ino_text: teensyInoFile?.text, debug})
-    });
-    const data = await r.json();
-    (data.steps || []).forEach(s => log('  ' + s));
-    log(data.ok ? 'Teensy firmware uploaded.' : 'Teensy upload failed: ' + (data.error || ''));
-  } catch (e) {
-    log('Teensy upload failed: ' + e);
-  } finally { _unlockUI(); }
+  const debugTip = D.open
+    ? 'Hide the Debug window. The DEBUG build stays on the Teensy, so Debug Mode stays on.'
+    : T.debugMode === true
+      ? 'Show the Debug window: V from the Teensy over serial, a line for every pulse on the Pi GPIO.'
+      : 'Compile and flash the DEBUG build of this sketch with the parameters below (the file is not changed), then show the Debug window.';
+  const modeTip = T.debugMode === null
+    ? 'Not known yet which build the Teensy runs — Initialize or Debug asks it.'
+    : T.debugMode
+      ? 'The Teensy runs the DEBUG build (streams V over serial, takes Update). Upload goes back to the production build.'
+      : 'The Teensy runs the production build. Debug uploads the DEBUG build.';
+
+  const pars = PD_PARAMS.map(n => {
+    const has = n in T.params, inFile = n in T.fileParams;
+    const spec = T.spec[n] || {};
+    const ui = PD_PARAM_UI[n];
+    const edited = has && inFile && !_pdSame(T.params[n], T.fileParams[n]);
+    const tip = ui.tip + (inFile ? ' — the sketch file has ' + _pdFmt(n, T.fileParams[n])
+                                 : has ? ' — not a constant of this sketch' : ' — needs the v2_3 sketch');
+    return `
+        <span class="pd-par">
+          <label for="pd-par-${n}">${n}</label>
+          <input type="number" id="pd-par-${n}" class="${edited ? 'pd-edited' : ''}" value="${has ? _pdFmt(n, T.params[n]) : ''}"
+                 ${spec.min !== undefined ? `min="${spec.min}" max="${spec.max}"` : ''} step="${ui.step}"
+                 title="${pdEsc(tip)}" ${has ? '' : 'disabled'}
+                 onchange="pdParamChanged('${n}', this)"
+                 onkeydown="if (event.key === 'Enter') { pdParamChanged('${n}', this); pdUpdateTeensy(); }">
+        </span>`;
+  }).join('');
+
+  let browse = '';
+  if (T.browse) {
+    const b = T.browse;
+    const rows = [];
+    if (b.parent) rows.push(`<a onclick="pdBrowseUp()">../</a>`);
+    b.dirs.forEach((d, i) => rows.push(`<a onclick="pdBrowseInto(${i})">${pdEsc(d)}/</a>`));
+    b.files.forEach((f, i) => rows.push(`<a class="ino" onclick="pdBrowsePick(${i})">${pdEsc(f)}</a>`));
+    if (!b.dirs.length && !b.files.length) rows.push('<span style="color:#666">no folders and no .ino files here</span>');
+    browse = `
+      <div class="pd-browse">
+        <div class="pd-browse-dir">${pdEsc(b.dir)}
+          <a onclick="pdBrowse()" style="display:inline; margin-left:10px">close</a></div>
+        ${rows.join('')}
+      </div>`;
+  }
+
+  let note = '';
+  if (T.loaded && T.error) {
+    note = `<div style="font-size:11px; color:#ef5350; margin-top:4px">Teensy sketch: ${pdEsc(T.error)}</div>`;
+  } else if (T.loaded && T.missing.length) {
+    note = `<div style="font-size:10px; color:#ffb74d; margin-top:4px">This sketch has no constant line for ${pdEsc(T.missing.join(', '))}: Upload flashes it as it is. The parameters below need the v2_3 sketch.</div>`;
+  }
+
+  const debugWin = !D.open ? '' : `
+    <div class="pd-debug">
+      <div class="pd-debug-bar">
+        <select id="pd-debug-view" onchange="pdSetView(this.value)"
+                title="Scroll: the last seconds. Pulse: holds on the newest pulse, 25 % into the window, like a scope trigger.">
+          ${PD_VIEWS.map((v, i) => `<option value="${i}" ${i === D.view ? 'selected' : ''}>${v.label}</option>`).join('')}
+        </select>
+        <button class="btn btn-sm" id="pd-freeze-btn" onclick="pdToggleFreeze()">${D.frozen ? 'Resume' : 'Freeze'}</button>
+        <span id="pd-debug-status">${_pdStatusHtml()}</span>
+      </div>
+      <canvas id="pd-debug-canvas"></canvas>
+      <div class="pd-debug-legend">
+        <span><i style="background:#4fc3f7"></i>V (Teensy A1, over serial)</span>
+        <span><i style="background:#ffb74d"></i>start threshold</span>
+        <span><i style="background:#ba68c8"></i>end threshold</span>
+        <span><i style="background:#66bb6a; width:2px; height:10px"></i>pulse detected on the Pi's GPIO${gpio}</span>
+        <span><span style="color:#ffd54f">&#9660;</span> Teensy raised its output</span>
+      </div>
+    </div>`;
+
+  return `
+    <fieldset class="device-fieldset">
+      <div class="pd-row">
+        <span class="pd-lbl" title="The sketch Upload and Debug compile, on this controller. A path inside the repo is shown relative to it. Remembered in the rig YAML (devices.photodiode.teensy_sketch).">Teensy sketch</span>
+        <input type="text" id="pd-sketch-path" class="pd-path" value="${pdEsc(T.path)}" spellcheck="false"
+               placeholder="path to the .ino on the controller" ${T.loaded && T.error ? 'style="border-color:#ef5350"' : ''}
+               title="${pdEsc(T.path)}${T.version ? ' — firmware ' + pdEsc(T.version) : ''}"
+               onchange="pdSetSketch(this.value)">
+        <button class="btn btn-sm" onclick="pdBrowse()" title="Pick a .ino on the controller">Browse</button>
+        <button class="btn btn-orange btn-sm" onclick="pdUploadClick()"
+                title="Write the Teensy parameters below into the sketch file, then compile and flash the production build on ${pdEsc(piName)} (installs the toolchain there if missing). Debug Mode goes off.">Upload</button>
+        <button class="btn btn-blue btn-sm" onclick="pdDebugClick()" title="${debugTip}"
+                ${D.open ? 'style="box-shadow: inset 0 0 0 2px #fff"' : ''}>Debug</button>
+        <span class="pd-lbl" title="${modeTip}">Debug Mode</span>
+        <label class="toggle toggle-ro ${T.debugMode === null ? 'unknown' : ''}" style="margin:0" title="${modeTip}">
+          <input type="checkbox" id="pd-debug-mode" ${T.debugMode === true ? 'checked' : ''} tabindex="-1"
+                 onclick="return false"><span class="track"></span></label>
+        ${ds.testing
+          ? `<button class="btn btn-red btn-sm" onclick="stopPhotodiodeTest()">Stop test</button>`
+          : `<button class="btn btn-sm" onclick="startPhotodiodeTest()" title="Flash the red sync square every N frames on the display (simulates the stimulus sync pulse). Needs only the display; open Debug to watch the Teensy and the Pi answer.">Flash Test</button>`}
+        <span id="pd-test-read" style="font-size:11px">${pdTestText}</span>
+      </div>
+      ${browse}
+      <div class="pd-row">
+        <span class="pd-lbl" title="The Teensy's detection parameters: constants of the sketch. Upload writes them into the file; Update sends them to a running DEBUG build.">Teensy</span>
+        ${pars}
+        <button class="btn btn-green btn-sm" id="pd-update-btn" onclick="pdUpdateTeensy()" ${D.open ? '' : 'disabled'}
+                title="Send these parameters to the Teensy over serial — while the Debug window is open. They stay in its RAM until the next upload or power cycle; Upload writes them into the sketch.">Update</button>
+      </div>
+      ${note}
+      <div id="pd-teensy-runs" style="font-size:10px; color:#888; margin-top:4px">${_pdRunsHtml()}</div>
+    </fieldset>
+    ${debugWin}
+    <div style="font-size:10px; color:#666; margin-top:4px">Rising edge detection on GPIO${gpio} (clean pulses from the Teensy — filtering runs on the Teensy) — red sync square at ${corner}, ${sizePx ? sizePx + 'px' : 'auto (' + sizeCap + 'px = dead-band width)'}, brightness ${brightness}</div>`;
 }
 
 function renderRewardControls(dev) {
@@ -2975,6 +3695,7 @@ async function quitApp() {
 window.addEventListener('message', ev => {
   const m = ev.data || {};
   if (m.type !== 'vrfarm:visible') return;
+  pdDebug.paused = !m.visible;        // the Debug window asks the Pi nothing while hidden
   document.querySelectorAll('img').forEach(img => {
     if (m.visible) {
       if (img.dataset.pausedSrc) { img.src = img.dataset.pausedSrc.replace(/ts=\d+/, 'ts=' + Date.now()); delete img.dataset.pausedSrc; }

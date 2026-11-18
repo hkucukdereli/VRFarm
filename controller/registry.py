@@ -82,6 +82,10 @@ class RigState:
         self.data: dict = {"inventory": None, "inventory_t": None, "status": {},
                            "last_sync_t": None, "disk_free_gb": None, "engine_running": None}
 
+        # Setup tab, photodiode card: did the last Teensy upload from here flash the DEBUG build?
+        # None = nothing uploaded since the app started (the Teensy's own report then decides).
+        self.teensy_debug: bool | None = None
+
         self.slack_webhook: str | None = None
         self.resolve_slack()
         self.logger = _rig_logger(name)

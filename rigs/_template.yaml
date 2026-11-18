@@ -70,6 +70,11 @@ devices:
     sync_brightness: 1.0
     sync_corner: top-right
     sync_size_px: 150
+    # the Teensy sketch the Setup tab's photodiode card compiles and uploads (the card's path
+    # field / Browse set it): relative to the repo, or absolute. Empty = the newest sketch under
+    # teensy/<rig>/, else the newest shared one under teensy/. Upload writes the card's Teensy
+    # parameters into this file, so a rig keeps its own copy.
+    teensy_sketch: ''
     type: photodiode
     v_high: 3.0
     v_low: 0.3

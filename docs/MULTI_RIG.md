@@ -71,12 +71,17 @@ the leader's SSH status, hostname, whether the experiment engine is running, fre
 data drive and the video SSD, and the list of **date folders** (`<mouse>/<mouse>_<date>`):
 
 - **green** — every tree that holds the folder (data dir, video dir) has nothing left to copy in a
-  strict rsync dry run, and no session that recorded video is missing it
-- **red** — something is still pending
+  strict rsync dry run, no session that recorded video is missing it, and the **content** of every
+  file was compared with the Pi's and the Pi's files have not changed since
+  (see [The content check](#the-content-check))
+- **red** — something is still pending: files left to copy, or a complete copy whose content is not
+  checked yet. The card then adds *content not checked*; Sync Now runs the check, and copies nothing
+  again unless a file differs
 - **missing** (red, "video missing") — a session recorded `camera_saved: true` but its video is not
   on the Pi. Never purged, and Sync & Poweroff leaves the rig on
 - **grey** — the check can't be trusted: no SSH, a dry run failed (hover the folder for why), the
-  video drive is not mounted (`data.video_mount`), or the leader needs a Deploy
+  video drive is not mounted (`data.video_mount`), the leader needs a Deploy, or the folder's files
+  could not be listed for the content check
 
 No nonzero rsync exit counts as clean — exit 23 is also what an unreadable subdirectory gives. A
 folder labelled **no video** is normal: the camera was unchecked for those sessions (see
@@ -94,31 +99,114 @@ complete leftover `video.mp4.part` is adopted, otherwise ffmpeg takes ~10-30 s p
 the card shows *N video to remux*), and copies **whichever trees hold the folder** with
 `rsync -rlt` over SSH (partial files are kept in `.rsync-partial` so a cancelled copy resumes).
 It then re-inventories and runs the dry run again. Only if the folder's trees are unchanged, every
-copy is clean and no recorded video is missing does it mark the folder green and record it in
-`<data root>/.vrfarm_sync_ledger.json` (with `present: {data, video}`). Shepherd logs are mirrored
-to `<data root>/shepherd_logs/<rig>/`.
+copy is clean and no recorded video is missing does it record the folder in
+`<data root>/.vrfarm_sync_ledger.json` (with `present: {data, video}`). Last comes the
+[content check](#the-content-check): every file is hashed on the Pi and under the data root, a copy
+that differs is fetched again, and only a passed check (`verified` in the ledger entry) makes the
+folder green. Shepherd logs are mirrored to `<data root>/shepherd_logs/<rig>/`.
 
 **Sync & Poweroff** — first a dialog listing, per rig, what will be copied, which rigs are skipped
-(running, unreachable, Deploy needed) and which folders can't be verified. On Yes: every folder
+(running, unreachable, Deploy needed) and which folders can't be verified. A folder marked
+*content check only* is already copied; the sync only compares its content. On Yes: every folder
 that is not green on every checked rig is synced, then for each rig where everything verified the
 controller runs `sudo poweroff` on every follower and then on the leader and waits for port 22 to
 close. A rig with a failed, missing or grey folder stays on. Do not cut power until a rig shows
 **OFF**.
 
 **Purge Data** — a dialog lists the folders that are green and fully consolidated, video-only
-folders included. On confirm the controller takes a fresh inventory and re-runs the strict dry run
-for every tree that holds each folder (plus a checksum pass if `verify_checksum_before_purge` is
-on), then names exactly the copies that passed to the Pi (`--verified data:<folder>`,
-`--verified video:<folder>`). The Pi-side script deletes only those. It refuses a whole folder if a
-copy sits in a tree that was not verified or a verified copy has vanished, and refuses the whole
-call if the engine is alive, a tree is unavailable, or no `--verified` was sent (an older
-controller). It only accepts `<mouse>/<mouse>_YYYYMMDD` names inside the configured dirs.
+folders included. On confirm the controller takes a fresh inventory, refuses any folder whose
+content check is missing or no longer matches the files on the Pi, and re-runs the strict dry run
+for every tree that holds each folder. With `verify_checksum_before_purge` on it then hashes every
+file on both sides once more; a difference stops the purge of that folder and turns it red, and the
+next Sync Now fetches the file again. Then it names exactly the copies that passed to the Pi
+(`--verified data:<folder>`, `--verified video:<folder>`). The Pi-side script deletes only those.
+It refuses a whole folder if a copy sits in a tree that was not verified or a verified copy has
+vanished, and refuses the whole call if the engine is alive, a tree is unavailable, or no
+`--verified` was sent (an older controller). It only accepts `<mouse>/<mouse>_YYYYMMDD` names inside
+the configured dirs.
 
 **Auto purge** (toggle) — Sync Now and Sync & Poweroff purge each folder on the Pi right after its
-verified copy, through the same re-verification as Purge Data. Stored in `controller.yaml`.
+verified copy, through the same re-verification as Purge Data (minus the second hashing: the sync
+checked the content a moment before). Stored in `controller.yaml`.
 
 A job's progress (overall and per rig), its log and a Cancel button appear under the buttons.
 One job runs at a time; inside a job the rigs run in parallel.
+
+### The content check
+
+rsync calls a file copied when its size and modification time agree, and it copies whatever the
+Pi's kernel hands it when it reads the file. Neither says that the bytes under the data root are the
+bytes on the Pi's disk — and for a while they were not always. On the Raspberry Pi 5 kernel
+`6.18.34+rpt-rpi-2712`, reads through the page cache returned wrong bytes once memory had filled
+(morbier and pecorino leaders, found 2026-11-12). The disk itself was right and so was every read
+with `O_DIRECT`; `6.18.39+rpt-rpi-2712` does not show it (see [The Pi 5 kernel](#the-pi-5-kernel)).
+A copy made through such a read holds wrong bytes and still passes every rsync check, `--checksum`
+included, because that hashes what the same cache hands out.
+
+So every sync ends by comparing the bytes themselves:
+
+1. The leader hashes (SHA-256) every file of the folder that rsync copies, each read with
+   `O_DIRECT`, that is from the disk and not from the page cache (`leader_data hash`).
+2. The controller hashes its own copy the same way and compares size and hash, file by file.
+3. A copy that differs is fetched again: the leader streams the file from a second direct read
+   (`leader_data read`), and the controller puts it in place only if it has the size and hash of
+   the first direct read, gives it the Pi's modification time, and reads it back from its own disk.
+   The copy it replaced is kept as
+   `<data root>/.vrfarm_replaced/<mouse>/<mouse>_<date>/<session>/<file>.<YYYYmmdd-HHMMSS>`, and the
+   job log and the ledger entry (`repairs`) name the file.
+4. The ledger entry gets `verified`: the time, the number of files and bytes, whether each side
+   read direct, the files fetched again, and the leader's **fingerprint** of the folder — one hash
+   per tree over the names, sizes and modification times (in nanoseconds) of its files.
+
+The inventory reports that fingerprint on every refresh, and a folder is green only while it equals
+the one in the ledger. A file that changes on the Pi after the check therefore turns the folder red
+again (*its files on the Pi changed since the content check*), including a change of the
+modification time that rsync's one-second window (`--modify-window=1`) does not see. Purge Data
+refuses a folder in that state.
+
+What it does not cover:
+
+- It compares the Pi's disk with the controller's disk. Bytes that were already wrong when they were
+  written on the Pi are copied faithfully and match.
+- It checks the copy as it was at that moment. A copy under the data root that is altered later with
+  the same size and time still shows green; `verify_checksum_before_purge: true` catches it, because
+  Purge Data then hashes both sides once more before the source is deleted.
+- A folder that was purged before the check existed (2026-11-13) has no source left to compare with.
+- A file the check replaced has the size and time of the copy it replaced. Anything that mirrors
+  the data root by size and time (the nightly upload to the group drive does) will not pick it up:
+  copy the files named under `.vrfarm_replaced/` there again by hand.
+
+A folder synced before 2026-11-13 has no `verified` in its ledger entry: it shows red with *content
+not checked* until a Sync Now (or Sync & Poweroff) has checked it. The check reads every file once
+on each side, so it adds time in proportion to the folder's size; the hash alone runs at about
+1.4 GB/s on a Pi 5 and 0.5 GB/s on the controller. Tests: `tools/test_leader_hash.py` (the pieces)
+and cases T8 to T10 of `tools/smoke_data.py`.
+
+### The Pi 5 kernel
+
+Every leader must run a kernel without the read fault. morbier and pecorino were moved from
+`6.18.34+rpt-rpi-2712` to `6.18.39+rpt-rpi-2712`, the kernel cheddar already ran, on 2026-11-12:
+
+```bash
+sudo apt-get install --no-install-recommends linux-image-6.18.39+rpt-rpi-2712 linux-image-6.18.39+rpt-rpi-v8
+sudo reboot
+```
+
+The read test in `~/pi_read_test/` on the controller (`readtest.py`: hash a few GB of files through
+the page cache and again with direct reads, with memory held so the cache has to recycle) gave 75 of
+102 files wrong on morbier and 196 of 1600 on pecorino on the old kernel, 186 of 1600 on pecorino
+after a plain reboot of the old kernel, and 0 in three runs each on the new one. The followers
+(Pi 4) showed no wrong read on either kernel, one run each.
+
+- A Pi set up from the same image comes with the old kernel: run the read test on every new leader
+  before its first session. `uname -r` shows the running kernel.
+- The kernel meta packages on the Pis still name 6.18.34, and a plain `apt upgrade` would install a
+  newer kernel (6.18.60 was the candidate on 2026-11-12) that has not been through the read test.
+  Run the test after any kernel change.
+- Back to the old kernel: `sudo apt remove linux-image-6.18.39+rpt-rpi-2712
+  linux-image-6.18.39+rpt-rpi-v8`, then `sudo dpkg-reconfigure linux-image-6.18.34+rpt-rpi-2712
+  linux-image-6.18.34+rpt-rpi-v8`, reboot. morbier and pecorino also keep the boot files of
+  6.18.34 in `~/boot_firmware_backup_6.18.34/`.
 
 ### Sessions without video
 
@@ -147,11 +235,9 @@ grey, syncs fail after copying the data, consolidation waits, and nothing is pur
 `video_mount`, an unmounted drive would look like an empty video folder. cheddar keeps its video on
 the boot NVMe (`/home/vruser/video`) and needs no `video_mount`.
 
-The leader side is `shared/leader_data.py` protocol 2, which ships with **Deploy**. Until a rig is
-deployed, its card says **Deploy needed** and sync and purge are refused. A leader deployed before
-2026-11 reports no `n_raw_video`, so the controller never asks it to remux; if such a leader still
-holds a stranded `video.mp4.part`, the sync of that folder is refused with "Deploy this rig first"
-rather than copying the raw + `.part` pair again.
+The leader side is `shared/leader_data.py` protocol 3 (2026-11-13: the `hash` and `read` commands
+and the `fp` fingerprint in the inventory), which ships with **Deploy**. Until a rig is deployed
+with it, its card says **Deploy needed**, all its folders are grey, and sync and purge are refused.
 
 ## What runs where
 
@@ -171,6 +257,9 @@ folder: UI port, the controller's IP (for the diagram), the event port, data roo
 rsync path, sync tuning (`parallel_rigs`, `bwlimit_mbps`, `verify_checksum_before_purge`,
 `shepherd_logs_keep_days`) and the rig groups. Per-rig settings stay in `rigs/<rig>.yaml`.
 `VRFARM_SETTINGS=<path>` points the app at another file (the tests use a scratch one).
+`verify_checksum_before_purge: true` makes Purge Data hash every file on the Pi and under the data
+root once more before it deletes (see [The content check](#the-content-check)); every sync checks
+content whatever this is set to.
 
 The file used to sit at the repo root. A `controller.yaml` still there is moved into
 `controller/configs/` the next time the controller starts; if one already exists there, that one
@@ -202,5 +291,6 @@ as `CAL_MAC_URL`.
 ```bash
 python tools/smoke_multirig.py     # two fake rigs (mock Pis) through connect/deploy/go/end/reset
 python tools/smoke_data.py         # the Data tab against a scratch data tree on this machine
+python tools/test_leader_hash.py   # the content check piece by piece (direct reads, hash, fetch)
 python tools/capture_ui_shots.py   # Playwright walkthrough of all four tabs -> docs/images/
 ```

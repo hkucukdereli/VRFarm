@@ -89,6 +89,7 @@ then [INITIAL_SETUP_REFERENCE.md](docs/INITIAL_SETUP_REFERENCE.md).
 | [Data format](docs/DATA_FORMAT.md) | HDF5 layout and the analysis loaders |
 | [Leader wiring](docs/LEADER_WIRING.md) | Pins, 40-pin header map, GPIO rules |
 | [Teensy instructions](docs/TEENSY_INSTRUCTIONS.md) | Photodiode sync firmware: build, flash, tune |
+| [IR illuminator](docs/IR_LED.md) | The camera's IR LED on this branch: wiring, safety, Setup card, failures, data |
 | [Rig health monitor](shepherd/README.md) | shepherd: what it watches, thresholds, alerts |
 
 ---

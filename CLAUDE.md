@@ -30,7 +30,14 @@ IMU |a| strip during a session and the Setup tab a live |a| trace on the IMU car
 runs; otherwise DAC 0 V = off. The Pi's 3V3 on the cable is the board's hardware gate, so the
 MCP4725 EEPROM must hold 0 (init() programs it). pi_api's safe-state hook switches it off after
 any engine exit, at its own start-up and on SIGTERM; only a hang or a SIGKILL of pi_api itself
-leaves it lit until the next pi_api start or a power cycle. Board handoff:
+leaves it lit until the next pi_api start or a power cycle. Limits: nothing is remembered in
+`~/rig/safe_state.json` before the device was first opened on that Pi (Connect / Initialize /
+GO), so a never-opened Pi has no start-up pass; a switch-on failure at START raises out of
+`run_session()` and ends the engine before any HDF5 exists, while the page stays *running*;
+during a session nothing about the LED reaches the page's Log or Slack; the five `ir_led_*`
+scalars follow the **Save:** row and land under `/trials` after consolidation. User doc:
+`docs/IR_LED.md` (wiring, safety, Setup card, failure table, commissioning, differences from
+main). Board handoff:
 `docs/assets/IRDriver_HANDOFF.md`; safety model in the module docstring.
 
 ---

@@ -216,6 +216,9 @@ Click **GO**. The session starts:
 - Leader runs the imperative trial loop trial by trial.
 - Follower renders stimuli on the projector.
 - Camera records to disk (or previews only, per Step 5).
+- On a rig with the IR illuminator, the camera's LED is switched on at START (before the
+  grace period) and off at the session end; the video opens with ~1.5 s of dark frames
+  ([IR_LED.md](IR_LED.md)).
 - Events stream to the controller via UDP for the dashboard.
 
 ### Step 8 — Monitor
@@ -261,7 +264,8 @@ Pi; the **Auto purge** switch does that right after each verified sync. Details:
 
 ## Task Parameters
 
-A task YAML has five sections (`stimulus`, `reward`, `session`, `adaptive`, `opto`). Values
+A task YAML has five sections (`stimulus`, `reward`, `session`, `adaptive`, `opto`), plus an
+optional `devices:` block for per-device overrides (below). Values
 below are the current defaults from `experiments/_template.yaml` (the only task file in git);
 the code that reads them is `engine/leader.py`, `shared/stim_generator.py`, `devices/reward.py`
 and `devices/opto.py`.
@@ -362,6 +366,26 @@ controller drives the pins LOW again at teardown; **the Pi is not an interlock**
 [LEADER_WIRING.md](LEADER_WIRING.md). Timing model, bench commissioning recipe and status:
 [OPTOGENETICS.md](OPTOGENETICS.md).
 
+### `devices: ir_led:` — the camera's IR illuminator (optional)
+
+Only read on a rig whose leader has the `ir_led` device ([IR_LED.md](IR_LED.md)). Without the
+block the LED is on for the whole session at the rig's intensity. The Experiment tab has no
+field for it: write it in the YAML file; Save and Save As keep it.
+
+```yaml
+devices:
+  ir_led:
+    intensity_pct: 50          # this task's intensity instead of the rig's
+    on_during_session: true    # false = the LED stays off for the session
+```
+
+| Param | Default | Meaning |
+|---|---|---|
+| `intensity_pct` | the rig's `devices.ir_led.intensity_pct` | 0–100 % of the LED driver's dimming range for this task (0 % is the dimmest lit level, not off). |
+| `on_during_session` | true | `false` keeps the LED off from START to the end. |
+
+What the session ran at is saved in `/ir_led` — see [DATA_FORMAT.md](DATA_FORMAT.md).
+
 ---
 
 ## Data Output
@@ -380,7 +404,8 @@ the Data tab syncs the folder (`shared/leader_data.py consolidate`, never at the
 
 The file groups per-trial data under `/trials`, the plan under `/stimulus`, and each saved
 device under `/lick`, `/reward`, `/photodiode`, `/camera`; the full task YAML is stored in
-the root `task_config` attribute (and `/opto` when the optogenetics device was saved). **See [`docs/DATA_FORMAT.md`](DATA_FORMAT.md)** for the
+the root `task_config` attribute (and `/opto` when the optogenetics device was saved, `/ir_led`
+on a rig with the IR illuminator). **See [`docs/DATA_FORMAT.md`](DATA_FORMAT.md)** for the
 complete layout, the loader helpers (`analysis/loaders.py`), and the subject-index format.
 
 All timestamps are Unix time (`time.time()`) in seconds, NTP-synced.
@@ -430,6 +455,14 @@ Lick-to-reward is on the same Pi (Leader), so latency is <1ms (no network hop).
 - Check the SSD is mounted: `df -h` on the leader, and that `data.video_dir` points to it
 - Confirm the **Camera** save checkbox was checked at GO (unchecked = preview only)
 - Reduce the frame rate in the rig config (`devices.camera.fps`)
+
+**Video is dark (rig with the IR illuminator):**
+- Read the Log for an *IR LED* line: *did NOT switch on* names the fault; no line at all means
+  the rig YAML has no enabled `ir_led` on the leader, or the leader needs a Deploy
+- Check the DAC on I2C: `ssh vruser@192.168.10.101 i2cdetect -y 1` — should show `60`
+- Check the Qwiic cable and the LED supply on the board's screw terminal J1
+- Setup tab → IR Illuminator card → **Live** lights the LED on its own; the first ~1.5 s of
+  every video are dark by design ([IR_LED.md](IR_LED.md))
 
 ---
 

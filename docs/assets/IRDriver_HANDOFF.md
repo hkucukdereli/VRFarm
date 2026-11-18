@@ -1,5 +1,16 @@
 # HANDOFF — IRDriver (KiCad project)
 
+> **VRFarm note, 2026-11-18** — added in the VRFarm repo. Everything below this box is the board
+> project's handoff as copied (state 2026-11-03) and is unchanged. Two of its statements are out
+> of date for this repo: *"VRFarm is NOT yet updated for rev ≥2.3"* in the header, and open item
+> §6.0. On `main` the Pi side is I²C-only since 2026-11-18: `devices/ir_led.py` claims no GPIO
+> (GPIO22 is a free spare), Install needs only I²C for it, and the cable choice of §6.3 is written
+> up (a Grove-to-Qwiic cable on a Grove Base Hat, or a Qwiic-to-jumper cable on header pins
+> 1/3/5/9). The lookup table of §6.8 exists as the rig YAML's `curve`. Pi-side documentation:
+> [`docs/IR_LED.md`](../IR_LED.md); wiring: [`docs/LEADER_WIRING.md`](../LEADER_WIRING.md).
+> The board's own status below (*not yet ordered*) is as written on 2026-11-03 and was not
+> re-checked; the VRFarm code has not run against a real board yet.
+
 **For:** the Claude Code agent (or anyone) continuing this project in Hakan's repo.
 **From:** the chat session that designed and generated rev 1.0 (2026-10-27/28); rev 1.1 → 3.2 by the Claude Code session of 2026-11-02/03.
 **State:** rev 3.2 (**38 × 74 mm board that mounts on the back of the Raspberry Pi HQ Camera**, I²C-only over a **Qwiic / STEMMA QT** connector, SMD circuit on the camera side, LDD module lying across the board + power terminal + Qwiic receptacle + heat sink on the outer side, all SMD parts JLCPCB-stocked, JLCPCB BOM/CPL + Gerbers exported), complete and verified with KiCad 10, **not yet ordered**.

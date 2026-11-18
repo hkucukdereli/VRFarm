@@ -223,6 +223,39 @@ def rig_opto_device(rig: dict) -> Union[dict, None]:
     return cfg
 
 
+# ── IR illuminator (devices/ir_led.py) ──
+
+# the rig-YAML keys devices/ir_led.py reads; pi_api's /api/init_ir_led accepts exactly these
+IR_LED_CFG_KEYS = ("i2c_address", "i2c_bus", "dac_vdd", "v_min", "v_max", "curve", "intensity_pct")
+
+
+def ir_led_init_payload(cfg: dict) -> dict:
+    """The /api/init_ir_led payload (Connect, Setup's Initialize and the Experiment tab's camera
+    preview all send it) — one builder so they can't drift. Only keys the rig YAML sets are
+    passed on; the driver's own defaults cover the rest."""
+    cfg = cfg or {}
+    out = {k: cfg[k] for k in IR_LED_CFG_KEYS if cfg.get(k) is not None}
+    out.setdefault("i2c_address", "0x60")
+    return out
+
+
+def rig_ir_led_device(rig: dict) -> Union[dict, None]:
+    """The rig's usable IR illuminator block, or None — the ENGINE's own test again
+    (rig_opto_device): a devices.ir_led block of type ir_led, `enabled` missing-or-true, listed in
+    the leader Pi's devices. The Experiment tab's camera preview lights the LED exactly when this
+    is not None."""
+    devs = (rig or {}).get("devices") or {}
+    cfg = devs.get("ir_led")
+    if not isinstance(cfg, dict) or not cfg.get("enabled", True):
+        return None
+    if str(cfg.get("type", "ir_led")) != "ir_led":
+        return None
+    leader = next((p for p in ((rig or {}).get("pis") or []) if p.get("role") == "leader"), None)
+    if not leader or "ir_led" not in (leader.get("devices") or []):
+        return None
+    return cfg
+
+
 def validate_opto(task: dict, rig: Union[dict, None]) -> tuple:
     """(errors, warnings) for the task's opto: section against the rig. Empty errors = runnable.
     Pure (no Flask, no hardware) — Deploy, the device's init and tools/test_opto.py all use it.

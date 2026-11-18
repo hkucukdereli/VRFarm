@@ -157,6 +157,14 @@ read once, at GO. Unchecking **Camera** still livestreams but writes no video fi
 unchecking a behavioural device skips its detailed HDF5 datasets while keeping per-trial
 outcomes.
 
+On a rig with the **IR illuminator** ([IR_LED.md](IR_LED.md)) GO first darkens the camera's
+LED for a few seconds, also when the preview had lit it, and the engine switches it on at
+START — before the grace period — and off when the session ends. The Log says *IR LED on at
+50 %* and *IR LED off*. The video therefore opens with about 1.5 s of dark frames; the step
+to lit is the recorded switch-on time. If the board fails at START the Log says *IR LED did
+NOT switch on: … — the video will be dark*, Slack gets a 🔴 line, and **the session runs
+on**: stop it if the video matters.
+
 ### 6. Monitor
 
 ![Events raster](images/exp-08-events-raster.png)
@@ -255,6 +263,14 @@ Pi and restarts the preview; use it if the feed freezes.
 A broken preview image is usually the relay reconnecting after a `pi_api` restart — it
 retries on its own. If it persists, **⟳ Reset**, or **Reinit** the camera in the setup UI.
 
+**IR illuminator.** On a rig that has one, the preview and the LED go together: **Live** with
+**Camera** ticked lights the LED at the rig's intensity, so the preview shows what the
+recording will, and stopping Live switches it off. If the LED could not be lit the Log says
+*IR LED not lit for the preview: …* and the preview still runs. During a session the engine
+owns the LED and the preview changes nothing. A preview left running — a closed browser tab —
+leaves the LED lit until the next GO, Load Rig or `pi_api` restart. The intensity itself is
+set on the Setup tab's IR Illuminator card. 850 nm is invisible: never look into the LED.
+
 ---
 
 ## Dry-running without hardware
@@ -283,6 +299,8 @@ exercise the global-timeout abort path. The camera stays blank — the mock serv
 | Phase dropped to Connected on its own | You edited a task parameter, which invalidates the deploy. Press **Deploy** again |
 | Rasters empty during a run | Press **Live**; if still empty, inbound UDP 5571 is blocked on the controller ([CONTROLLER_SETUP.md §1](CONTROLLER_SETUP.md#1-network--static-ip-on-the-wired-nic)) |
 | ⚠️ *CAMERA NOT RECORDING* in the log | The session runs without video. Check the SSD mount and `data.video_dir` |
+| Preview or video is dark on a rig with the IR illuminator | Look for an *IR LED* line in the Log. Then Setup → IR Illuminator card → **Live**: no light means the Qwiic cable, the LED supply on the board's J1, or the board (`i2cdetect -y 1` on the leader shows `60`). A task with `devices: ir_led: on_during_session: false` keeps it off on purpose. [IR_LED.md § When it fails](IR_LED.md#when-it-fails) |
+| Load Rig: the leader is red with `MCP4725 at 0x60 on I2C-1: …` | The rig lists the IR illuminator but the Pi cannot reach its DAC: cable or board, or no board fitted — then switch the device off in Setup and Save Rig |
 | 🐑 alerts in the log | shepherd health warnings from the Leader — temperature, disk, CPU or encode rate. See [shepherd/README.md](../shepherd/README.md) |
 | The Data tab lists no folder for the session | Check the Leader still holds it (`~/data/<subject>/…`), and that the Save checkboxes were set at GO |
 

@@ -23,6 +23,7 @@ from flask import Blueprint, Response, g, jsonify, request
 from shared.config import (load_task, save_task, make_session_id, register_session,
                            get_subject_history, photodiode_init_payload)
 from shared.config import validate_opto, rig_opto_device, opto_init_payload
+from shared.config import rig_ir_led_device, ir_led_init_payload
 from shared.mjpeg_relay import relay
 from controller import settings
 from controller.registry import registry, RigState
@@ -107,6 +108,30 @@ def _cam_exposure(rs: RigState, cam_cfg: dict) -> dict:
 
 def _camera_ip(rs: RigState):
     return next((pi["ip"] for pi in rs.pis if "camera" in pi.get("devices", [])), None)
+
+
+def _ir_led_preview(rs: RigState, on: bool):
+    """The camera preview lights the IR illuminator and its stop switches it off, so the preview
+    shows what the recording will. Returns an error string, or None — also when the rig has no
+    usable IR LED (shared.config.rig_ir_led_device) or a session runs (the engine owns the LED)."""
+    cfg = rig_ir_led_device(rs.config)
+    if cfg is None or rs.phase == "running":
+        return None
+    ip = next((pi.get("ip") for pi in rs.pis if pi.get("role") == "leader"), None)
+    if not ip:
+        return None
+    try:
+        if on:
+            # pi_api opens the device from this payload when Connect has not (or a pi_api
+            # restart dropped it), and sets the rig's intensity
+            r = requests.post(f"http://{ip}:{rs.api_port}/api/monitor_ir_led",
+                              json=ir_led_init_payload(cfg), timeout=10)
+        else:
+            r = requests.post(f"http://{ip}:{rs.api_port}/api/stop_monitor_ir_led", json={}, timeout=5)
+        d = r.json()
+        return None if d.get("ok") else str(d.get("error") or "IR LED did not respond")
+    except Exception as e:
+        return str(e)
 
 
 def _fmt_hm(ms) -> str:
@@ -316,6 +341,14 @@ def load_rig():
                                       json=opto_init_payload(dev_cfg), timeout=10)
                     if not r.json().get("ok"):
                         init_errors.append(r.json().get("error", "Opto failed — check the GPIO pins"))
+                elif dev_name == "ir_led":
+                    # DAC to 0 V, EEPROM to 0: the LED is OFF after Connect (the camera preview
+                    # and the session switch it on)
+                    r = requests.post(f"http://{ip}:{api_port}/api/init_ir_led",
+                                      json=ir_led_init_payload(dev_cfg), timeout=10)
+                    if not r.json().get("ok"):
+                        init_errors.append(r.json().get(
+                            "error", "IR LED failed — check the Qwiic cable / I2C 0x60"))
             except requests.exceptions.Timeout:
                 init_errors.append(f"{dev_name}: timed out waiting for response")
             except requests.exceptions.ConnectionError:
@@ -1011,7 +1044,13 @@ def camera_start():
                                 "live_preset": cam_cfg.get("live_preset", "med"),
                                 **_cam_exposure(rs, cam_cfg)},
                           timeout=10)
-        return jsonify(r.json())
+        resp = r.json()
+        if resp.get("ok"):
+            err = _ir_led_preview(rs, True)       # the preview is lit like the recording
+            if err:
+                resp["ir_led_error"] = err
+                rs.logger.info(f"IR LED not lit for the camera preview: {err}")
+        return jsonify(resp)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -1027,6 +1066,10 @@ def camera_stop():
                 requests.post(f"http://{pi['ip']}:{rs.api_port}/api/camera_preview_stop", json={}, timeout=5)
             except Exception:
                 pass
+    err = _ir_led_preview(rs, False)
+    if err:
+        rs.logger.info(f"IR LED not switched off with the camera preview: {err}")
+        return jsonify({"ok": True, "ir_led_error": err})
     return jsonify({"ok": True})
 
 

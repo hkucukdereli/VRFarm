@@ -71,6 +71,11 @@
   .device-fieldset:disabled { opacity: 0.55; }
   .device-field { display: inline-flex; align-items: center; gap: 4px; }
   .device-field label { margin: 0; font-size: 10px; white-space: nowrap; }
+  .live-field { flex-wrap: wrap; }
+  .device-field input[type=range] { width: 180px; max-width: 180px; padding: 0; }
+  .live-val { font-size: 11px; min-width: 40px; }
+  .live-ack { font-size: 10px; color: #888; }
+  .live-note { flex-basis: 100%; font-size: 10px; color: #c90; }
   .device-field input, .device-field select { width: auto; min-width: 60px; max-width: 120px;
     padding: 3px 6px; font-size: 12px; }
   /* Geometry param rows (SCREEN/VISUAL SPACE/PROJECTOR): tighter so each fits on one line */
@@ -617,6 +622,7 @@ async function initDevices() {
       deviceState[name].error = res.ok ? '' : (res.message || '');
       deviceState[name].open = !!res.device_open;      // photodiode: open although its flash check failed
       if (name === 'photodiode' && res.fw) _pdSeeFw(res.fw);
+      if (name === 'ir_led') deviceState[name].monitoring = false;   // its init switches the LED off
     }
 
     devicesInitialized = true;
@@ -645,6 +651,7 @@ async function _reinitDeviceInner(name) {
     deviceState[name].error = data.ok ? '' : (data.error || data.message || '');
     deviceState[name].open = !!data.device_open;
     if (name === 'photodiode' && data.fw) _pdSeeFw(data.fw);
+    if (name === 'ir_led') { deviceState.ir_led.monitoring = false; renderDeviceList(); }   // init = LED off
     // Camera reinit releases the camera server-side (the MJPEG stream closes), so clear the
     // streaming flag and re-render — otherwise the card keeps a dead, frozen preview <img>.
     if (name === 'camera') {
@@ -1430,6 +1437,108 @@ async function stopEncoderMonitor() {
   stopEncoderAnimation();
   renderDeviceList();
   log('Encoder monitoring stopped.');
+}
+
+// ── Live parameters (Device.live_params, e.g. ir_led intensity_pct) ──
+// A slider bound to the rig field (Save Rig persists it) that also sends each new value to the
+// running device through pi_api /api/device_set. Latest value wins: one request in flight per
+// slider, and whatever the slider reads when it returns goes next — no flood while dragging.
+
+function _liveParams(name) {
+  const dev = (rig && rig.devices && rig.devices[name]) || {};
+  const s = deviceSchemas[dev.type || name];
+  return (s && s.live_params) || {};
+}
+
+function _liveFieldHtml(name, key, spec, value, label) {
+  const v = (value === undefined || value === null || value === '')
+    ? (spec.default ?? spec.min ?? 0) : value;
+  const unit = spec.unit ? ' ' + spec.unit : '';
+  return `<div class="device-field live-field"><label>${label || key}</label>
+    <input type="range" min="${spec.min ?? 0}" max="${spec.max ?? 100}" step="${spec.step ?? 1}"
+           value="${v}" oninput="liveParamInput('${name}','${key}',this.value)">
+    <span class="live-val" id="live-val-${name}-${key}">${v}${unit}</span>
+    <span class="live-ack" id="live-ack-${name}-${key}"></span>
+    ${spec.note ? `<span class="live-note">${spec.note}</span>` : ''}</div>`;
+}
+
+let liveSend = {};   // 'device/param' -> {busy, pending}
+
+function _liveAck(name, key, text) {
+  const el = document.getElementById(`live-ack-${name}-${key}`);
+  if (el) el.textContent = text;
+}
+
+function liveParamInput(name, key, raw) {
+  if (!rig || !rig.devices[name]) return;
+  const v = Number(raw);
+  rig.devices[name][key] = v;                       // Save Rig keeps it
+  const spec = _liveParams(name)[key] || {};
+  const valEl = document.getElementById(`live-val-${name}-${key}`);
+  if (valEl) valEl.textContent = v + (spec.unit ? ' ' + spec.unit : '');
+  if ((deviceState[name] || {}).initialized !== true) {
+    _liveAck(name, key, 'not initialized: applies on Initialize/Reinit after Save Rig');
+    return;
+  }
+  const k = name + '/' + key;
+  const st = liveSend[k] = liveSend[k] || {busy: false, pending: null};
+  st.pending = v;
+  if (!st.busy) _liveFlush(name, key);
+}
+
+async function _liveFlush(name, key) {
+  const st = liveSend[name + '/' + key];
+  const pi = getPiForDevice(name);
+  if (!pi) { st.pending = null; _liveAck(name, key, 'not assigned to a Pi'); return; }
+  st.busy = true;
+  try {
+    while (st.pending !== null) {
+      const v = st.pending;
+      st.pending = null;
+      const r = await proxyPi(pi.ip, '/api/device_set', {name, param: key, value: v});
+      const s = (r && r.state) || {};
+      _liveAck(name, key, r && r.ok ? (s.message || 'applied')
+                                     : 'not applied: ' + ((r && r.error) || 'no answer'));
+    }
+  } finally {
+    st.busy = false;
+  }
+}
+
+// ── IR illuminator (devices/ir_led.py) ──
+// Live lights the LED at the card's intensity (aiming, focusing); Stop switches it off. Initialize
+// and Reinit leave it off. A pi_api from before the IR LED work answers 404: that rig needs a Deploy.
+
+function _irLedNeedsDeploy(r) {
+  return r && r.status === 404;
+}
+
+async function startIrLedMonitor() {
+  const pi = getPiForDevice('ir_led');
+  if (!pi) { log('IR LED not assigned to a Pi'); return; }
+  const pct = (rig.devices.ir_led || {}).intensity_pct ?? 50;
+  const r = await proxyPi(pi.ip, '/api/monitor_ir_led', {intensity_pct: pct});
+  if (r.ok) {
+    deviceState.ir_led = deviceState.ir_led || {};
+    deviceState.ir_led.monitoring = true;
+    renderDeviceList();
+    log(`IR LED ON at ${Math.round(r.intensity_pct ?? pct)} % (DAC ${r.dac_volts ?? '?'} V). 850 nm is invisible: never look into the LED.`);
+  } else if (_irLedNeedsDeploy(r)) {
+    log('IR LED: the pi_api on ' + pi.name + ' has no IR LED routes — Deploy this rig.');
+  } else { log('IR LED did not switch on: ' + (r.error || 'no answer')); }
+}
+
+async function stopIrLedMonitor() {
+  const pi = getPiForDevice('ir_led');
+  const r = pi ? await proxyPi(pi.ip, '/api/stop_monitor_ir_led') : {ok: true};
+  if (!r.ok && !_irLedNeedsDeploy(r)) {
+    log('IR LED did NOT switch off: ' + (r.error || 'no answer') + ' — Reinit the device.');
+    return;
+  }
+  deviceState.ir_led = deviceState.ir_led || {};
+  deviceState.ir_led.monitoring = false;
+  renderDeviceList();
+  log('IR LED off.');
 }
 
 async function pollEncoderData(ip) {
@@ -2772,6 +2881,7 @@ function renderDeviceCard(name, dev, pisReady) {
     else if (name === 'calibration_probe') controlsHtml = renderProbeControls(dev);
     else if (name === 'opto') controlsHtml = renderOptoControls(dev);
     else if (name === 'encoder') controlsHtml = renderEncoderControls(dev);
+    else if (name === 'ir_led') controlsHtml = renderIrLedControls(dev);
   }
 
   // Reinit lives in the header row (next to title/status) — one per device.
@@ -3260,6 +3370,34 @@ function renderEncoderControls(dev) {
     </div>
     ${monitoring ? `<canvas id="encoder-canvas" class="lick-canvas" width="440" height="80"></canvas>` : ''}
     <div style="font-size:10px; color:#666; margin-top:2px">AS5600 magnetic angle sensor (I2C ${addr}) &mdash; spin the wheel; distance uses wheel &oslash;.</div>`;
+}
+
+// The IR illuminator card: the DAC's I2C address (rig YAML), the intensity slider (a live
+// parameter — Save Rig keeps it, an initialized device gets each new value at once) and Live / Stop.
+// Nothing here lights the LED except Live.
+function renderIrLedControls(dev) {
+  if (dev.i2c_address == null) dev.i2c_address = '0x60';     // a freshly added device
+  if (dev.i2c_bus == null) dev.i2c_bus = 1;
+  if (dev.intensity_pct == null) dev.intensity_pct = 50;
+  const ds = deviceState.ir_led || {};
+  const lit = ds.monitoring;
+  const spec = _liveParams('ir_led').intensity_pct || {min: 0, max: 100, step: 1, unit: '%', default: 50};
+  return `
+    <div class="device-controls">
+      <div class="device-field" title="I2C address of the MCP4725 DAC on the IRDriver board (bus ${pdEsc(dev.i2c_bus)})">
+        <label>I2C</label>
+        <input type="text" value="${pdEsc(dev.i2c_address)}" style="width:55px"
+               onchange="rig.devices.ir_led.i2c_address = this.value">
+      </div>
+      ${lit
+        ? `<button class="btn btn-red btn-sm" onclick="stopIrLedMonitor()">Stop</button>
+           <span style="font-size:11px; color:#ef5350">LED ON</span>`
+        : `<button class="btn btn-blue btn-sm" onclick="startIrLedMonitor()" ${ds.initialized !== true ? 'disabled' : ''}>Live</button>`}
+    </div>
+    <div class="device-controls">
+      ${_liveFieldHtml('ir_led', 'intensity_pct', spec, dev.intensity_pct, 'Intensity')}
+    </div>
+    <div style="font-size:10px; color:#666; margin-top:2px">IRDriver board on the camera (MCP4725 DAC, I2C ${pdEsc(dev.i2c_address)}): 0&ndash;100 % of the driver's dimming range, not calibrated light. Off after Initialize; a session switches it on at START and off at its end; the Experiment tab's camera preview lights it too.</div>`;
 }
 
 // The photodiode card, top to bottom: the rig's own parameters (rig YAML; live once the devices

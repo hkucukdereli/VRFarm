@@ -1537,6 +1537,13 @@ function handleEvent(evt) {
       if (rasterLive) { rewardEvents.push({t: evt.t, duration_ms: evt.pulse_ms || 0}); updateRasterInfo(); }
       predReward = null;   // real reward fired — drop its prediction
       break;
+    case 'ir_led':
+      // IR illuminator of the behaviour camera: on at session start, off at its end
+      if (evt.error && evt.on) log('IR LED did NOT switch off: ' + evt.error + ' — it may still be lit');
+      else if (evt.error) log('IR LED did NOT switch on: ' + evt.error + ' — the video will be dark');
+      else if (evt.on) log('IR LED on' + (evt.intensity_pct != null ? ' at ' + Math.round(evt.intensity_pct) + ' %' : ''));
+      else log('IR LED off');
+      break;
     case 'opto':
       // Light window on/off from the leader's opto device: ON carries the planned t_off (a band
       // into the future), OFF pins the band's real end.
@@ -1747,6 +1754,7 @@ async function _startCamera() {
   const r = await fetch(api('/camera_start'), {method: 'POST'});
   const data = await r.json();
   if (!data.ok) { log('Camera start failed: ' + (data.error || '')); return; }
+  if (data.ir_led_error) log('IR LED not lit for the preview: ' + data.ir_led_error);
   cameraLive = true;
   _mountCameraImg();
 }

@@ -48,6 +48,7 @@ It's **idempotent** (a file already at `format_version 2`, or that already has a
 ├─ /reward/              (only if reward was saved)
 ├─ /photodiode/          (only if photodiode was saved)
 ├─ /opto/                (only if the optogenetics device was saved)
+├─ /ir_led/              (only on a rig with the IR illuminator; session scalars)
 └─ /camera/              (only if the camera was saved)
 ```
 
@@ -120,6 +121,19 @@ Scalar params as **group attributes**: `background_gray` (a brightness), `bg_lum
 | `/photodiode/` | `sync_pulses` (vlen f8 — rising-edge times) |
 | `/opto/` | `opto_on` (i1, laser windows fired = a lit trial), `opto_mask_on` (i1, masking LED fired), `opto_onset_t` (f8, first laser ON edge, NaN if none), `opto_n_windows` (i2), `opto_n_dropped` (i2, windows skipped because the pin was still on), `opto_window_t` (vlen f8 — `[on, off, …]` per laser window: actual on, planned off; a window not yet started at the trial record carries its planned on), `opto_window_anchor` (str — `anchor:source,…`; source `edge` = photodiode-locked, `pred` = lead from the latency estimate, `fallback` = no edge came, `anchor` = other anchors). `analysis/loaders.py` adds `opto`, `opto_mask`, `opto_lat_ms` (laser − true onset) to `.trials` and a long `.opto_windows` table |
 
+### `/ir_led/` — the camera's IR illuminator (one value per session)
+Present on a rig whose leader has the `ir_led` device, whatever the Save checkboxes say (the LED has no checkbox). Scalars, not per-trial arrays:
+
+| dataset | meaning |
+|---|---|
+| `ir_led_intensity_pct` (f4) | intensity the session ran at, % of the LED driver's dimming range (task `devices: ir_led: intensity_pct`, else the rig's) |
+| `ir_led_dac_volts` (f4) | DAC voltage of that intensity (0.5 V = 0 %, 2.5 V = 100 %) |
+| `ir_led_on` (i1) | 1 = the LED was switched on in this session; 0 = it never lit (`on_during_session: false`, or the switch-on failed) |
+| `ir_led_on_t` (f8) | Unix time of the switch-on, at START before the grace period; NaN if it never lit |
+| `ir_led_off_t` (f8) | Unix time of the verified switch-off at the session end; NaN if it never lit or the switch-off failed |
+
+The camera starts ~1.5 s before START, so the first video frames are unlit: frames with `wall_clock_s >= ir_led_on_t` are the lit ones. `analysis/loaders.py` gives the group as the dict `Session.ir_led` (keys without the `ir_led_` prefix; `{}` when the group is absent). Device and safety model: [IR_LED.md](IR_LED.md).
+
 Unchecked (skipped) devices → their group is simply **absent** (see `skipped_devices`). Core `/trials` data is always written. The running-wheel **encoder has no group of its own** — its per-trial and continuous data live under `/trials` (above).
 
 ### `/camera/frame_timestamps` — video frame timing (present only if saved)
@@ -146,6 +160,7 @@ s.licks       # one row / lick   (long form: in-trial + ITI, times rel. to onset
 s.pulses      # one row / photodiode sync pulse (long form, times rel. to onset)
 s.stimulus    # one row / planned trial
 s.camera      # one row / recorded video frame (empty if the camera wasn't saved)
+s.ir_led      # dict: the IR illuminator's session record (/ir_led); {} on a rig without it
 s.meta        # dict of root attrs; s.meta["task_config"] is the full paradigm
 s.stim_attrs  # scalar /stimulus attrs + block arrays (block_delays, iti_planned_s, …)
 

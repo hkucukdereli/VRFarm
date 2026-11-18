@@ -22,7 +22,7 @@ The four Slack messages:
                                 MOCK_DRY trials (global_timeout → session_end), like the real engine
 
 Env: MOCK_N=8  MOCK_ITI=2.5  MOCK_TRIAL_S=1.0  MOCK_END=end|timeout  MOCK_DRY=3  MOCK_RIG=<name>
-     API_PORT=5080  EVENT_PORT=5571  CMD_PORT=5572  CTRL_HOST=127.0.0.1
+     API_PORT=5080  API_HOST=127.0.0.1  EVENT_PORT=5571  CMD_PORT=5572  CTRL_HOST=127.0.0.1
 """
 import json
 import os
@@ -34,6 +34,7 @@ import yaml
 from flask import Flask, Response, jsonify, request
 
 API_PORT = int(os.environ.get("API_PORT", 5080))
+API_HOST = os.environ.get("API_HOST", "127.0.0.1")     # bind address (a second mock Pi: 127.0.0.2)
 EVENT_PORT = int(os.environ.get("EVENT_PORT", 5571))   # controller listens here
 CMD_PORT = int(os.environ.get("CMD_PORT", 5572))       # we listen here for START / STOP
 N = int(os.environ.get("MOCK_N", 8))                   # trials in the fake session
@@ -194,7 +195,7 @@ def cmd_listener():
 
 if __name__ == "__main__":
     threading.Thread(target=cmd_listener, daemon=True).start()
-    print(f"[mock-pi] fake pi_api on http://127.0.0.1:{API_PORT}  (use rig=demo)  "
+    print(f"[mock-pi] fake pi_api on http://{API_HOST}:{API_PORT}  (use rig=demo)  "
           f"N={N} iti={ITI_S}s trial={TRIAL_S}s end={END_MODE}"
           + (f" dry={DRY_N}" if END_MODE == "timeout" else ""))
-    app.run(host="127.0.0.1", port=API_PORT, threaded=True)
+    app.run(host=API_HOST, port=API_PORT, threaded=True)

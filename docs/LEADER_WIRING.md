@@ -72,12 +72,32 @@ four nets on to the second. This works only because the addresses differ:
 |---------------|--------|---------|-------------------------------|
 | Lick sensor   | MPR121 | `0x5A`  | Capacitive touch (licks)      |
 | Wheel encoder | AS5600 | `0x36`  | Running-wheel angle           |
+| IR illuminator (optional, below) | MCP4725 | `0x60` | DAC that dims the camera's IR LED |
 
 - GPIO2/3 have **onboard ~1.8 kΩ pull-ups** to 3V3. Many breakouts add their own pull-ups
   too; two in parallel is usually fine at 100 kHz. If the bus looks marginal
   (`i2cdetect` flaky, NAKs), remove the pull-ups on **one** board.
 - Verify both after wiring: `i2cdetect -y 1` should show **`5a`** and **`36`**.
 - Keep the daisy-chain leads short; for a long run to the wheel, twist SDA/SCL with GND.
+
+### IR illuminator (optional — not fitted on cheddar as of 2026-11-18)
+
+The camera's 850 nm LED sits on the **IRDriver board** on the back of the HQ Camera
+(`devices/ir_led.py`, rig YAML `devices.ir_led`). On the Pi side it is **one more device on
+I²C-1** and nothing else: no GPIO, no PWM. GPIO22, which an early board revision used as an
+enable line, stays a free spare.
+
+| Signal | Dir | BCM GPIO | Phys | Config key | Notes |
+|--------|-----|----------|------|------------|-------|
+| MCP4725 SDA/SCL | I²C-1 | **2 / 3** | 3/5 | `devices.ir_led.i2c_address` `0x60` | One 4-wire Qwiic cable: GND (phys 9, black), 3V3 (phys 1, red), SDA (blue), SCL (yellow). The Pi's 3V3 on that cable is the board's hardware gate: Pi off = LED off. |
+| LED supply | — | — | — | — | 9–12 V (6–36 V) on the board's screw terminal J1, **not** from the Pi. |
+
+- `i2cdetect -y 1` then also shows **`60`**. On a Seeed Grove Base Hat (Grove-to-Qwiic cable
+  into an I²C port; match the wire colours) the hat's own MCU answers at `04` (hat v1.0: `08`).
+- **Plug the cable with the Pi off.** A factory-fresh MCP4725 powers up at mid-scale and would
+  light the LED at about 60 %: program its power-up value to 0 **before the LED is wired**.
+- When the LED is lit, what switches it off after a crash, the bench bring-up and the
+  commissioning steps: [IR_LED.md](IR_LED.md).
 
 ---
 
@@ -190,7 +210,7 @@ Why the pins landed where they did — reuse these when adding hardware:
 ## Software prerequisites
 
 - **I²C enabled**: `raspi-config` → Interface Options → I²C. Verify with `i2cdetect -y 1`
-  → both `5a` (MPR121) and `36` (AS5600) present.
+  → both `5a` (MPR121) and `36` (AS5600) present (and `60` on a rig with the IR illuminator).
 - **GPIO library** (reward, photodiode — the only header-touching devices now):
   - **Pi 4B (`main` branch — the leader today)** — `pigpio` with the `pigpiod` daemon running
     (`sudo pigpiod` / the `pigpiod` service).

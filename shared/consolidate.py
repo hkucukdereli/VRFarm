@@ -19,7 +19,7 @@ Merges (then deletes the source):
   trials.yaml          -> dropped (redundant with stimuli.npz)
 
 Reorganizes the flat per-trial datasets the engine wrote into groups:
-  /trials (recorded), /lick, /reward, /photodiode.
+  /trials (recorded), /lick, /reward, /photodiode, /opto, /ir_led.
 """
 from __future__ import annotations
 import json
@@ -43,6 +43,8 @@ _GROUP["sync_pulses"] = "photodiode"
 for _n in ("opto_on", "opto_mask_on", "opto_onset_t", "opto_n_windows", "opto_n_dropped",
            "opto_window_t", "opto_window_anchor"):
     _GROUP[_n] = "opto"          # optogenetics device (devices/opto.py)
+for _n in ("ir_led_intensity_pct", "ir_led_dac_volts", "ir_led_on", "ir_led_on_t", "ir_led_off_t"):
+    _GROUP[_n] = "ir_led"        # IR illuminator (devices/ir_led.py): one scalar each per session
 
 # stimuli.npz per-trial arrays -> /stimulus dataset name (renamed for clarity)
 _NPZ_DATASET = {

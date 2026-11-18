@@ -26,7 +26,8 @@ import requests
 import yaml
 from flask import Blueprint, Response, g, jsonify, request
 
-from shared.config import save_rig_atomic, photodiode_init_payload, opto_init_payload
+from shared.config import (save_rig_atomic, photodiode_init_payload, opto_init_payload,
+                           ir_led_init_payload)
 from devices.lick_sensor import DEFAULT_DEBOUNCE_MS, debounce_registers, describe_debounce
 from devices.photodiode import TEENSY_PARAMS, check_teensy_params
 from shared.mjpeg_relay import relay
@@ -530,7 +531,7 @@ def camera_feed():
 
 # Device init order (display first so the screen is up before the rest).
 _INIT_ORDER = ["display", "lick_sensor", "reward", "camera", "photodiode", "encoder", "calibration_probe",
-               "opto"]
+               "opto", "ir_led"]
 
 
 def _display_init_cfg(devices: dict) -> dict:
@@ -577,6 +578,9 @@ def _init_one_device(rs: RigState, dev_name, devices, post):
         return post("/api/init_calibration_probe", {"gpio": cfg.get("gpio", 22)}, "Calibration probe", 10)
     if dev_name == "opto":
         return post("/api/init_opto", opto_init_payload(cfg), "Opto", 10)
+    if dev_name == "ir_led":
+        # DAC 0 V + EEPROM 0: the LED is off after Initialize; the card's Live lights it
+        return post("/api/init_ir_led", ir_led_init_payload(cfg), "IR LED", 10)
     return False, f"no init handler for '{dev_name}'"
 
 

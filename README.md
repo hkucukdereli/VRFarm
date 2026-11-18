@@ -89,6 +89,7 @@ then [INITIAL_SETUP_REFERENCE.md](docs/INITIAL_SETUP_REFERENCE.md).
 | [Data format](docs/DATA_FORMAT.md) | HDF5 layout and the analysis loaders |
 | [Leader wiring](docs/LEADER_WIRING.md) | Pins, 40-pin header map, GPIO rules |
 | [Teensy instructions](docs/TEENSY_INSTRUCTIONS.md) | Photodiode sync firmware: build, flash, tune |
+| [IR illuminator](docs/IR_LED.md) | The camera's 850 nm LED: wiring, when it is lit, safety, commissioning |
 | [Rig health monitor](shepherd/README.md) | shepherd: what it watches, thresholds, alerts |
 
 ---
@@ -110,7 +111,7 @@ display_diagnostics/   bench tools for the sync square and projector colour
 shepherd/      rig health watchdog that runs on a Pi (temperature, disk, CPU, encode rate)
 analysis/      HDF5 loaders and analysis notebooks
 tools/         mock_pi.py (hardware-free harness) · capture_ui_shots.py (doc screenshots)
-docs/          documentation (docs/images generated; docs/assets is local-only)
+docs/          documentation (docs/images generated; docs/assets is local-only, bar the IR board handoff)
 ```
 
 ## Requirements

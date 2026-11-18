@@ -143,8 +143,8 @@ A Pi showing *"SSH FAIL, API OK"* still works for everything except Install.
 
 Press **Initialize** (in the Devices header) once all Pis are green. It initializes each
 enabled device on its assigned Pi in a fixed order — display first, then lick sensor,
-reward, camera, photodiode, encoder, calibration probe, optogenetics — and reports each in
-the Log.
+reward, camera, photodiode, encoder, calibration probe, optogenetics, IR illuminator — and
+reports each in the Log.
 
 ![Device tabs](images/setup-06-device-tabs.png)
 
@@ -287,6 +287,38 @@ the Experiment tab, whose OPTOGENETICS section appears only when this device is 
 assigned to the leader. Initialize claims the pins LOW and reads them back; nothing holds them
 afterwards, so the engine can claim them at GO. Commissioning recipe and status:
 [OPTOGENETICS.md](OPTOGENETICS.md).
+
+### IR Illuminator
+
+The camera's 850 nm LED on the IRDriver board: an MCP4725 DAC on the leader's I²C bus sets the
+LED current, with no GPIO ([LEADER_WIRING.md](LEADER_WIRING.md)). The card appears once the
+device is in the rig — Device Catalog → **IR Illuminator**, or the `ir_led` block that
+`rigs/_template.yaml` ships with `enabled: false` — and works once it is switched on and
+assigned to the **leader**.
+
+| Control | What it does |
+|---|---|
+| **I2C** | The DAC's address (`0x60`). Rig YAML; Save Rig, then Reinit |
+| **Intensity** slider | 0–100 % of the driver's dimming range (not calibrated light; 0 % is the dimmest lit level, not off). **Save Rig** keeps it as the rig's `intensity_pct`. On an initialized device every move goes to the Pi at once: the card answers `80 % = 2.10 V, LED ON`, or `… LED off (Live lights it)` while dark. Before Initialize it only edits the rig value |
+| **Live** / **Stop** | Live lights the LED at the slider's value, for aiming and focusing with the Camera card's preview next to it; the card shows **LED ON** in red and the Log prints `IR LED ON at 60 % (DAC 1.7 V). 850 nm is invisible: never look into the LED.` Stop switches it off |
+
+- **Only Live lights the LED here.** Initialize and Reinit set the DAC to 0 V, make its
+  power-up value 0 and leave the LED **off**, also when it was lit. The Camera card's own Live
+  does not light it (the Experiment tab's camera preview does).
+- A session takes the LED over: on at START, off at the end. While one runs the card cannot
+  light or re-initialize it (the Pi answers *a session is running — the engine owns the IR
+  LED*).
+- Initialize fails on a rig that lists the device without a board
+  (`MCP4725 at 0x60 on I2C-1: …`), and so would GO: keep `enabled` off until the board is
+  fitted.
+- *the pi_api on <pi> has no IR LED routes — Deploy this rig.* means the leader's code is
+  older than the IR illuminator.
+- **850 nm is invisible.** Never look into the LED; judge on/off by the card or the camera
+  image, not by eye.
+
+Wiring, the safety model (what switches a left-on LED off, and what does not), the bench
+bring-up of a new board and the commissioning steps: [IR_LED.md](IR_LED.md). Not yet tried on
+hardware as of 2026-11-18.
 
 ---
 

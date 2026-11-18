@@ -61,6 +61,13 @@ adaptive:
   step_up: 0.2
   step_down: 0.2
 
+# ── IR illuminator (optional; only read on a rig with an ir_led device, devices/ir_led.py) ──
+# Without this block the LED is on for the whole session at the rig's intensity.
+# devices:
+#   ir_led:
+#     intensity_pct: 50          # this task's intensity instead of the rig's
+#     on_during_session: true    # false = the LED stays off for the session
+
 # ── Optogenetics (needs an opto device on the rig's leader — the Experiment tab shows this
 #    section only then; devices/opto.py) ──
 opto:

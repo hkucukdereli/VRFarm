@@ -46,7 +46,7 @@ into the env, so a version mismatch breaks `import picamera2`. Create with
 ├── experiments/
 │   └── *.yaml                         <- task/paradigm configs (stimulus/reward/session/adaptive/opto)
 ├── devices/                           <- one file per device type (base.py = Device, DEVICE_REGISTRY)
-│   ├── lick_sensor.py  reward.py  camera.py  photodiode.py  encoder.py  display.py  opto.py ir_led.py
+│   ├── lick_sensor.py  reward.py  camera.py  photodiode.py  encoder.py  display.py  opto.py  ir_led.py
 ├── engine/
 │   └── leader.py                      <- Leader Pi main process (imperative trial loop)
 ├── displayd/                          <- KMS display daemon (owns the projector)
@@ -186,7 +186,11 @@ is set (default true), end the session at a **trial boundary** with `end_reason:
 Adding a device = one file in `devices/`, subclassing `Device` from `devices/base.py`:
 `info`, `init()`, `check()`, `task_params_schema()`, `hdf5_datasets()`/`hdf5_trial_data()`,
 `start_stream()`/`stop_stream()`, optional `needs_calibration`/`calibrate()`.
-`@register_device` adds it to `DEVICE_REGISTRY`.
+`@register_device` adds it to `DEVICE_REGISTRY`. Two optional hooks (2026-11-18, first used by
+`ir_led`): `safe_state(rig_config)` — a classmethod that puts the hardware in its safe state without
+an instance; pi_api calls it after any engine exit, at its own start-up and on SIGTERM — and
+`live_params()` / `set_live()` — parameters the Setup card changes on a running device through
+`/api/device_set`.
 
 ---
 
@@ -269,6 +273,7 @@ python tools/smoke_multirig.py      # two fake rigs end to end (mock Pis)
 python tools/smoke_data.py          # the Data tab against a scratch data tree
 python tools/test_leader_hash.py    # the Data tab's content check, piece by piece
 python tools/test_photodiode_serial.py   # the photodiode's Teensy serial side (firmware v2_3 lines, Debug ring) on a fake port
+python tools/test_ir_led.py         # the IR illuminator end to end on a fake MCP4725 (driver, pi_api, engine, controller); run it alone
 ```
 Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
 
@@ -342,6 +347,25 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
   landed and ignores edges < 45 ms after SHOW (`SYNC_MIN_LATENCY_S`); before that, 1.2 % of
   photodiode-confirmed trials had anchored on a heartbeat sub-pulse (`display_latency_s` < 40 ms in
   the archive marks them). Full doc, bench recipe and status: `docs/OPTOGENETICS.md`.
+- **IR illuminator** (`devices/ir_led.py`, rig `devices.ir_led`, 2026-11-18; ported from `dev-catchme`):
+  the camera's 850 nm LED on the IRDriver board, an MCP4725 DAC at `0x60` on the leader's I2C-1 (one
+  Qwiic cable, no GPIO; DAC 0 V = off, 0.5–2.5 V = 0–100 % of the driver's dimming range). Off after
+  Load Rig / Initialize; lit by the Setup card's **Live** (the intensity slider is a live parameter),
+  by the Experiment tab's camera preview (`/camera_start` → `/api/monitor_ir_led`), and by the engine
+  from START (before the grace period) to the session end — the camera starts ~1.5 s earlier, so a
+  video opens dark. A board that fails at START does **not** stop the session (Log + Slack: the video
+  will be dark); a board missing at Load Rig or GO is an init failure like any device, so keep
+  `enabled: false` (the template's default) until one is fitted. While pi_api's engine runs,
+  `/api/init_ir_led` and `/api/monitor_ir_led` answer 409: a second instance would write 0 V. **A
+  crashed owner leaves the DAC, and so the LED, as it was**: pi_api writes 0 V after any engine exit
+  (SIGKILL included), at its own start-up and on its SIGTERM, from `~/rig/safe_state.json`; not covered
+  are a SIGKILL of pi_api itself, a kernel hang, a board that stopped answering, and a leader where the
+  device was never opened. The EEPROM (power-up value) is only ever written with 0 — a factory-fresh
+  MCP4725 powers up at ~60 % LED. Task override: `devices: ir_led: {intensity_pct, on_during_session}`
+  (YAML only). Data: five session scalars in `/ir_led`, `Session.ir_led` in the loaders. A rig needs
+  the YAML block enabled and on the leader, a Deploy, and the bench bring-up. **Tested against a fake
+  MCP4725 and in a headless browser only — nothing has run on a board or a Pi as of 2026-11-18.**
+  `docs/IR_LED.md`; board handoff: `docs/assets/IRDriver_HANDOFF.md`.
 - **Video remux happens at the Data-tab sync, never at the engine's exit** (2026-11-09). The controller's
   teardown has pi_api SIGKILL the engine 10 s after SIGTERM, so the exit-time ffmpeg remux was cut short
   on every recording over ~75 min (≥ ~6 GB at 10 Mbit/s): `video.h264` stayed next to a complete but

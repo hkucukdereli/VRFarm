@@ -23,19 +23,22 @@ Safety model (handoff §2.2, decision 17):
                                  mid-scale (1.65 V ≈ 60 % LED) — program it once on the bench
                                  before wiring the LED (see "Bench bring-up" below).
   * Pi up                     -> DAC 0 V = OFF; DAC 0.5..2.5 V = min..100 % LED current.
-  * process crash / warm reboot with the LED on -> the DAC keeps its last value. This is the
-                                 accepted gap of the I2C-only board; this module narrows it in
-                                 software (off() on close/stop, an atexit hook, off() verified by
-                                 read-back), but a SIGKILL or kernel panic leaves the LED lit
-                                 until the next DAC write of 0 (any Connect does that) or a
-                                 power cycle.
+  * process crash / warm reboot with the LED on -> the DAC keeps its last value (a warm reboot
+                                 keeps the Pi's 3V3, so the gate stays open). This is the
+                                 accepted gap of the I2C-only board; software closes most of it:
+                                 off() on stop/close (verified by read-back), an atexit hook in
+                                 this module, and pi_api's safe_state() calls (Device.safe_state:
+                                 a DAC write of 0 after the engine exits — SIGKILL included —,
+                                 at pi_api start-up, i.e. after a reboot, and on pi_api SIGTERM).
+                                 Left: a kernel panic / hang, or a SIGKILL of pi_api itself, keeps
+                                 the LED lit until the next of those or a power cycle.
   The EEPROM is only ever written with 0 — never write a non-zero power-up value.
 
 Analog dimming (no PWM: PWM at a few hundred Hz beats against the camera frame rate). Intensity
 is a percentage of the driver's analog window (0.5..2.5 V ≈ min..1 A), NOT calibrated to
 irradiance; 0 % is the dimmest lit level, "off" is DAC 0 V. Keep camera exposure/gain fixed and
 pick an intensity per rig (rig YAML `intensity_pct`); a task YAML may override it under
-`devices: <name>: intensity_pct:`. If the bench sweep shows the LDD's DIM pull-up bends the
+`devices: ir_led: intensity_pct:`. If the bench sweep shows the LDD's DIM pull-up bends the
 curve, put a measured table in the rig YAML as `curve: [[pct, volts], ...]` (monotonic).
 
 Bench bring-up (once per board, LED unplugged, LED supply off):
@@ -43,10 +46,18 @@ Bench bring-up (once per board, LED unplugged, LED supply off):
   python3 -c "import smbus2; smbus2.SMBus(1).write_i2c_block_data(0x60, 0x60, [0, 0])"
   (or just Connect the rig: init() does the same and reports 'EEPROM 0' in the device check)
 
-Lifecycle in VRFarm: Connect -> pi_api init (DAC 0, LED off). Setup "Live monitor" =
-start_stream -> LED on at the rig intensity (aiming/focusing); stopping the monitor turns it off.
-GO -> pi_api releases its instance (LED off) -> the engine inits its own -> session start
-switches it on (task `on_during_session`, default true) -> session end / STOP switches it off.
+Lifecycle in VRFarm (docs/IR_LED.md):
+  * Connect (Experiment tab) / Initialize (Setup tab) -> pi_api /api/init_ir_led: DAC 0, EEPROM 0,
+    LED off.
+  * Setup card: "Live" = /api/monitor_ir_led -> start_stream -> LED on at the card's intensity
+    (aiming / focusing); the slider changes it live (live_params / set_live through
+    /api/device_set; Save Rig keeps the value); "Stop" = /api/stop_monitor_ir_led -> off.
+  * Experiment tab: the camera preview (Live) lights the LED through the same two routes, so the
+    preview shows what the recording will; stopping the preview switches it off.
+  * GO -> pi_api releases its instance (LED off) -> the engine inits its own (off) -> START
+    switches it on (task `devices: ir_led: on_during_session`, default true) -> session end /
+    STOP switches it off. The camera starts recording ~1.5 s before START, so a video opens
+    dark and the step to lit marks `ir_led_on_t`.
 """
 
 from __future__ import annotations
@@ -96,6 +107,7 @@ class IRLed(Device):
         self._on_t = None
         self._off_t = None
         self._eeprom = None
+        self._callback = None      # the active stream's callback (engine publisher / Setup monitor)
 
     @classmethod
     def task_params_schema(cls):
@@ -107,6 +119,16 @@ class IRLed(Device):
             "on_during_session": {
                 "type": "bool", "default": True,
                 "label": "IR on for the whole session",
+            },
+        }
+
+    @classmethod
+    def live_params(cls):
+        return {
+            "intensity_pct": {
+                "min": 0, "max": 100, "step": 1, "unit": "%", "default": 50,
+                "note": "Live lights the LED at this level; Stop switches it off. "
+                        "850 nm is invisible: never look into the LED.",
             },
         }
 
@@ -126,8 +148,8 @@ class IRLed(Device):
         # intensity: task override > rig default > schema default
         self.intensity_pct = self._clamp_pct(task_params.get(
             "intensity_pct", rig_config.get("intensity_pct", 50.0)))
-        self.on_during_session = bool(task_params.get(
-            "on_during_session", rig_config.get("on_during_session", True)))
+        # task-only: pi_api's Setup monitor passes no task params, so "Live" always lights it
+        self.on_during_session = bool(task_params.get("on_during_session", True))
 
         self.bus = smbus2.SMBus(self.i2c_bus)
         try:
@@ -142,6 +164,18 @@ class IRLed(Device):
             self.bus = None
             raise RuntimeError(f"MCP4725 at 0x{self.addr:02x} on I2C-{self.i2c_bus}: {e}")
         _LIVE.add(self)
+
+    @classmethod
+    def safe_state(cls, rig_config: dict):
+        """LED off without an instance (Device.safe_state): one volatile DAC write of 0 V, EEPROM
+        untouched. A missing board raises OSError, which pi_api logs and moves on from."""
+        import smbus2
+        bus = smbus2.SMBus(int(rig_config.get("i2c_bus", 1)))
+        try:
+            bus.write_i2c_block_data(_parse_addr(rig_config.get("i2c_address", "0x60")),
+                                     _CMD_WRITE_DAC, [0, 0])
+        finally:
+            bus.close()
 
     # ── MCP4725 access (callers hold self._lock) ──
 
@@ -242,6 +276,17 @@ class IRLed(Device):
             self.intensity_pct = self._clamp_pct(pct)
             if self._on:
                 self._write_dac(self.code_for_pct(self.intensity_pct))
+        self._emit()
+
+    def set_live(self, param: str, value) -> dict:
+        """Setup-card slider (Device.live_params): only intensity_pct."""
+        if param != "intensity_pct":
+            raise ValueError(f"ir_led has no live parameter '{param}'")
+        self.set_intensity(float(value))
+        st = self.status()
+        st["message"] = (f"{self.intensity_pct:.0f} % = {self.volts_for_pct(self.intensity_pct):.2f} V, "
+                         + ("LED ON" if self._on else "LED off (Live lights it)"))
+        return st
 
     def on(self):
         with self._lock:
@@ -252,15 +297,15 @@ class IRLed(Device):
             self._on_t = time.time()
 
     def off(self):
-        """DAC to 0 V (DIM < 0.4 V = LED off), verified by read-back."""
+        """DAC to 0 V (DIM < 0.4 V = LED off), verified by read-back. A write that cannot be
+        verified raises and leaves `is_on` as it was: the LED may still be lit."""
         with self._lock:
             if self.bus is None:
                 return
-            was_on = self._on
-            self._on = False
             self._write_dac(0, verify=True)
-            if was_on:
+            if self._on:
                 self._off_t = time.time()
+            self._on = False
 
     @property
     def is_on(self) -> bool:
@@ -286,16 +331,44 @@ class IRLed(Device):
 
     # ── session lifecycle (engine/leader.py; pi_api's Setup monitor uses the same calls) ──
 
+    def _event(self) -> dict:
+        return {"event": "ir_led", "t": time.time(), "on": self._on,
+                "intensity_pct": self.intensity_pct, "dac_code": self._code,
+                "dac_volts": round(self.volts(), 3)}
+
+    def _emit(self, error: str | None = None):
+        cb = self._callback
+        if cb is not None:
+            evt = self._event()
+            if error:
+                evt["error"] = error
+            try:
+                cb(evt)
+            except Exception:
+                pass
+
     def start_stream(self, callback):
-        """Session start (or Setup live monitor): switch on if wanted and announce it once."""
+        """Session start (or Setup live monitor): switch on if wanted and announce it. Every
+        later change (set_intensity, stop) is announced through the same callback."""
+        self._callback = callback
         if self.on_during_session:
             self.on()
-        callback({"event": "ir_led", "t": time.time(), "on": self._on,
-                  "intensity_pct": self.intensity_pct, "dac_code": self._code,
-                  "dac_volts": round(self.volts(), 3)})
+        self._emit()
 
     def stop_stream(self):
-        self.off()
+        """Switch off and announce it. If switching a LIT LED off fails, the event carries `error`
+        and still says `on` (the session's log and Slack then name it), and the error is raised.
+        An LED that never lit has nothing to report: its failed switch-on was announced already."""
+        was_on = self._on
+        err = None
+        try:
+            self.off()
+        except Exception as e:
+            err = str(e)
+            raise
+        finally:
+            self._emit(error=err if was_on else None)
+            self._callback = None
 
     def hdf5_session_data(self) -> dict:
         import numpy as np

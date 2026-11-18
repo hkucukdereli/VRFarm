@@ -30,6 +30,7 @@ Project overview and repo layout are in the [root README](../README.md).
 | Look up geometry parameters | [display_calibration/geometry_params.md](../display_calibration/geometry_params.md) |
 | Check wiring, pins and the 40-pin header map | [LEADER_WIRING.md](LEADER_WIRING.md) |
 | Build, flash or tune the **Teensy** photodiode sync firmware | [TEENSY_INSTRUCTIONS.md](TEENSY_INSTRUCTIONS.md) |
+| Wire, commission or set the camera's **IR illuminator**; know when its LED is lit | [IR_LED.md](IR_LED.md) |
 | Watch rig health during a session (temperature, disk, encode rate) | [shepherd/README.md](../shepherd/README.md) |
 
 ## Map of the system
@@ -40,7 +41,7 @@ Controller  (controller/app.py :5000 — Network / Setup / Experiment / Data tab
   │  UDP  5572 →  START / STOP / REWARD
   │  UDP  5571 ←  trial, lick, reward, stim, sync events
   ▼
-Leader Pi (engine/leader.py) ── trial loop + lick, reward, camera, photodiode, encoder, opto
+Leader Pi (engine/leader.py) ── trial loop + lick, reward, camera, photodiode, encoder, opto, IR illuminator
   │  UDP 5575 → SHOW / QUIT
   ▼
 Follower Pi (displayd) ── KMS daemon; renderer child is sole DRM master on the DLP projector
@@ -73,4 +74,6 @@ UI change so the docs do not drift. Shots needing real hardware — a live camer
 projector, the geometry landmark tool — must still be taken on the rig.
 
 > `docs/assets/` is a **local-only** stash (audits, hardware design notes, vendor manuals)
-> and is gitignored — nothing in the tracked docs links to it.
+> and is gitignored. One file in it is tracked and linked: `assets/IRDriver_HANDOFF.md`, the
+> IR illuminator board's handoff copy ([IR_LED.md](IR_LED.md)). Nothing else in the tracked
+> docs links to that folder.

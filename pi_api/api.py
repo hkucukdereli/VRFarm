@@ -7,6 +7,7 @@ stim generation, and calibration.
 """
 
 from __future__ import annotations
+import importlib
 import json
 import os
 import shutil
@@ -45,6 +46,170 @@ _lick_events: list = []
 _photodiode_events: list = []
 _encoder_events: list = []   # running-wheel {t, speed_cms, distance_cm} for the setup-UI monitor
 _reward_events: list = []
+
+
+def _load_device_class(dev_type: str):
+    """Import devices/<type>.py (it registers itself via @register_device) and return the class."""
+    if not str(dev_type).isidentifier():
+        raise ValueError(f"not a device type: {dev_type!r}")
+    _ensure_rig_path()
+    from devices.base import DEVICE_REGISTRY
+    if dev_type not in DEVICE_REGISTRY:
+        importlib.import_module(f"devices.{dev_type}")
+    return DEVICE_REGISTRY[dev_type]
+
+
+# ── Safe state (Device.safe_state) ──
+# Some hardware keeps doing something after the process that drove it dies — the IR LED's DAC
+# holds its last value, so a SIGKILLed engine leaves the LED lit. Device classes that override
+# Device.safe_state(rig_config) get it applied here whenever their owner may have died
+# uncleanly: after the engine process exits (any way: natural end, crash, the SIGKILL in
+# /api/stop), when pi_api starts (after a crash or restart — KillMode=mixed SIGKILLs the engine
+# along with pi_api — or a warm reboot, which keeps the Pi's 3V3 up), and on pi_api's own
+# SIGTERM (systemd stop at shutdown, Restart API, Deploy; the engine is SIGKILLed right after).
+# The configs of those devices are remembered in SAFE_STATE_FILE, so the start-up pass knows
+# them without a rig yaml.
+SAFE_STATE_FILE = RIG_DIR / "safe_state.json"
+_safe_file_lock = threading.Lock()
+# Serializes a safe-state pass against the routes that open such a device HERE (init_ir_led,
+# monitor_ir_led): a pass that found the device not held must not write "off" just after a
+# route opened and lit it. Always acquire this OUTSIDE _devices_lock.
+_safe_lock = threading.Lock()
+
+
+def _has_safe_state(cls) -> bool:
+    _ensure_rig_path()
+    from devices.base import Device
+    return getattr(cls.safe_state, "__func__", None) is not Device.safe_state.__func__
+
+
+def _load_safe_entries() -> dict:
+    """{device name: {type, config}} last remembered, or {} (missing / unreadable file)."""
+    try:
+        d = json.loads(SAFE_STATE_FILE.read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_safe_entries(entries: dict):
+    try:
+        SAFE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = SAFE_STATE_FILE.with_name(SAFE_STATE_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(entries, indent=1))
+        os.replace(tmp, SAFE_STATE_FILE)
+    except OSError as e:
+        print(f"[safe_state] could not write {SAFE_STATE_FILE}: {e}", flush=True)
+
+
+def _remember_safe_entry(name: str, dev_type: str, config: dict, cls):
+    """A device opened here: remember (or forget) its config for the safe-state passes."""
+    with _safe_file_lock:
+        entries = _load_safe_entries()
+        if _has_safe_state(cls):
+            if entries.get(name) == {"type": dev_type, "config": config}:
+                return
+            entries[name] = {"type": dev_type, "config": config}
+        elif entries.pop(name, None) is None:
+            return
+        _save_safe_entries(entries)
+
+
+def _safe_entries_from_rig(rig_path: str) -> dict:
+    """The rig yaml's enabled leader devices whose class declares a safe state — the same
+    selection engine/leader.py makes in init_devices()."""
+    import yaml
+    rig = yaml.safe_load(Path(rig_path).read_text()) or {}
+    leader = next((p for p in rig.get("pis") or [] if p.get("role") == "leader"), {})
+    devices = rig.get("devices") or {}
+    out = {}
+    for name in leader.get("devices") or []:
+        cfg = devices.get(name) or {}
+        if not cfg.get("enabled", True):
+            continue
+        dev_type = cfg.get("type", name)
+        try:
+            if _has_safe_state(_load_device_class(dev_type)):
+                out[name] = {"type": dev_type, "config": cfg}
+        except Exception as e:
+            print(f"[safe_state] {name}: cannot load type '{dev_type}': {e}", flush=True)
+    return out
+
+
+def _apply_safe_states(why: str, skip_held: bool = True):
+    """Run safe_state for every remembered device. skip_held: leave alone a device pi_api itself
+    holds an instance of AND has switched on (Live, the camera preview) — checked under
+    _safe_lock, so a route opening the device can't slip in between. A held instance that is
+    off gets the write all the same: it costs nothing, and whoever just died may have lit the
+    hardware behind its back. The SIGTERM path passes False and takes no locks: pi_api is going
+    down and its instances with it."""
+    for name, entry in _load_safe_entries().items():
+        try:
+            cls = _load_device_class(entry.get("type", name))
+            if not _has_safe_state(cls):
+                continue
+            if skip_held:
+                with _safe_lock:
+                    with _devices_lock:
+                        held = _devices.get(name)
+                    if held is not None and getattr(held, "is_on", True):
+                        continue
+                    cls.safe_state(entry.get("config") or {})
+            else:
+                cls.safe_state(entry.get("config") or {})
+            print(f"[safe_state] {name}: safe state applied ({why})", flush=True)
+        except Exception as e:
+            print(f"[safe_state] {name}: safe state FAILED ({why}): {e}", flush=True)
+
+
+def _foreign_engine_running(proc_root: str = "/proc") -> bool:
+    """Is an engine/leader.py running that is NOT our own child (e.g. started by hand over SSH)?
+    Then a safe-state pass would yank its hardware mid-session, so the start-up and SIGTERM
+    passes skip. Scans /proc from Python — `pgrep -f` would match its own shell."""
+    own = _process.pid if _process is not None and _process.poll() is None else None
+    try:
+        procs = list(Path(proc_root).iterdir())
+    except OSError:
+        return False                          # no /proc (not Linux): nothing to protect
+    for d in procs:
+        if not d.name.isdigit() or int(d.name) in (own, os.getpid()):
+            continue
+        try:
+            argv = (d / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if argv and b"python" in argv[0] and any(a.endswith(b"engine/leader.py") for a in argv[1:]):
+            return True
+    return False
+
+
+def _on_sigterm(signum, frame):
+    """pi_api is being stopped (systemd stop at shutdown, Restart API, Deploy): put safe-state
+    devices to rest, then terminate exactly as the default SIGTERM action would."""
+    try:
+        if not _foreign_engine_running():
+            _apply_safe_states("pi_api stopping", skip_held=False)
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+
+def _watch_engine(proc, rig_path):
+    """One thread per engine process: note which of this rig's devices need a safe state while it
+    runs, and apply it the moment the engine is gone — however it went (session end, crash, the
+    SIGKILL in /api/stop). Polls instead of a blocking wait(), so /api/stop's own wait is never
+    kept off the process."""
+    if rig_path:
+        try:
+            entries = _safe_entries_from_rig(rig_path)
+            with _safe_file_lock:
+                if entries != _load_safe_entries():
+                    _save_safe_entries(entries)
+        except Exception as e:
+            print(f"[safe_state] cannot read rig {rig_path}: {e}", flush=True)
+    while proc.poll() is None:
+        time.sleep(0.2)
+    _apply_safe_states(f"engine exited with code {proc.returncode}")
 
 
 @app.route("/api/status")
@@ -267,6 +432,10 @@ def start():
                 _process_log.pop(0)
 
     threading.Thread(target=read_output, daemon=True).start()
+
+    # Devices with a safe state (the IR LED) are put to rest when this engine is gone
+    rig_path = cmd[cmd.index("--rig") + 1] if "--rig" in cmd[:-1] else None
+    threading.Thread(target=_watch_engine, args=(_process, rig_path), daemon=True).start()
 
     return jsonify({"ok": True, "pid": _process.pid})
 
@@ -532,7 +701,8 @@ def calibrate():
 
 
 def _ensure_rig_path():
-    sys.path.insert(0, str(RIG_DIR))
+    if str(RIG_DIR) not in sys.path:
+        sys.path.insert(0, str(RIG_DIR))
 
 
 # ── displayd forwarding (KMS display daemon) ────────────────────────────────────
@@ -1018,6 +1188,109 @@ def opto_off():
         finally:
             lgpio.gpiochip_close(chip)
         return jsonify({"ok": True, "message": ", ".join(done) or "no pins"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ── IR illuminator (devices/ir_led.py) ──────────────────────────────────────────
+# MCP4725 DAC on the leader's I2C-1 that dims the camera's 850 nm LED; DAC 0 V = off. pi_api
+# holds an instance between sessions (Connect / Setup Initialize open it with the LED OFF);
+# "monitor" lights it at the rig intensity for the Setup card's Live and for the Experiment
+# tab's camera preview. From GO to the session's end the ENGINE owns the LED: a second instance
+# opened here would start by writing 0 V and darken the session's video, so these routes refuse
+# while pi_api's engine runs. The DAC holds its last value when its owner dies — see the
+# safe-state block at the top of this file.
+_IR_LED_CFG_KEYS = ("i2c_address", "i2c_bus", "dac_vdd", "v_min", "v_max", "curve", "intensity_pct")
+_IR_LED_BUSY = "a session is running — the engine owns the IR LED"
+
+
+def _ir_led_open(cfg: dict):
+    """pi_api's IRLed from a rig config, LED off (init() writes DAC 0 V and makes the EEPROM's
+    power-up value 0). Replaces an instance already held. Caller holds _safe_lock."""
+    _ensure_rig_path()
+    from devices.ir_led import IRLed
+    _release_one("ir_led")
+    dev = IRLed()
+    dev.init(rig_config=cfg, task_params={})
+    with _devices_lock:
+        _devices["ir_led"] = dev
+    _remember_safe_entry("ir_led", "ir_led", cfg, IRLed)
+    return dev
+
+
+@app.route("/api/init_ir_led", methods=["POST"])
+def init_ir_led():
+    """Open the IR illuminator and leave the LED OFF (Connect, Setup Initialize / Reinit).
+    Body: the device's rig config (_IR_LED_CFG_KEYS)."""
+    data = request.get_json(silent=True) or {}
+    if _engine_running():
+        return jsonify({"ok": False, "error": _IR_LED_BUSY}), 409
+    try:
+        with _safe_lock:
+            dev = _ir_led_open({k: data[k] for k in _IR_LED_CFG_KEYS if data.get(k) is not None})
+        check = dev.check()
+        if not check.get("ok"):
+            return jsonify({"ok": False, "error": check.get("message", "IR LED check failed")}), 500
+        return jsonify({"ok": True, "message": check.get("message", "OK")})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/monitor_ir_led", methods=["POST"])
+def monitor_ir_led():
+    """LED ON at the rig intensity: the Setup card's Live and the Experiment tab's camera preview.
+    The preview posts the device's rig config, so the LED is opened here when nothing has yet
+    (no Connect since pi_api restarted, as after a Deploy); the Setup card posts at most
+    `intensity_pct` and needs Initialize first."""
+    data = request.get_json(silent=True) or {}
+    if _engine_running():
+        return jsonify({"ok": False, "error": _IR_LED_BUSY}), 409
+    try:
+        with _safe_lock:
+            with _devices_lock:
+                dev = _devices.get("ir_led")
+            if dev is None:
+                if not data.get("i2c_address"):
+                    return jsonify({"ok": False, "error": "IR LED not initialized"}), 400
+                dev = _ir_led_open({k: data[k] for k in _IR_LED_CFG_KEYS if data.get(k) is not None})
+            elif data.get("intensity_pct") is not None:
+                dev.set_intensity(float(data["intensity_pct"]))
+            dev.start_stream(None)
+        return jsonify({"ok": True, **dev.status()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/stop_monitor_ir_led", methods=["POST"])
+def stop_monitor_ir_led():
+    """LED OFF (DAC 0 V, read back); the instance stays open. No instance here = nothing lit by
+    pi_api, which is not an error: the preview's stop calls this whatever came before."""
+    with _devices_lock:
+        dev = _devices.get("ir_led")
+    if dev is None:
+        return jsonify({"ok": True, "on": False, "message": "IR LED not initialized"})
+    try:
+        dev.stop_stream()
+        return jsonify({"ok": True, **dev.status()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/device_set", methods=["POST"])
+def device_set():
+    """Apply one live parameter to an initialised device (the Setup card's sliders).
+    Body: {name, param, value}. Only keys the device class lists in live_params() pass."""
+    data = request.get_json(silent=True) or {}
+    name, param = data.get("name"), data.get("param")
+    with _devices_lock:
+        dev = _devices.get(name)
+    if dev is None:
+        return jsonify({"ok": False, "error": f"{name} not initialized "
+                                              "(Initialize it; during a session the engine owns it)"}), 400
+    if param not in (type(dev).live_params() or {}):
+        return jsonify({"ok": False, "error": f"{name} has no live parameter '{param}'"}), 400
+    try:
+        return jsonify({"ok": True, "state": dev.set_live(param, data.get("value")) or {}})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -1733,5 +2006,13 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="VRFarm Pi API")
     parser.add_argument("--port", type=int, default=5080)
+    parser.add_argument("--host", default="0.0.0.0",
+                        help="address to listen on (tests run a loopback-only instance)")
     args = parser.parse_args()
-    app.run(host="0.0.0.0", port=args.port, threaded=True)
+    # Whatever the last owner of a safe-state device left behind (an engine killed with the
+    # previous pi_api, a warm reboot): put it to rest before serving. Then do the same on our
+    # own SIGTERM.
+    if not _foreign_engine_running():
+        _apply_safe_states("pi_api start-up")
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    app.run(host=args.host, port=args.port, threaded=True)

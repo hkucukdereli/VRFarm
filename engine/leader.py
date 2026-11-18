@@ -34,6 +34,7 @@ import devices.photodiode     # noqa: F401
 import devices.calibration_probe  # noqa: F401
 import devices.encoder        # noqa: F401 — running-wheel encoder
 import devices.opto           # noqa: F401 — optogenetic stimulator (laser TTL + masking LED)
+import devices.ir_led         # noqa: F401 — IR illuminator for the behaviour camera (MCP4725 DAC)
 from shared.stim_generator import is_go_trial
 
 
@@ -198,6 +199,10 @@ class Leader:
                 task_params = {"background_gray": self.task.get("stimulus", {}).get("background_gray", 0.0)}
             elif dev_name == "opto":
                 task_params = self.task.get("opto") or {}      # the whole opto: section
+            elif dev_name == "ir_led":
+                # optional task override `devices: ir_led:` (intensity_pct, on_during_session);
+                # without it the rig's intensity_pct applies and the LED is on for the session
+                task_params = (self.task.get("devices") or {}).get("ir_led") or {}
             else:
                 task_params = {}
             dev.init(rig_config=dev_config, task_params=task_params)
@@ -347,6 +352,10 @@ class Leader:
     def _on_opto_event(self, evt: dict):
         """Opto window on/off from the device's threads -> the controller (raster + table)."""
         self._publish({**evt, "type": "opto"})
+
+    def _on_ir_led_event(self, evt: dict):
+        """IR illuminator switched on / off -> the controller (a line in the session log)."""
+        self._publish({**evt, "type": "ir_led"})
 
     def _on_encoder(self, evt: dict):
         """Running-wheel sample: cache the live speed (for future gating) and publish to the Mac."""
@@ -532,6 +541,17 @@ class Leader:
         # Opto events (laser / mask on and off) to the controller's live view
         if "opto" in self.devices:
             self.devices["opto"].start_stream(self._on_opto_event)
+
+        # IR illuminator: on from here to the session's end (task devices.ir_led.on_during_session,
+        # default true). It only lights the camera, so a board that fails at THIS point must not
+        # cost the session: say so loudly (console + controller + Slack) and run on.
+        if "ir_led" in self.devices:
+            try:
+                self.devices["ir_led"].start_stream(self._on_ir_led_event)
+            except Exception as e:
+                print(f"WARNING: IR LED did not switch on ({e}) — the session runs on, "
+                      f"its video will be dark", flush=True)
+                self._publish({"type": "ir_led", "on": False, "t": time.time(), "error": str(e)})
         self._sync_enabled = (
             "photodiode" in self.devices
             and self.task.get("stimulus", {}).get("photodiode_sync_enabled", False))

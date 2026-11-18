@@ -114,7 +114,7 @@ def create_app() -> Flask:
         import devices.lick_sensor, devices.reward, devices.camera          # noqa: F401,E401
         import devices.photodiode, devices.display                         # noqa: F401,E401
         import devices.calibration_probe, devices.encoder                  # noqa: F401,E401
-        import devices.opto                                                # noqa: F401,E401
+        import devices.opto, devices.ir_led                                # noqa: F401,E401
         schemas = {}
         for name, cls in DEVICE_REGISTRY.items():
             schemas[name] = {
@@ -123,6 +123,7 @@ def create_app() -> Flask:
                 "required_packages": cls.info.required_packages,
                 "needs_calibration": cls().needs_calibration,
                 "task_params": cls.task_params_schema(),
+                "live_params": cls.live_params(),       # Setup-card sliders (Device.live_params)
             }
         return jsonify(schemas)
 

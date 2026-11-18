@@ -122,6 +122,16 @@ def handle_event(rs: RigState, event: dict) -> None:
         elif kind.endswith("_ok") or a.get("level") == "event":
             rs.display_notify_t.pop(kind.replace("_ok", "_lost"), None)
             rs.notify(f"🟢 {rs.name} — display [{where}]: {msg} ({rs.session_id})")
+    elif typ == "ir_led":
+        # Switch-on / switch-off of the IR illuminator is a log line; a FAILED switch-on means
+        # the session records a dark video while everything else runs, so that one pages. So does
+        # a failed switch-off at the end (the event then still says `on`).
+        if event.get("error") and event.get("on"):
+            rs.notify(f"🔴 {rs.name} — IR LED did not switch off: {event.get('error')} — "
+                      f"it may still be lit ({rs.session_id})")
+        elif event.get("error"):
+            rs.notify(f"🔴 {rs.name} — IR LED did not switch on: {event.get('error')} — "
+                      f"the video of this session will be dark ({rs.session_id})")
     elif typ == "global_timeout":
         rs.notify(f"⏱️ {rs.name} — GLOBAL TIMEOUT: {event.get('n_dry', '?')} dry "
                   f"trials, aborting at trial {event.get('trial', '?')} "

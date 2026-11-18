@@ -17,6 +17,7 @@ DataFrames rather than one table:
       .stimulus    one row / planned trial
       .camera      one row / recorded video frame
       .meta        dict of root attributes (task_config parsed from JSON)
+      .ir_led      dict: the IR illuminator's session record (/ir_led), {} without the device
 
     Dataset(source)          many sessions -> the same tables, concatenated
       ds = Dataset("data/HK1")            # dir (recursive *.h5), glob, list, or Session(s)
@@ -157,6 +158,16 @@ class Session:
         return out
 
     @cached_property
+    def ir_led(self) -> dict:
+        """The IR illuminator's session record (/ir_led): intensity_pct, dac_volts, on (did it
+        light), on_t / off_t (Unix s, NaN when it never did). {} for a rig without the device."""
+        with h5py.File(self.h5_path, "r") as f:
+            if "ir_led" not in f:
+                return {}
+            return {name[len("ir_led_"):] if name.startswith("ir_led_") else name: ds[()].item()
+                    for name, ds in f["ir_led"].items() if ds.shape == ()}
+
+    @cached_property
     def stim_attrs(self) -> dict:
         """Scalar /stimulus group attrs + its non-per-trial datasets (block_delays, …)."""
         return self._tables["_stim_attrs"]
@@ -195,6 +206,8 @@ class Session:
                 is_vlen = h5py.check_vlen_dtype(ds.dtype) is not None
                 if is_vlen and not is_str:
                     continue
+                if ds.shape == ():
+                    continue        # a per-session scalar that landed here: not a trial column
                 if len(ds) == n:
                     per_trial[name] = ([_decode(s) for s in ds[:]] if is_str else ds[:])
                 elif name.startswith("running_"):

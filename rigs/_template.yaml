@@ -40,6 +40,12 @@ devices:
     sample_hz: 500
     type: encoder
     wheel_diameter_cm: 14.4
+  ir_led:                    # IR illuminator on the camera: IRDriver board, MCP4725 DAC (docs/IR_LED.md)
+    enabled: false           # off until a board is fitted; then also give it to the leader Pi (Setup card)
+    i2c_address: '0x60'
+    i2c_bus: 1
+    intensity_pct: 50        # % of the driver's dimming range; the Setup card's slider sets it
+    type: ir_led
   lick_sensor:
     debounce_ms: 50    # lick refractory: MPR121 release debounce, ms (0 = off); rounded to the sensor's filter period
     electrode: 4

@@ -426,12 +426,19 @@ See [EXPERIMENT_PROTOCOL.md](EXPERIMENT_PROTOCOL.md) for the scientific protocol
 
 ## NTP Clock Sync
 
-All timestamps are `time.time()` Unix seconds and must share a common clock.
+All timestamps are `time.time()` Unix seconds and must share a common clock. The strictest user is
+the display heartbeat: it sets the photodiode edge on the leader's clock against the flip time on the
+follower's clock, so the two Pis of a rig must agree within ~20 ms.
 
-### Each Pi — sync to internet NTP
+### Each Pi — chrony, synced to internet NTP
+
+The Setup tab's **Install** puts `chrony` on every Pi and prints its state in the Log
+(`Time sync: chrony, server …, clock … ms`). It replaces the image's `systemd-timesyncd`, which asks
+one server up to 34 min apart and let a leader and its follower drift tens of ms apart. By hand, with
+no session on the rig:
 
 ```bash
-sudo apt install chrony -y
+sudo apt install chrony -y         # removes systemd-timesyncd
 chronyc tracking
 # "System time" should be <1ms offset
 ```
@@ -500,7 +507,7 @@ No longer needed: `paramiko`, `pyzmq`, `psychopy`, `pyglet`, `psychtoolbox`, `li
 | `import picamera2` fails | rig env Python must equal system Python (3.13); recreate env, re-run Install |
 | pygame renders nothing, no error | wrong interpreter — the display must run on **system** `/usr/bin/python3`; the conda env's SDL has no kmsdrm backend and falls back to a null driver |
 | Projector black / no image | `curl :5581/status` on the follower; if not `RENDERER_UP`, `curl -sX POST :5581/bringup`. Check no X or stray DRM client is running |
-| Clock drift between Pis | `sudo systemctl restart chrony` |
+| Clock drift between Pis; heartbeat alarms while every stimulus is photodiode-confirmed | `chronyc tracking` on both Pis. `systemctl is-active chrony` not `active` (the image's `systemd-timesyncd` runs instead): re-run Install or `sudo apt install chrony -y`. Otherwise `sudo systemctl restart chrony` |
 | SSD not mounting | check `lsblk`, verify `/etc/fstab` entry |
 | Warp map not found | Generate Warp in the setup UI (built on the controller, scp'd to `~/rig/calibration/warp_map.npz`) |
 | Pi can't reach the internet to install | Pis are firewall-gated off `public` WiFi; run an HTTP proxy on the controller (`python -m proxy --hostname 192.168.10.1 --port 8899`) and `export HTTPS_PROXY=http://192.168.10.1:8899` on the Pi |

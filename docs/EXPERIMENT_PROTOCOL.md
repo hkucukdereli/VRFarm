@@ -37,7 +37,7 @@ transferred to the controller after the session ends.
 
 All machines must share a common clock.
 
-**On each Pi** (sync to internet NTP):
+**On each Pi** (sync to internet NTP; the Setup tab's Install does this, by hand it is):
 ```bash
 sudo apt install chrony -y
 chronyc tracking

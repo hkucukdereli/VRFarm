@@ -128,7 +128,7 @@ its assigned devices.
 | Button | What it does | When to use it | Risk |
 |---|---|---|---|
 | **Check** | SSH `echo ok` + `GET /api/status` | Any time; ~5 s | none |
-| **Install** | Full first-time provisioning: conda `rig` env pinned to the system Python, apt packages, I²C enable, binding symlinks, pip, the Teensy toolchain on the photodiode Pi, all code, `config.txt`/`xorg.conf`, systemd units, time zone `Europe/Vienna` | **Once**, on a fresh Pi | **Minutes; rewrites boot config.** Needs passwordless sudo. Reboot the follower afterwards |
+| **Install** | Full first-time provisioning: conda `rig` env pinned to the system Python, apt packages (among them `rsync` and `chrony`, which replaces the image's `systemd-timesyncd`; the Log then shows `Time sync: …` or a WARN), I²C enable, binding symlinks, pip, the Teensy toolchain on the photodiode Pi, all code, `config.txt`/`xorg.conf`, systemd units, time zone `Europe/Vienna` | **Once**, on a fresh Pi | **Minutes; rewrites boot config.** Needs passwordless sudo. Reboot the follower afterwards |
 | **Deploy** | Uploads current code, restarts shepherd (leader) and `pi_api`. The restart is timed: the leader's shepherd then waits that long ×1.5 (5–60 s) before reporting pi_api down | After **every** code change | Drops initialized devices |
 | **Restart API** | Asks `pi_api` to self-kill; systemd respawns it. Timed like Deploy | When the API is wedged | Drops initialized devices |
 | **Reboot** | `sudo reboot` | After Install on the follower | Pi offline ~40 s |

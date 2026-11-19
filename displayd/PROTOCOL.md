@@ -192,7 +192,12 @@ Legacy paths stay intact when the daemon is down (phase 4 deletes them).
 - Correlator (leader-side, single clock): photodiode pulse times arrive from the
   existing GPIO callback (already leader-clock). Cluster pulses: gap > 30 ms starts
   a new cluster (one flash = 2-3 sub-pulses at 8.7 ms). A heartbeat is CONFIRMED if
-  a cluster onset lands in [t_flip - 0.020, t_flip + 0.070]. 3 consecutive
+  a cluster onset lands in [t_flip - 0.020, t_flip + 0.070]. t_flip is the one
+  FOLLOWER-clock value in this test: the window (real flip-to-light delay ~41 ms)
+  holds only while the follower's clock is less than ~20 ms behind the leader's.
+  chrony on every Pi keeps them within ~1 ms (the Setup tab's Install adds it); a
+  larger offset reads as heartbeat_lost while every stimulus stays confirmed, since
+  the per-trial sync path never uses the follower's clock. 3 consecutive
   unconfirmed heartbeats -> publish {"type":"display_health","alarm":{"kind":
   "heartbeat_lost",...}} + Slack notify (via the controller's existing event->
   notify path); recovery event after 2 consecutive confirmed. Stim windows: the

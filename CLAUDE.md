@@ -249,7 +249,8 @@ a real `rsync` >= 3.1 for the Data tab. `rsync_path: null` resolves to **the env
 `rsync_path: /usr/bin/rsync` in `controller/configs/controller.yaml` (Ubuntu's is real rsync,
 3.4.1). Only on macOS is `/usr/bin/rsync` Apple's openrsync, which the Data tab rejects.
 **Leader** (`rig` env): `flask pyyaml numpy scipy h5py smbus2 pigpio lgpio pyserial` + `picamera2`;
-`rsync` from apt on every Pi (the Install step adds it). The Pi that owns the photodiode also gets the
+`rsync` and `chrony` from apt on every Pi (the Install step adds both; chrony replaces the image's
+`systemd-timesyncd`, see Known issues). The Pi that owns the photodiode also gets the
 **Teensy toolchain** (`teensy-loader-cli` apt, `~/bin/arduino-cli`, core `teensy:avr` in `~/.arduino15`,
 PJRC udev rules from `teensy/00-teensy.rules`): the Setup UI compiles + flashes the sync sketch THERE,
 and Upload installs any missing part itself (`docs/TEENSY_INSTRUCTIONS.md`).
@@ -273,6 +274,7 @@ python tools/smoke_multirig.py      # two fake rigs end to end (mock Pis)
 python tools/smoke_data.py          # the Data tab against a scratch data tree
 python tools/test_leader_hash.py    # the Data tab's content check, piece by piece
 python tools/test_photodiode_serial.py   # the photodiode's Teensy serial side (firmware v2_3 lines, Debug ring) on a fake port
+python tools/test_install_time_sync.py   # Install's chrony step and its log line, ssh replaced by a recorder
 python tools/test_ir_led.py         # the IR illuminator end to end on a fake MCP4725 (driver, pi_api, engine, controller); run it alone
 ```
 Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
@@ -304,6 +306,18 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
   once (`cp -n`), so new shepherd settings need code defaults.
 - Install sets every Pi's time zone to `Europe/Vienna` (`timedatectl`); before that the leader ran on
   Europe/London, so its log times read an hour behind the follower's. Recorded data is Unix time.
+- **Pi clocks: chrony on every Pi** (Install adds it since 2026-11-19 and logs `Time sync: …`). The
+  display heartbeat (L3) sets the photodiode edge on the LEADER's clock against the flip time displayd
+  reports on the FOLLOWER's clock (window −20 / +70 ms, real flip-to-light delay ~41 ms), so a follower
+  more than ~20–30 ms behind its leader (or ~50–60 ms ahead) raises `[heartbeat] ALARM` (worded
+  `DIGITAL leg fault` or `NO LIGHT`, both meaningless here) while every stimulus stays
+  photodiode-confirmed. Stimulus onsets use the leader's clock only, so the trial data are not
+  affected. Cause on morbier (alarms 2026-11-16 and 11-18, the pair measured 34 ms apart): the image's
+  `systemd-timesyncd`, one server over WiFi, polled up to 34 min apart; cheddar's Pis on chrony stay
+  within ~1 ms. Check `chronyc tracking` on both Pis (`System time` under 1 ms) or, in a session,
+  `display_latency_s − onset_ack_latency_s` (36–48 ms when the clocks agree). A Pi installed before
+  that date needs a re-Install or `sudo apt-get install -y chrony`, with no session on the rig (apt
+  removes timesyncd; chrony may step the clock).
 - Calibration files are per rig: `display_calibration/<rig>/geometry/rig_geometry_<stamp>.yaml`
   (the rig YAML's `display.geometry_file` picks one; dated files are never rewritten, an edit saves
   a new one), `display_calibration/<rig>/intensity/intensity_cal_*.yaml` (ONE intensity calibration per

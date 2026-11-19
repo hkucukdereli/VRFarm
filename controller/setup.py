@@ -33,7 +33,7 @@ from devices.photodiode import TEENSY_PARAMS, check_teensy_params
 from shared.mjpeg_relay import relay
 from controller import settings, calib_paths
 from controller.registry import registry, RigState
-from controller.ssh import ssh, scp, ssh_merged, ssh_ok, target as ssh_target
+from controller.ssh import ssh, scp, ssh_merged, ssh_ok, ssh_result, target as ssh_target
 
 ROOT = settings.ROOT
 TOOLS_DIR = ROOT / "display_calibration"      # the calibration scripts (shared by all rigs)
@@ -141,6 +141,37 @@ def api_check_pi():
     return jsonify(result)
 
 
+def _time_sync_step(tgt: str) -> str:
+    """Install's log line on a Pi's clock, read from chrony. A chrony installed a moment ago gets
+    up to 20 s to pick its first server (`chronyc waitsync`). Never raises: a Pi with no time
+    server yet is a warning, not a failed Install."""
+    try:
+        r = ssh_result(tgt,
+                       "sudo systemctl enable --now chrony >/dev/null 2>&1; systemctl is-active chrony; "
+                       "chronyc waitsync 20 0 0 1 >/dev/null 2>&1; chronyc -n tracking 2>&1",
+                       timeout=60)
+    except Exception as e:
+        return f"WARN: time sync not checked ({e})"
+    out = r.stdout or ""
+    if not out.strip():
+        return f"WARN: time sync not checked ({(r.stderr or '').strip()[-120:] or 'no answer'})"
+    state = out.split()[0]
+    if state != "active":
+        return (f"WARN: chrony is not running ({state}) — this Pi's clock is not kept in step with "
+                "the other Pi of the rig (the display heartbeat needs them within ~20 ms)")
+    if not re.search(r"^Leap status\s*:\s*Normal", out, re.M):
+        return ("WARN: chrony runs but has no time server yet — check `chronyc sources` on the Pi "
+                "(it reaches NTP over WiFi)")
+    ref = re.search(r"^Reference ID\s*:\s*\S+\s*\((.*?)\)", out, re.M)
+    off = re.search(r"^System time\s*:\s*([\d.]+) seconds (slow|fast)", out, re.M)
+    line = "Time sync: chrony"
+    if ref and ref.group(1):
+        line += f", server {ref.group(1)}"
+    if off:
+        line += f", clock {float(off.group(1)) * 1000:.2f} ms {off.group(2)}"
+    return line
+
+
 @bp.route("/install_pi", methods=["POST"])
 def api_install_pi():
     """First-time Pi setup via SSH: conda env, system + Python packages, project files, the
@@ -183,7 +214,12 @@ def api_install_pi():
         # 2. System packages (apt). rsync on EVERY Pi: the Data tab syncs sessions off the
         #    leaders with rsync over SSH, and the followers get it too so a role change or a
         #    future follower-side sync never needs a re-Install.
-        apt_packages = ["rsync"]
+        #    chrony on EVERY Pi too: the display heartbeat sets the photodiode edge (leader's
+        #    clock) against the flip time displayd reports (follower's clock), so the two clocks
+        #    must agree within ~20 ms. The image's systemd-timesyncd (one server, polls up to
+        #    34 min apart) let a pair drift further than that (morbier, 2026-11-18); apt removes
+        #    it when chrony goes in — both are Debian's `time-daemon`.
+        apt_packages = ["rsync", "chrony"]
         if needs_camera:
             # camera bindings + ffmpeg (consolidation remuxes video.h264 -> video.mp4 on the leader)
             apt_packages.extend(["python3-libcamera", "python3-picamera2", "ffmpeg"])
@@ -194,6 +230,9 @@ def api_install_pi():
         apt_str = " ".join(apt_packages)
         ssh(ssh_prefix, f"sudo apt-get update -qq && sudo apt-get install -y {apt_str}", timeout=300)
         steps.append(f"Installed system packages: {apt_str}")
+
+        # 2a. What chrony says about this Pi's clock.
+        steps.append(_time_sync_step(ssh_prefix))
 
         # 2b. I2C — MPR121 lick + AS5600 encoder (leader), DLPC projector (follower). Idempotent.
         if needs_i2c:

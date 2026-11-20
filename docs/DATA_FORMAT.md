@@ -61,6 +61,7 @@ It's **idempotent** (a file already at `format_version 2`, or that already has a
 | `saved_devices`, `skipped_devices` | which devices' detailed data was recorded. `camera` moves to `skipped_devices` when `camera_saved` is false; sessions recorded before that flag existed list `camera` as saved even when no video was taken |
 | `camera_requested`, `camera_saved` | bools sent by the controller at START: Camera was checked at GO / the camera Pi confirmed recording started. **Absent = unknown** (sessions before these existed). A session with `camera_saved: true` and no video on the leader shows as **missing** in the Data tab and is never purged |
 | `task_config` | **the entire task YAML as a JSON string** — full paradigm reconstruction |
+| `display_heartbeat` | JSON string, sessions from the 2026-11-20 engine on (absent when the session had neither a heartbeat nor a flip report): `n` / `n_confirmed` heartbeats judged / confirmed by the photodiode, `n_no_report` judged without a flip report from displayd, `rx_stamp` (`kernel` = flip reports timed by the kernel's receive stamp, `read` = by the read time), `report_to_light_ms` and `follower_clock_offset_ms`, each `{median, min, max, n}`. The offset is the follower's clock minus the leader's, from every flip report (negative = follower behind); nothing in the session depends on it |
 | `format_version` | `2` |
 
 ### `/trials/` — recorded per-trial data (length = `n_trials_completed`)
@@ -76,7 +77,9 @@ It's **idempotent** (a file already at `format_version 2`, or that already has a
 | `iti_duration_s` | f4 | **actual** ITI before this trial |
 | `iti_start_t`, `stim_onset_t`, `true_onset_t`, `response_window_t`, `outcome_t`, `first_lick_t` | f8 | event times (Unix s, NTP-synced) |
 | `display_latency_s` | f8 | `true_onset_t − stim_onset_t` (photodiode-measured) |
-| `sync_ok` | i1 | 1 if the online photodiode onset-sync landed that trial |
+| `sync_ok` | i1 | 1 if the online photodiode onset-sync landed that trial, 0 if sync was on and no pulse came, −1 if sync was off |
+| `onset_source` | str | what `true_onset_t` is: `photodiode` (the pulse), `ack` (the first flip, reported by displayd, when no pulse came) or `command` (the SHOW send time) |
+| `onset_ack_latency_s` | f8 | SHOW → first flip of the stimulus, NaN if displayd sent no report. From the 2026-11-20 engine on it is timed by the report's arrival on the leader (the leader's clock; the flip plus ≤ ~1 ms). Before, it was the follower's own flip time minus the leader's SHOW time, so it carried the offset between the two Pis' clocks — and so did `true_onset_t` of an `ack` trial |
 | `trial_run_distance_cm` | f4 | distance the running wheel turned during this trial (cm) |
 
 `true_onset_t` is the display onset corrected by the photodiode; `stim_onset_t` is when the Leader sent SHOW.

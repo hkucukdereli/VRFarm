@@ -94,6 +94,15 @@ log — the daemon never exits), plus new: PING -> PONG {state}. Replies/acks go
 the same shape follower.py sends today. Seq-numbered SESSION_BEGIN arrives with
 the phase-3 leader; tolerate unknown cmds with a log line.
 
+Flip reports are timed by their ARRIVAL on the leader (engine/leader.py, 2026-11-20):
+the moment a stim_onset or hb_flash datagram reaches ack_port (the kernel's receive
+stamp, the leader's clock) is taken as the flip time. The `t` / `t_flip` inside is the
+follower's clock and is only compared with that arrival, to measure the offset between
+the two clocks. What this asks of the daemon: send each report right after the flip it
+describes, one datagram per flip, never held back or batched — whatever lies between
+the flip and the send is a timing error on the leader (0.03–1.1 ms on cheddar,
+2026-11-20, where the two clocks agree within 1 ms).
+
 ## Control REST (:5581, localhost; stdlib ThreadingHTTPServer)
 
 GET  /status  -> {"state":..., "since":..., "optics":"unverified"|"ok",
@@ -185,19 +194,32 @@ Legacy paths stay intact when the daemon is down (phase 4 deletes them).
   while NO stim window is active: record t_cmd = time.time(), send
   {"cmd":"HB_FLASH","seq":k} to every follower :5575. displayd forwards
   heartbeat_flash to the renderer and reports {"type":"hb_flash","seq":k,"t_flip":...}
-  back on ack_port; the leader stores t_flip (fallback t_cmd + 0.05 if no report).
+  back on ack_port; the leader stores t_rx, the moment that report ARRIVED: the
+  kernel's receive stamp of the datagram (SO_TIMESTAMPNS), so a trial loop that reads
+  the socket late does not shift it, or the read time where the socket gives no stamp
+  (fallback t_cmd + 0.05 if no report comes).
 - When photodiode_sync_enabled is FALSE: no heartbeats, and one
   {"type":"display_health","alarm":{"kind":"optics_watch_off",...}} event is
   published at session start — the named degraded mode, never silence.
 - Correlator (leader-side, single clock): photodiode pulse times arrive from the
   existing GPIO callback (already leader-clock). Cluster pulses: gap > 30 ms starts
   a new cluster (one flash = 2-3 sub-pulses at 8.7 ms). A heartbeat is CONFIRMED if
-  a cluster onset lands in [t_flip - 0.020, t_flip + 0.070]. t_flip is the one
-  FOLLOWER-clock value in this test: the window (real flip-to-light delay ~41 ms)
-  holds only while the follower's clock is less than ~20 ms behind the leader's.
-  chrony on every Pi keeps them within ~1 ms (the Setup tab's Install adds it); a
-  larger offset reads as heartbeat_lost while every stimulus stays confirmed, since
-  the per-trial sync path never uses the follower's clock. 3 consecutive
+  a cluster onset lands in [t_rx - 0.020, t_rx + 0.070]. Both ends of the test are
+  the leader's clock, so the follower's clock takes no part in it. (Until 2026-11-20
+  the reference was t_flip, the follower's clock; a follower ~30 ms behind its leader
+  then read as heartbeat_lost for whole sessions while every stimulus stayed
+  confirmed.) Measured on cheddar and morbier, 2026-11-20, 1280 flashes: the report
+  arrives 24–75 ms (median 24.5) after the command, the light follows 32–59 ms after
+  the arrival (median 43), every flash confirmed. morbier's follower clock was
+  17–44 ms behind meanwhile; the old rule confirmed 0 of 240 flashes at 37–44 ms and
+  365 of 400 at 17–22 ms. A heartbeat is judged 0.2 s after its command and not
+  before t_rx + 0.070, so the light of a late flip is still matched. t_flip, and the
+  `t` of stim_onset, only feed a clock-offset estimate
+  (follower time - t_rx): when the median of 5 reports exceeds 10 ms the leader prints
+  one `[clock]` line and publishes one {"type":"display_health","alarm":{"kind":
+  "clock_offset","level":"warn","offset_s":...}} per session (a line in the
+  Experiment tab's log, no Slack). metadata.yaml's `display_heartbeat` block carries
+  the session's counts, the report-to-light delay and the clock offset. 3 consecutive
   unconfirmed heartbeats -> publish {"type":"display_health","alarm":{"kind":
   "heartbeat_lost",...}} + Slack notify (via the controller's existing event->
   notify path); recovery event after 2 consecutive confirmed. Stim windows: the
@@ -231,4 +253,6 @@ Legacy paths stay intact when the daemon is down (phase 4 deletes them).
   enabled, no pulse), -1 unavailable (sync disabled). New per-trial field
   onset_source: "photodiode" | "ack" | "command" — the best available onset
   anchor (photodiode pulse > displayd stim_onset ack > SHOW send time); the
-  chosen onset keeps feeding true_onset_t exactly as today.
+  chosen onset keeps feeding true_onset_t exactly as today. The ack anchor is the
+  ack's ARRIVAL on the leader, not the `t` inside it, and onset_ack_latency_s
+  (SHOW -> first flip) is timed the same way: both are the leader's clock.

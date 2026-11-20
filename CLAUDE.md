@@ -160,7 +160,8 @@ Health layers:
   Live input-loss detector is `ActuatorWatchdogTimerTimeout`, *not* AutoFraming.
 - **L2** — renderer flip watchdog + startup self-test (backend, fps, flip-block).
 - **L3** — photodiode heartbeat: the leader flashes the sync square on **its own clock** every
-  5 s between stimuli and correlates the pulse against the flip time displayd reports back.
+  5 s between stimuli and correlates the pulse against the arrival of displayd's flip report
+  (the leader's clock at both ends — the follower's clock takes no part, see Pi clocks).
   Counts alone are not enough (mains flicker ~100 Hz and ground-fault hum ~50 Hz both fake them).
 - **L4** — camera arbiter. Not built.
 
@@ -275,6 +276,7 @@ python tools/smoke_data.py          # the Data tab against a scratch data tree
 python tools/test_leader_hash.py    # the Data tab's content check, piece by piece
 python tools/test_photodiode_serial.py   # the photodiode's Teensy serial side (firmware v2_3 lines, Debug ring) on a fake port
 python tools/test_install_time_sync.py   # Install's chrony step and its log line, ssh replaced by a recorder
+python tools/test_heartbeat_clock.py     # display heartbeat + onset ack against a follower whose clock is off (loopback displayd, Linux)
 python tools/test_ir_led.py         # the IR illuminator end to end on a fake MCP4725 (driver, pi_api, engine, controller); run it alone
 ```
 Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
@@ -306,18 +308,26 @@ Slack comes from the rig YAML's `slack:` block (`enabled` + `webhook_url`).
   once (`cp -n`), so new shepherd settings need code defaults.
 - Install sets every Pi's time zone to `Europe/Vienna` (`timedatectl`); before that the leader ran on
   Europe/London, so its log times read an hour behind the follower's. Recorded data is Unix time.
-- **Pi clocks: chrony on every Pi** (Install adds it since 2026-11-19 and logs `Time sync: …`). The
-  display heartbeat (L3) sets the photodiode edge on the LEADER's clock against the flip time displayd
-  reports on the FOLLOWER's clock (window −20 / +70 ms, real flip-to-light delay ~41 ms), so a follower
-  more than ~20–30 ms behind its leader (or ~50–60 ms ahead) raises `[heartbeat] ALARM` (worded
-  `DIGITAL leg fault` or `NO LIGHT`, both meaningless here) while every stimulus stays
-  photodiode-confirmed. Stimulus onsets use the leader's clock only, so the trial data are not
-  affected. Cause on morbier (alarms 2026-11-16 and 11-18, the pair measured 34 ms apart): the image's
-  `systemd-timesyncd`, one server over WiFi, polled up to 34 min apart; cheddar's Pis on chrony stay
-  within ~1 ms. Check `chronyc tracking` on both Pis (`System time` under 1 ms) or, in a session,
-  `display_latency_s − onset_ack_latency_s` (36–48 ms when the clocks agree). A Pi installed before
-  that date needs a re-Install or `sudo apt-get install -y chrony`, with no session on the rig (apt
-  removes timesyncd; chrony may step the clock).
+- **Pi clocks: a session is timed on the leader's clock alone (2026-11-20); chrony on every Pi**
+  (Install adds it since 2026-11-19 and logs `Time sync: …`). The engine takes the moment displayd's
+  flip reports (`hb_flash`, `stim_onset`) ARRIVE on the leader as the flip time — the kernel's receive
+  stamp (`SO_TIMESTAMPNS`), so a busy trial loop does not shift it — and judges the display heartbeat
+  (L3) against that: window −20 / +70 ms around the arrival, light 32–59 ms after it on cheddar and
+  morbier (median 43 ms). The follower's own time inside a report is only compared with the
+  arrival: more than 10 ms apart and the session log says `[clock] the follower's clock is N ms behind
+  …` once (🟡 in the Experiment log, no Slack), and every session's `display_heartbeat` block
+  (`metadata.yaml`, a JSON root attribute in the .h5) carries `follower_clock_offset_ms` and
+  `report_to_light_ms`. `onset_source: ack` and `onset_ack_latency_s` are the leader's clock too, so
+  `display_latency_s − onset_ack_latency_s` (flip → light) no longer shows a clock offset; in older
+  sessions it does. **An engine deployed before 2026-11-20 still compares the photodiode edge with the
+  FOLLOWER's flip time**: a follower more than ~20–30 ms behind its leader (or ~50–60 ms ahead) raises
+  `[heartbeat] ALARM` (worded `DIGITAL leg fault` or `NO LIGHT`, both meaningless there) while every
+  stimulus stays photodiode-confirmed — morbier, 2026-11-16 and 11-18, 34 ms apart on the image's
+  `systemd-timesyncd` (one server over WiFi, polled up to 34 min apart). So each leader needs a Deploy.
+  chrony is still wanted, for displayd's log and anything compared between Pis: `chronyc tracking`
+  (`System time` under 1 ms); a Pi installed before 2026-11-19 needs a re-Install or `sudo apt-get
+  install -y chrony`, with no session on the rig (apt removes timesyncd; chrony may step the clock).
+  Bench numbers: `displayd/PROTOCOL.md` "Leader-clocked L3 heartbeats"; check: `tools/test_heartbeat_clock.py`.
 - Calibration files are per rig: `display_calibration/<rig>/geometry/rig_geometry_<stamp>.yaml`
   (the rig YAML's `display.geometry_file` picks one; dated files are never rewritten, an edit saves
   a new one), `display_calibration/<rig>/intensity/intensity_cal_*.yaml` (ONE intensity calibration per

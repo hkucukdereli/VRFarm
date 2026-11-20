@@ -158,7 +158,7 @@ def _time_sync_step(tgt: str) -> str:
     state = out.split()[0]
     if state != "active":
         return (f"WARN: chrony is not running ({state}) — this Pi's clock is not kept in step with "
-                "the other Pi of the rig (the display heartbeat needs them within ~20 ms)")
+                "NTP or with the other Pi of the rig")
     if not re.search(r"^Leap status\s*:\s*Normal", out, re.M):
         return ("WARN: chrony runs but has no time server yet — check `chronyc sources` on the Pi "
                 "(it reaches NTP over WiFi)")
@@ -214,11 +214,13 @@ def api_install_pi():
         # 2. System packages (apt). rsync on EVERY Pi: the Data tab syncs sessions off the
         #    leaders with rsync over SSH, and the followers get it too so a role change or a
         #    future follower-side sync never needs a re-Install.
-        #    chrony on EVERY Pi too: the display heartbeat sets the photodiode edge (leader's
-        #    clock) against the flip time displayd reports (follower's clock), so the two clocks
-        #    must agree within ~20 ms. The image's systemd-timesyncd (one server, polls up to
-        #    34 min apart) let a pair drift further than that (morbier, 2026-11-18); apt removes
-        #    it when chrony goes in — both are Debian's `time-daemon`.
+        #    chrony on EVERY Pi too: every recorded time is Unix time, and the image's
+        #    systemd-timesyncd (one server, polls up to 34 min apart) let the two Pis of a rig
+        #    drift 34 ms apart (morbier, 2026-11-18), which the display heartbeat of that time
+        #    read as a dead display. The engine has since timed displayd's flip reports by their
+        #    arrival on the leader (2026-11-20), so a session no longer depends on the pair
+        #    agreeing; displayd's log and anything compared between Pis still do. apt removes
+        #    timesyncd when chrony goes in — both are Debian's `time-daemon`.
         apt_packages = ["rsync", "chrony"]
         if needs_camera:
             # camera bindings + ffmpeg (consolidation remuxes video.h264 -> video.mp4 on the leader)

@@ -426,9 +426,13 @@ See [EXPERIMENT_PROTOCOL.md](EXPERIMENT_PROTOCOL.md) for the scientific protocol
 
 ## NTP Clock Sync
 
-All timestamps are `time.time()` Unix seconds and must share a common clock. The strictest user is
-the display heartbeat: it sets the photodiode edge on the leader's clock against the flip time on the
-follower's clock, so the two Pis of a rig must agree within ~20 ms.
+All timestamps are `time.time()` Unix seconds and must share a common clock. A session itself is
+timed on the leader's clock alone: since 2026-11-20 the engine takes the arrival of displayd's flip
+reports on the leader as the flip time, for the display heartbeat and for the stimulus onsets, so a
+rig no longer fails when its two Pis disagree (before, a follower ~20 ms behind its leader raised
+heartbeat alarms). The session log says `[clock] the follower's clock is N ms behind …` once when
+they are more than 10 ms apart. chrony keeps a pair within ~1 ms, which displayd's log and
+anything compared between Pis still need.
 
 ### Each Pi — chrony, synced to internet NTP
 

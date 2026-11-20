@@ -1688,8 +1688,9 @@ function handleEvent(evt) {
       const a = evt.alarm || {};
       const where = evt.source ? `${evt.source}: ` : '';
       const alarm = a.level === 'alarm';
-      log(`${alarm ? '🔴' : '🟢'} display ${where}${a.msg || a.kind || ''}`,
-          alarm ? 'critical' : 'ok');
+      const warn = a.level === 'warn';   // said once, the display itself is fine (clock_offset)
+      log(`${alarm ? '🔴' : warn ? '🟡' : '🟢'} display ${where}${a.msg || a.kind || ''}`,
+          alarm ? 'critical' : warn ? 'warning' : 'ok');
       break;
     }
     case 'global_timeout':

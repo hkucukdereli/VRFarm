@@ -15,6 +15,7 @@ import random
 import select
 import signal
 import socket
+import struct
 import sys
 import time
 from collections import deque
@@ -64,9 +65,10 @@ SYNC_MIN_LATENCY_S = 0.045
 HB_PERIOD_DEFAULT_S = 5.0     # task devices.photodiode.heartbeat_period_s overrides
 HB_CLUSTER_GAP_S = 0.030      # a gap this large starts a new flash cluster (one flash is
                               # 2-3 sub-pulses at ~8.7 ms)
-HB_WIN_PRE_S = 0.020          # confirm window around the reported flip: [t-20ms, t+70ms]
-HB_WIN_POST_S = 0.070
-HB_EVAL_AGE_S = 0.2           # judge a heartbeat once it is this old (window has closed)
+HB_WIN_PRE_S = 0.020          # confirm window around the ARRIVAL of displayd's flip report on
+HB_WIN_POST_S = 0.070         # this Pi: [t_rx - 20 ms, t_rx + 70 ms]; the light follows 32-59 ms
+                              # after it, median 43 (cheddar + morbier, 1280 flashes, 2026-11-20)
+HB_EVAL_AGE_S = 0.2           # judge a heartbeat once it is this old (and its window has closed)
 HB_FLIP_FALLBACK_S = 0.05     # no flip report from displayd -> assume one frame + slop
 HB_CLUSTER_KEEP_S = 2.0       # cluster onsets older than this can never match a pending hb
 HB_LOST_N = 3                 # consecutive unconfirmed heartbeats -> alarm
@@ -74,6 +76,13 @@ HB_OK_N = 2                   # consecutive confirmed heartbeats -> recovery
 HB_REALERT_S = 60.0           # re-alert cadence while the alarm persists
 HB_SETTLE_S = 0.15            # hold SHOW until a flash commanded this recently has landed
                               # (flash latency up to ~0.12 s + its 2-3 sub-pulses)
+# The window hangs on the moment the flip report REACHES this Pi (kernel receive stamp, the
+# leader's clock, like the pulse times) and never on the flip time written inside the report,
+# which is the follower's clock: a follower 34 ms behind its leader read as a dead display for
+# whole sessions while every stimulus was confirmed (morbier, 2026-11-16/18). The time inside
+# the report is only set against the arrival, to MEASURE the offset between the two clocks.
+HB_CLOCK_WARN_S = 0.010       # |follower clock - leader clock| above this is said once a session
+HB_CLOCK_WARN_N = 5           # ... judged on the median of this many flip reports
 # A lost heartbeat means "the loop is broken", not "the projector is dark" — the display and the
 # whole sensor chain (diode -> amp -> Teensy -> TTL -> GPIO16) fail with the SAME signature, and
 # L1/L2 cannot separate them (an EVM barrel pull back-feeds DLPC logic through the Pi header, so
@@ -83,6 +92,44 @@ HB_SETTLE_S = 0.15            # hold SHOW until a flash commanded this recently 
 # end is alive and genuinely sees no light; present-and-bright = light is arriving but the digital
 # leg (Teensy OUT pin 16 -> GPIO16) is broken.
 HB_TELEMETRY_STALE_S = 3.0    # B line older than this = Teensy serial is silent
+
+# ── Arrival time of the follower's flip reports ──
+# SO_TIMESTAMPNS: the kernel stamps a datagram when it enters the network stack (CLOCK_REALTIME,
+# the clock behind time.time()) and hands the stamp over as ancillary data, so the arrival time
+# does not depend on when this process gets round to reading the socket. Python's socket module
+# has no name for the option; 35 is its number on Linux (asm-generic, so arm64 and x86-64), and
+# the ancillary message carries the same number as its type.
+SO_TIMESTAMPNS = getattr(socket, "SO_TIMESTAMPNS", 35)
+_TIMESPEC = struct.Struct("@ll")   # struct timespec {tv_sec, tv_nsec}, native longs
+RX_STAMP_MAX_AGE_S = 5.0           # a stamp older than this, or in the future, is not believed
+
+
+def _enable_rx_stamp(sock) -> bool:
+    """Ask the kernel for a receive stamp on every datagram of `sock`. False where the option
+    does not exist (not Linux) or is refused; _recv_stamped then falls back to the read time."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, SO_TIMESTAMPNS, 1)
+        return True
+    except OSError:
+        return False
+
+
+def _recv_stamped(sock, bufsize: int = 4096):
+    """One datagram and the time it reached this machine: (data, t_rx), t_rx in time.time()'s
+    clock. t_rx is the kernel's receive stamp when the socket delivers a believable one, and
+    the time of this read otherwise."""
+    data, ancdata, _flags, _addr = sock.recvmsg(bufsize, 64)
+    now = time.time()
+    for level, ctype, cdata in ancdata:
+        if (level == socket.SOL_SOCKET and ctype == SO_TIMESTAMPNS
+                and len(cdata) >= _TIMESPEC.size):
+            sec, nsec = _TIMESPEC.unpack_from(cdata)
+            t_rx = sec + nsec * 1e-9
+            if now - RX_STAMP_MAX_AGE_S <= t_rx <= now + 0.001:
+                return data, t_rx
+    return data, now
 
 
 class Leader:
@@ -118,8 +165,9 @@ class Leader:
         # and the reason the session stopped (None = ran to the end / operator STOP).
         self._bad_sync_streak = 0
         self._abort_reason = None
-        # Latest displayd/follower stim_onset ack per trial (the display's real flip time) —
-        # the onset anchor used when the photodiode didn't win. Capped at 50 entries.
+        # displayd/follower stim_onset ack per trial: when the report of the stimulus's first
+        # flip reached THIS Pi (leader clock) — the onset anchor used when the photodiode didn't
+        # win. Capped at 50 entries.
         self._onset_acks = {}
 
         # ── L3 heartbeat state (scheduler + correlator, both ride the trial-loop tick) ──
@@ -132,7 +180,9 @@ class Leader:
         self._hb_seq = 0
         self._hb_next = 0.0             # next scheduled flash (wall clock)
         self._stim_active = False       # SHOW..stim off: the scheduler stays out of the way
-        self._heartbeats = deque(maxlen=64)   # {seq, t_cmd, t_flip} awaiting judgement
+        # awaiting judgement: {seq, t_cmd, t_rx (flip report's arrival here; None = no report
+        # yet), t_flip (the follower's own flip time from that report — its clock, never judged)}
+        self._heartbeats = deque(maxlen=64)
         self._hb_pulses = deque(maxlen=4096)  # raw photodiode t from the GPIO callback thread
         self._hb_clusters = deque(maxlen=256)  # cluster onset times (first pulse of a flash)
         self._hb_last_pulse_t = None    # clusterer's previous pulse (gap detection)
@@ -140,6 +190,14 @@ class Leader:
         self._hb_ok_streak = 0
         self._hb_alarm_on = False
         self._hb_last_alarm_t = 0.0
+        # The session's record of the loop (_hb_summary -> metadata.yaml `display_heartbeat`)
+        self._hb_n = 0                  # heartbeats judged
+        self._hb_n_confirmed = 0
+        self._hb_n_no_report = 0        # ... judged from the command time (no flip report came)
+        self._hb_light_lat = deque(maxlen=20000)   # flip report's arrival -> first light (s)
+        # follower clock - leader clock, one sample per flip report (heartbeats and stimuli)
+        self._clock_offsets = deque(maxlen=20000)
+        self._clock_warned = False
 
         # UDP sockets
         net = rig_config["network"]
@@ -152,6 +210,10 @@ class Leader:
         self._ack_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._ack_sock.bind(("0.0.0.0", net.get("ack_port", 5573)))
         self._ack_sock.setblocking(False)
+        # Each ack is timed by the kernel when it arrives (see _recv_stamped): the display
+        # heartbeat and the ack onset anchor use that time, on this Pi's clock, and not the
+        # follower-clock time written inside the ack.
+        self._ack_rx_stamped = _enable_rx_stamp(self._ack_sock)
 
         # Follower addresses
         self._follower_addrs = {}
@@ -566,7 +628,9 @@ class Leader:
         self._hb_enabled = self._sync_enabled and bool(self._follower_addrs)
         if self._hb_enabled:
             self._hb_next = time.time() + self._hb_period_s
-            print(f"Display heartbeat: ON (every {self._hb_period_s:g}s between stims)")
+            print(f"Display heartbeat: ON (every {self._hb_period_s:g}s between stims; flip "
+                  f"reports timed on this Pi's clock, "
+                  f"{'kernel receive stamp' if self._ack_rx_stamped else 'at the read'})")
         elif not self._sync_enabled:
             # The named degraded mode, never silence: with sync off nothing watches the
             # optics this session, and sync_ok is recorded as -1 (unavailable, not failed).
@@ -809,7 +873,8 @@ class Leader:
 
             # ── Online photodiode sync: anchor timeline to true display onset ──
             # Best available anchor, in order: photodiode pulse > displayd/follower
-            # stim_onset ack (its real flip time) > the SHOW send time. sync_ok is tri-state:
+            # stim_onset ack (the first flip, timed by the ack's arrival here) > the SHOW send
+            # time; all three are this Pi's clock. sync_ok is tri-state:
             # 1 = pulse seen, 0 = sync on but no pulse (a real failure), -1 = sync disabled
             # (unavailable — which the old flat 0 made indistinguishable from failure).
             onset_source = "command"
@@ -922,11 +987,11 @@ class Leader:
             self._trial_ctx["first_lick_t"] = window_licks[0] if window_licks else float("nan")
             self._trial_ctx["lick_times"] = self._trial_licks[:]            # full record (all phases)
 
-            # ── Command-path latency ── displayd reports the renderer's REAL flip time for
-            # this stimulus on the ack port; the leader already receives it (_note_onset_ack)
-            # but never recorded it, so SHOW -> on-glass could only be inferred by subtracting
-            # a separately-measured flip->photons constant. Read it HERE, at trial end: the ack
-            # lands asynchronously and may still be in flight at the onset decision.
+            # ── Command-path latency ── displayd acks the renderer's first flip of this
+            # stimulus on the ack port, and the ack's arrival is timed on this Pi's clock
+            # (_note_onset_ack): SHOW -> flip (+ the ack's ~1 ms way back), independent of the
+            # follower's clock. Read it HERE, at trial end: the ack lands asynchronously and may
+            # still be in flight at the onset decision.
             # Decomposes display_latency_s: SHOW -> flip is this, flip -> photons is the rest.
             _ack_t = self._onset_acks.get(trial_num)
             self._trial_ctx["onset_ack_latency_s"] = (
@@ -1038,6 +1103,9 @@ class Leader:
                   f"Data: {data_dir}")
         else:
             print(f"Session complete ({n_completed}/{n_planned} trials). Data: {data_dir}")
+        hb_summary = self._hb_summary()
+        if hb_summary:
+            print(f"[heartbeat] session: {self._hb_summary_text(hb_summary)}", flush=True)
 
         # Save metadata. The camera records through pi_api, not the engine, so only the
         # controller's START message says whether this session saved video: camera_requested
@@ -1067,6 +1135,8 @@ class Leader:
                 meta[k] = self.start_info[k]
         if self._abort_reason:
             meta["abort"] = self._abort_reason
+        if hb_summary:
+            meta["display_heartbeat"] = hb_summary
         meta_path = data_dir / "metadata.yaml"
         with open(meta_path, "w") as f:
             yaml.dump(meta, f, default_flow_style=False)
@@ -1077,7 +1147,8 @@ class Leader:
         """One trial-loop tick of the display heartbeat: flash if one is due, then judge the
         flashes whose confirm window has closed. Cheap by design — the trial loop calls this
         at up to 1 kHz through _check_udp, so the heartbeat needs no thread and no clock of
-        its own (one clock, the leader's, times both the command and the pulse)."""
+        its own (one clock, the leader's, times the command, the flip report's arrival and
+        the pulse)."""
         if not self._hb_enabled:
             return
         now = time.time()
@@ -1086,7 +1157,8 @@ class Leader:
         if now >= self._hb_next and not self._stim_active:
             self._hb_seq += 1
             self._send_follower({"cmd": "HB_FLASH", "seq": self._hb_seq})
-            self._heartbeats.append({"seq": self._hb_seq, "t_cmd": now, "t_flip": None})
+            self._heartbeats.append({"seq": self._hb_seq, "t_cmd": now,
+                                     "t_rx": None, "t_flip": None})
             self._hb_next = now + self._hb_period_s
         self._hb_correlate(now)
 
@@ -1108,13 +1180,30 @@ class Leader:
         while self._hb_clusters and self._hb_clusters[0] < now - HB_CLUSTER_KEEP_S:
             self._hb_clusters.popleft()
 
-        while self._heartbeats and (now - self._heartbeats[0]["t_cmd"]) > HB_EVAL_AGE_S:
-            hb = self._heartbeats.popleft()
-            t_flip = hb["t_flip"]
-            if t_flip is None:
-                t_flip = hb["t_cmd"] + HB_FLIP_FALLBACK_S   # no report from displayd
-            confirmed = any((t_flip - HB_WIN_PRE_S) <= c <= (t_flip + HB_WIN_POST_S)
-                            for c in self._hb_clusters)
+        while self._heartbeats:
+            hb = self._heartbeats[0]
+            # Judged once its window has closed: HB_EVAL_AGE_S after the command and, when the
+            # flip itself came late (a busy renderer), not before the window around its report
+            # is over — the light of a flip 170 ms after the command lands after HB_EVAL_AGE_S.
+            if (now - hb["t_cmd"]) <= HB_EVAL_AGE_S or (
+                    hb["t_rx"] is not None and now <= hb["t_rx"] + HB_WIN_POST_S):
+                break
+            self._heartbeats.popleft()
+            # The reference is when the flip report reached this Pi: the leader's clock, like
+            # the pulse times. The follower's own flip time (hb["t_flip"]) is not used here.
+            t_ref = hb["t_rx"]
+            if t_ref is None:
+                t_ref = hb["t_cmd"] + HB_FLIP_FALLBACK_S   # no report from displayd
+                self._hb_n_no_report += 1
+            hb["t_light"] = next((c for c in self._hb_clusters
+                                  if (t_ref - HB_WIN_PRE_S) <= c <= (t_ref + HB_WIN_POST_S)),
+                                 None)
+            confirmed = hb["t_light"] is not None
+            self._hb_n += 1
+            if confirmed:
+                self._hb_n_confirmed += 1
+                if hb["t_rx"] is not None:
+                    self._hb_light_lat.append(hb["t_light"] - hb["t_rx"])
             self._hb_judge(hb, confirmed, now)
 
     def _hb_judge(self, hb: dict, confirmed: bool, now: float):
@@ -1210,41 +1299,108 @@ class Leader:
         self._publish({"type": "display_health", "source": "leader",
                        "alarm": alarm, "t": alarm["t"]})
 
-    def _note_hb_flip(self, msg: dict):
-        """displayd's {"type":"hb_flash","seq":k,"t_flip":T}: the flip time of one scheduled
-        heartbeat. Newest-first scan — a duplicate seq lands on the live record."""
+    def _note_hb_flip(self, msg: dict, t_rx: float):
+        """displayd's {"type":"hb_flash","seq":k,"t_flip":T}: one scheduled heartbeat has hit
+        the glass. t_rx — when that report reached this Pi, on this Pi's clock — is what the
+        correlator judges against. T is the follower's clock: kept for the clock-offset
+        estimate only. Newest-first scan; a duplicate report keeps the first arrival."""
         seq = msg.get("seq")
-        t_flip = msg.get("t_flip")
-        if seq is None or t_flip is None:
+        if seq is None:
             return
         for hb in reversed(self._heartbeats):
             if hb["seq"] == seq:
-                try:
-                    hb["t_flip"] = float(t_flip)
-                except (TypeError, ValueError):
-                    pass
+                if hb["t_rx"] is None:
+                    hb["t_rx"] = t_rx
+                    hb["t_flip"] = self._note_clock_offset(msg.get("t_flip"), t_rx)
                 return
 
-    def _note_onset_ack(self, msg: dict):
-        """Remember the display's reported flip time for a trial (the onset anchor used when
-        the photodiode didn't win). Bounded at 50: dicts keep insertion order, so the pop
-        drops the oldest trial."""
-        trial = msg.get("trial")
-        t = msg.get("t")
-        if trial is None or t is None:
-            return
+    def _note_onset_ack(self, msg: dict, t_rx: float):
+        """displayd's {"type":"stim_onset","trial":N,"t":T}: the first flip of a stimulus.
+        Remember when the ack reached this Pi (t_rx, this Pi's clock) as the trial's flip time
+        — the onset anchor used when the photodiode didn't win, and the SHOW -> flip latency.
+        T is the follower's clock: clock-offset estimate only. A duplicate ack keeps the first
+        arrival. Bounded at 50: dicts keep insertion order, so the pop drops the oldest trial."""
         try:
-            self._onset_acks[int(trial)] = float(t)
+            trial = int(msg.get("trial"))
         except (TypeError, ValueError):
             return
+        if trial in self._onset_acks:
+            return
+        self._onset_acks[trial] = t_rx
+        self._note_clock_offset(msg.get("t"), t_rx)
         while len(self._onset_acks) > 50:
             self._onset_acks.pop(next(iter(self._onset_acks)))
+
+    def _note_clock_offset(self, t_follower, t_rx: float):
+        """One sample of (follower clock - leader clock): the flip time displayd wrote into a
+        report minus the time the report arrived here. It reads low by the report's way back
+        (renderer -> displayd -> LAN, about a millisecond). Nothing in the engine depends on
+        the offset; it is measured so that two Pis whose clocks have drifted apart are named
+        as that, once a session, instead of surfacing as a display alarm (as before
+        2026-11-20) or in follower-side times months later. Returns the follower time as a
+        float, None if the report carried none."""
+        try:
+            t_follower = float(t_follower)
+        except (TypeError, ValueError):
+            return None
+        self._clock_offsets.append(t_follower - t_rx)
+        if not self._clock_warned and len(self._clock_offsets) >= HB_CLOCK_WARN_N:
+            last = [self._clock_offsets[i] for i in range(-HB_CLOCK_WARN_N, 0)]
+            med = float(np.median(last))
+            if abs(med) > HB_CLOCK_WARN_S:
+                self._clock_warned = True
+                msg = (f"the follower's clock is {abs(med) * 1000:.0f} ms "
+                       f"{'behind' if med < 0 else 'ahead of'} the leader's. The display "
+                       f"heartbeat and the stimulus onsets are timed on the leader's clock and "
+                       f"are not affected; follower-side times (displayd's log) are off by "
+                       f"that much. Check chrony on both Pis (`chronyc tracking`)")
+                print(f"[clock] {msg}", flush=True)
+                self._publish_display_health("clock_offset", msg, level="warn",
+                                             offset_s=round(med, 6))
+        return t_follower
+
+    def _hb_summary(self):
+        """What this session learned about the display loop, for metadata.yaml (the .h5 root
+        attribute `display_heartbeat`): heartbeats judged / confirmed / judged without a flip
+        report, the delay from a flip report's arrival to the first light, and the follower's
+        clock against this Pi's. None when there is nothing to say (no heartbeat, no ack)."""
+        if not self._hb_n and not self._clock_offsets:
+            return None
+
+        def _ms(vals):
+            a = np.asarray(vals, dtype=float) * 1000.0
+            return {"median": round(float(np.median(a)), 2), "min": round(float(a.min()), 2),
+                    "max": round(float(a.max()), 2), "n": int(a.size)}
+
+        out = {"n": int(self._hb_n), "n_confirmed": int(self._hb_n_confirmed),
+               "n_no_report": int(self._hb_n_no_report),
+               "rx_stamp": "kernel" if self._ack_rx_stamped else "read"}
+        if self._hb_light_lat:
+            out["report_to_light_ms"] = _ms(self._hb_light_lat)
+        if self._clock_offsets:
+            out["follower_clock_offset_ms"] = _ms(self._clock_offsets)
+        return out
+
+    @staticmethod
+    def _hb_summary_text(s: dict) -> str:
+        parts = [f"{s['n_confirmed']}/{s['n']} heartbeats confirmed"]
+        if s.get("n_no_report"):
+            parts.append(f"{s['n_no_report']} judged without a flip report")
+        lat = s.get("report_to_light_ms")
+        if lat:
+            parts.append(f"flip report -> light {lat['median']:.1f} ms "
+                         f"({lat['min']:.1f} to {lat['max']:.1f})")
+        off = s.get("follower_clock_offset_ms")
+        if off:
+            parts.append(f"follower clock {off['median']:+.1f} ms against this Pi "
+                         f"({off['min']:+.1f} to {off['max']:+.1f}, {off['n']} reports)")
+        return "; ".join(parts)
 
     def _await_onset_ack(self, trial: int, budget_s: float):
         """Best-effort: this trial's stim_onset ack, within whatever is LEFT of the per-trial
         onset budget (_sync_timeout_s from SHOW). Costs nothing when the photodiode wait
         already spent it, so the pre-onset wait never grows beyond today's worst case.
-        Returns the acked flip time, or None."""
+        Returns when the ack arrived (this Pi's clock, see _note_onset_ack), or None."""
         if not self._follower_addrs:
             return None
         deadline = time.time() + max(0.0, budget_s)
@@ -1279,20 +1435,20 @@ class Leader:
         # empty case must be one cheap select() — not a raised-and-caught BlockingIOError.
         while select.select([self._ack_sock], [], [], 0)[0]:
             try:
-                data, _addr = self._ack_sock.recvfrom(4096)
+                data, t_rx = _recv_stamped(self._ack_sock)
                 msg = json.loads(data)
             except (OSError, ValueError):   # ValueError covers JSON + non-UTF-8 datagrams
                 continue
             mtype = msg.get("type")
             if mtype == "stim_onset":
                 # Republish to the controller (its stim_onset handler was dormant until the
-                # ack channel became real), and keep it as this trial's onset anchor.
-                self._note_onset_ack(msg)
+                # ack channel became real), and keep its arrival as this trial's onset anchor.
+                self._note_onset_ack(msg, t_rx)
                 self._publish({"type": "stim_onset", "trial": msg.get("trial"),
                                "t": msg.get("t")})
             elif mtype == "hb_flash":
-                # displayd reporting when a scheduled heartbeat actually hit the glass.
-                self._note_hb_flip(msg)
+                # displayd reporting that a scheduled heartbeat has hit the glass.
+                self._note_hb_flip(msg, t_rx)
             elif mtype == "display_health":
                 # displayd's own alarms (DLPC, renderer, optics) — forward verbatim; the
                 # controller's event path is what surfaces and notifies them.
@@ -1465,7 +1621,8 @@ class Leader:
         n = sess.get("n_blocks", sess.get("n_trials", 150) // max(bsize, 1)) * bsize
 
         # Core timing (all f8 for full precision)
-        # onset_ack_latency_s = SHOW -> renderer flip (the command path), from displayd's ack.
+        # onset_ack_latency_s = SHOW -> renderer flip (the command path), timed by the arrival
+        # of displayd's ack on this Pi (so on this Pi's clock, + the ack's ~1 ms way back).
         # display_latency_s - onset_ack_latency_s = flip -> photons (the projector pipeline).
         for name in ["iti_start_t", "stim_onset_t", "response_window_t",
                       "outcome_t", "first_lick_t",
@@ -1513,8 +1670,8 @@ class Leader:
         i = self.trial_num
 
         # Core timing
-        # onset_ack_latency_s = SHOW -> renderer flip (the command path), from displayd's ack.
-        # display_latency_s - onset_ack_latency_s = flip -> photons (the projector pipeline).
+        # onset_ack_latency_s = SHOW -> renderer flip (the command path), timed by the arrival
+        # of displayd's ack on this Pi. display_latency_s - onset_ack_latency_s = flip -> photons.
         for name in ["iti_start_t", "stim_onset_t", "response_window_t",
                       "outcome_t", "first_lick_t",
                       "true_onset_t", "display_latency_s", "onset_ack_latency_s"]:

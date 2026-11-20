@@ -62,7 +62,12 @@
   .device-tab.active { background: #0f3460; }
   .device-tab-label { color: #bcd; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .device-tab.active .device-tab-label { color: #fff; }
-  .device-panels { background: #0f3460; border-radius: 0 0 6px 6px; padding: 6px 8px 8px; }
+  /* A column, so that CSS order can stack the shown cards in the order they were picked. */
+  .device-panels { background: #0f3460; border-radius: 0 0 6px 6px; padding: 6px 8px 8px;
+                   display: flex; flex-direction: column; }
+  .device-panel { display: none; min-width: 0; }
+  .device-panel.shown { display: block; }
+  .device-panel.stacked { border-top: 1px solid #2f5d99; margin-top: 10px; padding-top: 8px; }
   .device-panels .device-card { background: transparent; padding: 4px; margin-bottom: 0;
                                 border-radius: 0; }
   .device-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
@@ -2804,7 +2809,9 @@ function syncLogHeight() {
 }
 window.addEventListener('resize', syncLogHeight);
 
-let activeDeviceTab = null;   // which device tab is currently shown
+// The device cards shown, in the order they were picked: a plain click on a tab shows that card
+// alone, Ctrl+click (Cmd on a Mac) adds a card below the ones shown or takes it out again.
+let shownDeviceTabs = [];
 function devLabel(name) { return (deviceSchemas[name] && deviceSchemas[name].label) || name; }
 
 function renderDeviceList() {
@@ -2818,28 +2825,30 @@ function renderDeviceList() {
     el.innerHTML = '<div style="color:#888; font-size:12px">No devices — add one above.</div>';
     return;
   }
-  if (!activeDeviceTab || !names.includes(activeDeviceTab)) activeDeviceTab = names[0];
+  shownDeviceTabs = shownDeviceTabs.filter(n => names.includes(n));
+  if (!shownDeviceTabs.length) shownDeviceTabs = [names[0]];
 
   // Chrome-style tab strip (status dot + label; dimmed label when the device is off).
   const tabs = names.map(name => {
     const dev = devices[name];
     const ds = deviceState[name] || {};
     const dot = ds.initialized === true ? 'dot-green' : ds.initialized === false ? 'dot-red' : 'dot-gray';
-    const active = name === activeDeviceTab ? ' active' : '';
     const off = (dev.enabled !== false) ? '' : ' style="opacity:0.5"';
-    return `<button class="device-tab${active}" data-device="${name}" title="${devLabel(name)}"
-                    onclick="switchDeviceTab('${name}')">
+    return `<button class="device-tab" data-device="${name}"
+                    title="${devLabel(name)} — Ctrl+click: show it below the cards already open"
+                    onclick="switchDeviceTab('${name}', event)">
       <span class="status-dot ${dot}"></span><span class="device-tab-label"${off}>${devLabel(name)}</span>
     </button>`;
   }).join('');
 
-  // One panel per device; only the active one is shown.
+  // One panel per device; _showDevicePanels() displays the picked ones.
   const panels = names.map(name =>
-    `<div class="device-panel" data-device="${name}" style="display:${name === activeDeviceTab ? 'block' : 'none'}">
+    `<div class="device-panel" data-device="${name}">
       ${renderDeviceCard(name, devices[name], pisReady)}
     </div>`).join('');
 
   el.innerHTML = `<div class="device-tabs">${tabs}</div><div class="device-panels">${panels}</div>`;
+  _showDevicePanels();
   if (intMeasure) renderIntPanel();   // re-hydrate an open intensity-cal panel after a re-render
   updateTestPreview();
   // A re-render replaces every button element, and fresh elements are enabled by default — so a
@@ -2849,13 +2858,30 @@ function renderDeviceList() {
   if (uiBusy) _applyLockState();
 }
 
-// Switch the visible device tab in place (no full re-render, so input state is preserved).
-function switchDeviceTab(name) {
-  activeDeviceTab = name;
-  document.querySelectorAll('#device-list .device-panel').forEach(p =>
-    p.style.display = (p.dataset.device === name) ? 'block' : 'none');
+// Show the picked cards one below the other, in the order they were picked. In place: CSS order,
+// no re-render and no node moved, so input state, a camera preview and the photodiode trace stay.
+function _showDevicePanels() {
+  document.querySelectorAll('#device-list .device-panel').forEach(p => {
+    const i = shownDeviceTabs.indexOf(p.dataset.device);
+    p.classList.toggle('shown', i >= 0);
+    p.classList.toggle('stacked', i > 0);     // a rule above every card but the first
+    p.style.order = i >= 0 ? i : '';
+  });
   document.querySelectorAll('#device-list .device-tab').forEach(t =>
-    t.classList.toggle('active', t.dataset.device === name));
+    t.classList.toggle('active', shownDeviceTabs.includes(t.dataset.device)));
+}
+
+// A click on a device tab. Plain: that card alone. Ctrl / Cmd: add the card at the end, or take
+// it out when it is already shown (the last card stays).
+function switchDeviceTab(name, ev) {
+  if (ev && (ev.ctrlKey || ev.metaKey)) {
+    const i = shownDeviceTabs.indexOf(name);
+    if (i < 0) shownDeviceTabs.push(name);
+    else if (shownDeviceTabs.length > 1) shownDeviceTabs.splice(i, 1);
+  } else {
+    shownDeviceTabs = [name];
+  }
+  _showDevicePanels();
 }
 
 function renderDeviceCard(name, dev, pisReady) {

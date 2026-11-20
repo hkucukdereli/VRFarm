@@ -161,6 +161,13 @@ Each card edits **rig-config** values — pins, addresses, calibration — not t
 parameters. Task parameters live in `experiments/*.yaml` and are edited in the
 experiment UI.
 
+A click on a tab shows that device's card alone. **Ctrl+click** (Cmd on a Mac) on another tab
+adds its card below the ones already open, so several cards are on the page one after the
+other, in the order they were picked — the display's test buttons with the photodiode trace
+right below them, for instance. Ctrl+click on the tab of an open card closes it again (the
+last card stays), and a plain click on any tab goes back to that one card. The tab strip
+itself keeps its alphabetical order.
+
 ### Camera
 
 ![Camera card](images/setup-07-camera.png)
